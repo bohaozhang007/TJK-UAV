@@ -1,0 +1,36 @@
+# Motion limits used while tracking the target.
+motion:
+  max_fb_step_cm: 60.0
+  max_z_step_cm: 40.0
+  max_rotate_deg: 70.0
+  min_fb_step_cm: 10.0
+  min_z_step_cm: 10.0
+  min_rotate_deg: 5.0
+  backward_ratio: 0.25
+
+# Search pattern at each waypoint.
+search:
+  rotation_step_deg: 30.0
+  height_offset_cm: 50.0
+
+# Flight safety thresholds.
+safety:
+  safe_z_cm: 10.0
+  depth_safe_distance_cm: 100.0
+
+# Target approach and convergence settings.
+track:
+  target_stop_ratio: 0.40
+  yaw_only_threshold_deg: 30.0
+  max_exec_iters: 200
+
+# Circular multi-view scan settings.
+scan:
+  num_points: 12
+  radius_cm: 30.0
+
+# GroundingDINO inference settings.
+detection:
+  device: cuda
+  box_threshold: 0.5
+  text_threshold: 0.25

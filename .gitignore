@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+captures/
+test_*/
+.pico_demo/
+.legacy/

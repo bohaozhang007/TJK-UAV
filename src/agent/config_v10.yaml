@@ -1,0 +1,56 @@
+# Motion limits and pixel-error conversion used while tracking the target.
+motion:
+  # Forward/backward action.
+  max_fb_step_cm: 60.0
+  min_reliable_fb_step_cm: 10.0
+  backward_ratio: 0.25
+
+  # Vertical action.
+  max_z_step_cm: 60.0
+  min_reliable_z_step_cm: 5.0
+  z_cm_per_pixel: 0.18
+
+  # Yaw action.
+  max_rotate_deg: 45.0
+  min_reliable_rotate_deg: 3.0
+  rotate_deg_per_pixel: 0.1
+
+# Search pattern at each waypoint.
+search:
+  rotation_step_deg: 30.0
+  height_offset_cm: 50.0
+
+# Generic candidate filtering after detector thresholding and NMS.
+detection:
+  max_candidates_per_frame: 5
+
+# Flight safety thresholds.
+safety:
+  safe_z_cm: 10.0
+  depth_safe_distance_cm: 100.0
+
+# Target approach and convergence settings.
+track:
+  target_stop_ratio: 0.40
+  yaw_only_threshold_deg: 30.0
+  max_exec_iters: 200
+
+# Circular multi-view scan settings.
+scan:
+  num_points: 12
+  radius_cm: 40.0
+  yaw_unit_deg: 4.0
+
+# Detector parameters intended for experiment-time tuning.
+# Every listed value is required; implementation paths and device settings
+# are kept inside the detector adapters.
+detectors:
+  yolo:
+    input_size: 640
+    score_threshold: 0.10
+    nms_iou_threshold: 0.70
+    fp16: true
+
+  grounding_dino:
+    box_threshold: 0.35
+    text_threshold: 0.25
