@@ -77,7 +77,7 @@ track:
 # Circular multi-view scan settings.
 scan:
   num_points: 12
-  radius_cm: 40.0
+  radius_cm: 30.0
   yaw_unit_deg: 4.0
 
 # Detector parameters intended for experiment-time tuning.
