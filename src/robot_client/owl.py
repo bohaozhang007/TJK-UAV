@@ -157,9 +157,6 @@ class OwlClient(BaseClient):
     estimated on the Agent computer and never requested from the drone.
     """
 
-    OUTPUT_WIDTH = 640
-    OUTPUT_HEIGHT = 480
-
     def __init__(
         self,
         host: str = "127.0.0.1",
@@ -224,12 +221,6 @@ class OwlClient(BaseClient):
         frame_rgb = super().capture(include_depth=False, raw=raw)
         if not isinstance(frame_rgb, np.ndarray):
             raise RuntimeError("Robot Server did not return an RGB array")
-        if frame_rgb.shape[:2] != (self.OUTPUT_HEIGHT, self.OUTPUT_WIDTH):
-            frame_rgb = cv2.resize(
-                frame_rgb,
-                (self.OUTPUT_WIDTH, self.OUTPUT_HEIGHT),
-                interpolation=cv2.INTER_AREA,
-            )
         if not include_depth:
             return frame_rgb
         depth_cm = self._depth_service.estimate_depth_cm(frame_rgb)

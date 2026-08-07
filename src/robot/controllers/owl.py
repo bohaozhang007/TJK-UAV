@@ -27,8 +27,7 @@ class OwlController:
     LANDING_TASK_ID = 21
     NAVIGATION_TASK_ID = 105
     DRONE_ID = 0
-    OUTPUT_WIDTH = 640
-    OUTPUT_HEIGHT = 480
+    OUTPUT_LONG_EDGE = 640
     JPEG_QUALITY = 85
     POSITION_TOLERANCE_CM = 40.0
     POSITION_STABLE_SAMPLES = 3
@@ -691,11 +690,18 @@ class OwlController:
                 raise RuntimeError(
                     f"failed to decode compressed OWL image format={image_format!r}"
                 )
-            if frame_bgr.shape[:2] != (self.OUTPUT_HEIGHT, self.OUTPUT_WIDTH):
+            height, width = frame_bgr.shape[:2]
+            long_edge = max(height, width)
+            if long_edge != self.OUTPUT_LONG_EDGE:
+                scale = self.OUTPUT_LONG_EDGE / float(long_edge)
+                output_width = max(1, int(round(width * scale)))
+                output_height = max(1, int(round(height * scale)))
                 frame_bgr = cv2.resize(
                     frame_bgr,
-                    (self.OUTPUT_WIDTH, self.OUTPUT_HEIGHT),
-                    interpolation=cv2.INTER_AREA,
+                    (output_width, output_height),
+                    interpolation=(
+                        cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+                    ),
                 )
             return frame_bgr
 
