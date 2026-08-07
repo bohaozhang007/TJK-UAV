@@ -74,7 +74,7 @@ scan:
 detectors:
   yolo:
     input_size: 640
-    score_threshold: 0.10
+    score_threshold: 0.05 # 0.1
     nms_iou_threshold: 0.70
     fp16: true
 
