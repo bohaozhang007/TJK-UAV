@@ -20,7 +20,7 @@ mission:
       yaw_deg: 0.0
 
     - name: waypoint_2
-      x_cm: 100.0
+      x_cm: 250.0
       y_cm: 0.0
       z_cm: 0.0
       yaw_deg: 0.0
@@ -34,12 +34,12 @@ motion:
 
   # Vertical action.
   max_z_step_cm: 60.0
-  min_reliable_z_step_cm: 5.0
+  min_reliable_z_step_cm: 10.0
   z_cm_per_pixel: 0.18
 
   # Yaw action.
   max_rotate_deg: 45.0
-  min_reliable_rotate_deg: 3.0
+  min_reliable_rotate_deg: 5.0
   rotate_deg_per_pixel: 0.1
 
 # Flight safety thresholds.

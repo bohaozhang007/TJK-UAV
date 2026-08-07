@@ -2266,9 +2266,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--client",
+        "--robot",
+        dest="client",
         choices=("tello", "ue", "owl"),
         default="ue",
-        help="Robot client to use: tello, ue, or owl (default: ue)",
+        help=(
+            "Robot to use: tello, ue, or owl; --robot is an alias for "
+            "--client (default: ue)"
+        ),
     )
     parser.add_argument(
         "--server-host",
