@@ -6,7 +6,7 @@ from typing import Any, Protocol
 class VelocityController(Protocol):
     def velocity(self, x: int, y: int, z: int, yaw: int) -> dict[str, Any]: ...
 
-    def end(self) -> dict[str, Any]: ...
+    def land(self) -> dict[str, Any]: ...
 
     def health(self) -> dict[str, Any]: ...
 
@@ -73,7 +73,7 @@ class KeyboardOp:
         self._land_requested.clear()
         listener = None
         final_error = ""
-        end_result: dict[str, Any] | None = None
+        land_result: dict[str, Any] | None = None
 
         def key_char(key: Any) -> str:
             char = getattr(key, "char", "")
@@ -131,10 +131,10 @@ class KeyboardOp:
                 final_error = final_error or str(exc)
             if self._land_requested.is_set():
                 try:
-                    end_result = self.controller.end()
-                    if not end_result.get("ok", False):
+                    land_result = self.controller.land()
+                    if not land_result.get("ok", False):
                         final_error = final_error or str(
-                            end_result.get("error") or "landing and shutdown failed"
+                            land_result.get("error") or "landing failed"
                         )
                 except Exception as exc:
                     final_error = final_error or str(exc)
@@ -146,14 +146,14 @@ class KeyboardOp:
 
         if final_error:
             response = {"ok": False, "error": final_error, **self.state()}
-            if end_result is not None:
-                response["end"] = end_result
+            if land_result is not None:
+                response["land"] = land_result
             return response
-        if end_result is not None:
+        if land_result is not None:
             return {
                 "ok": True,
-                "message": "keyboard operation landed and ended",
-                "end": end_result,
+                "message": "keyboard operation landed",
+                "land": land_result,
                 **self.state(),
             }
         return {"ok": True, "message": "keyboard operation stopped", **self.state()}

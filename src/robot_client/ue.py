@@ -1,5 +1,7 @@
 """Client for the Unreal Engine simulator Robot Server."""
 
+from __future__ import annotations
+
 from .base import BaseClient, JsonObject
 
 

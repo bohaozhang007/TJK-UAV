@@ -1,6 +1,4 @@
-# 1. SEARCH 仅使用 detector box，不运行 SAM 或获取 depth
-# 2. SELECT 面积优先；面积接近时按置信度选择
-# 3. sam 抽象为 tracker
+# v13：区分任务失败与飞行安全能力失效，分别执行返航后降落或立即降落。
 
 from __future__ import annotations
 
@@ -85,13 +83,21 @@ class AgentState(str, Enum):
     RETURN_WAYPOINT = "RETURN_WAYPOINT"
 
 
+class TaskFailure(RuntimeError):
+    """The task cannot continue, while controlled return is still possible."""
+
+
+class FlightSafetyError(RuntimeError):
+    """Positioning, control, health, or Robot Server capability is unavailable."""
+
+
 def _timestamped_experiment_dir(exp_name: str, timestamp: str) -> Path:
     return Path(f"{Path(exp_name).expanduser()}_{timestamp}")
 
 
 def _configure_logger(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("tjk_v11")
+    logger = logging.getLogger("tjk_v13")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
@@ -286,8 +292,11 @@ class TJKAgent:
         )
 
     def connect(self):
-        self.client.start()
-        frame = self.client.capture(include_depth=False)
+        self._call_flight_operation("start", self.client.start)
+        frame = self._capture_for_task(
+            include_depth=False,
+            context="connect RGB readiness",
+        )
         height, width = frame.shape[:2]
 
         self.img_height = height
@@ -298,19 +307,35 @@ class TJKAgent:
         self.tracker.set_img_size(height, width)
         print(f"[ROBOT-INFO] RGB resolution: {width}x{height}")
 
-        pose = self.client.get_pose()
+        pose = self._get_pose_for_flight("connect pose readiness")
 
         x = float(pose["x"])
         y = float(pose["y"])
         z = float(pose["z"])
         yaw = float(pose["yaw"])
-        pose_str = f"x={x:.2f}, y={y:.2f}, z={z:.2f}, yaw={yaw:.2f}"
+        pose_str = (
+            f"x={x:.2f}cm, y={y:.2f}cm, z={z:.2f}cm, yaw={yaw:.2f}deg"
+        )
 
         print(f"[ROBOT-INFO] Connected to {self.client.base_url}; pose: {pose_str}")
 
     def run(self, text_prompt):
-        """Run one waypoint task without ending the client or simulation."""
-        prompt_updated = self.detector.set_prompt(text_prompt)
+        """Run one waypoint task and distinguish task from safety failures."""
+        self.waypoint_pose = self._get_pose_for_flight("save waypoint")
+        self._log(
+            "[WAYPOINT] Saved initial pose: "
+            f"x={self.waypoint_pose['x']:.2f}cm, "
+            f"y={self.waypoint_pose['y']:.2f}cm, "
+            f"z={self.waypoint_pose['z']:.2f}cm, "
+            f"yaw={self.waypoint_pose['yaw']:.2f}deg"
+        )
+
+        try:
+            prompt_updated = self.detector.set_prompt(text_prompt)
+        except Exception as exc:
+            return self._recover_from_task_failure(
+                TaskFailure(f"detector prompt setup failed: {exc}")
+            )
         cache_builds = getattr(self.detector, "prompt_cache_builds", None)
         cache_text = (
             f" cache_builds={cache_builds}"
@@ -322,61 +347,71 @@ class TJKAgent:
             f"prompt={text_prompt!r} prompt_updated={prompt_updated}"
             f"{cache_text}"
         )
-        self.waypoint_pose = self.client.get_pose()
-        self._log(
-            "[WAYPOINT] Saved initial pose: "
-            f"x={self.waypoint_pose['x']:.2f}, y={self.waypoint_pose['y']:.2f}, "
-            f"z={self.waypoint_pose['z']:.2f}, yaw={self.waypoint_pose['yaw']:.2f}"
-        )
-
         search_succeeded = False
         select_succeeded = False
         track_succeeded = False
         scan_succeeded = False
         self.state = AgentState.SEARCH
 
-        try:
-            while True:
-                self._log(f"[STATE] Enter {self.state.value}")
-
+        while True:
+            self._log(f"[STATE] Enter {self.state.value}")
+            try:
                 if self.state == AgentState.SEARCH:
-                    search_succeeded = self.search()
+                    search_succeeded = self._run_task_stage(
+                        "search",
+                        self.search,
+                    )
                     self.state = (
                         AgentState.SELECT
                         if search_succeeded
                         else AgentState.RETURN_WAYPOINT
                     )
                 elif self.state == AgentState.SELECT:
-                    select_succeeded = self.select()
+                    select_succeeded = self._run_task_stage(
+                        "select",
+                        self.select,
+                    )
                     self.state = (
                         AgentState.TRACK
                         if select_succeeded
                         else AgentState.RETURN_WAYPOINT
                     )
                 elif self.state == AgentState.TRACK:
-                    track_succeeded = self.track()
+                    track_succeeded = self._run_task_stage(
+                        "track",
+                        self.track,
+                    )
                     self.state = (
                         AgentState.SCAN
                         if track_succeeded
                         else AgentState.RETURN_WAYPOINT
                     )
                 elif self.state == AgentState.SCAN:
-                    scan_succeeded = self.scan()
+                    scan_succeeded = self._run_task_stage(
+                        "scan",
+                        self.scan,
+                    )
                     self.state = AgentState.RETURN_WAYPOINT
                 elif self.state == AgentState.RETURN_WAYPOINT:
                     self.return_waypoint()
                     break
-        except Exception:
-            # An inference or tracking failure must not strand the drone away
-            # from the waypoint. Preserve the original exception after return.
-            if self.state != AgentState.RETURN_WAYPOINT:
+            except FlightSafetyError as exc:
                 self._log(
-                    f"[STATE] {self.state.value} failed; enter "
-                    f"{AgentState.RETURN_WAYPOINT.value}"
+                    f"[SAFETY] state={self.state.value} capability lost: {exc}; "
+                    "skip waypoint return and request landing."
                 )
-                self.state = AgentState.RETURN_WAYPOINT
-                self.return_waypoint()
-            raise
+                raise
+            except TaskFailure as exc:
+                return self._recover_from_task_failure(exc)
+            except Exception as exc:
+                safety_error = FlightSafetyError(
+                    f"state={self.state.value} unclassified failure: {exc}"
+                )
+                self._log(
+                    f"[SAFETY] {safety_error}; skip waypoint return and "
+                    "request landing."
+                )
+                raise safety_error from exc
 
         succeeded = (
             search_succeeded
@@ -391,6 +426,113 @@ class TJKAgent:
             f"scan_completed={scan_succeeded}."
         )
         return succeeded
+
+    def _call_flight_operation(self, operation, callback):
+        try:
+            return callback()
+        except FlightSafetyError:
+            raise
+        except Exception as exc:
+            raise FlightSafetyError(f"{operation} failed: {exc}") from exc
+
+    def _run_task_stage(self, stage, callback):
+        try:
+            return callback()
+        except FlightSafetyError:
+            raise
+        except TaskFailure:
+            raise
+        except Exception as exc:
+            raise TaskFailure(f"{stage} task processing failed: {exc}") from exc
+
+    def _get_pose_for_flight(self, context):
+        return self._call_flight_operation(
+            context,
+            self.client.get_pose,
+        )
+
+    def _flight_health(self, context):
+        result = self._call_flight_operation(
+            f"{context} health query",
+            self.client.health,
+        )
+        if result.get("ok", True) is False:
+            detail = result.get("error") or result.get("message") or result
+            raise FlightSafetyError(f"{context} health failed: {detail}")
+        health = result.get("health", result)
+        if not isinstance(health, dict):
+            raise FlightSafetyError(
+                f"{context} health response does not contain a health object"
+            )
+        return health
+
+    def _ensure_flight_safety(self, context):
+        health = self._flight_health(context)
+        missing = [
+            name
+            for name in ("initialized", "airborne")
+            if health.get(name) is not True
+        ]
+        optional_capabilities = (
+            "control_ready",
+            "odom_ok",
+            "rgb_ok",
+            "control_link_ok",
+            "goal_link_ok",
+            "yaw_link_ok",
+            "state_ok",
+            "extended_state_ok",
+        )
+        missing.extend(
+            name
+            for name in optional_capabilities
+            if name in health and health.get(name) is not True
+        )
+        if missing:
+            raise FlightSafetyError(
+                f"{context} flight capability unavailable: "
+                + ", ".join(missing)
+            )
+        return health
+
+    def _capture_for_task(self, include_depth, context):
+        try:
+            return self.client.capture(include_depth=include_depth)
+        except FlightSafetyError:
+            raise
+        except Exception as exc:
+            try:
+                self._ensure_flight_safety(f"after {context} failure")
+            except FlightSafetyError as safety_exc:
+                raise FlightSafetyError(
+                    f"{context} failed: {exc}; {safety_exc}"
+                ) from exc
+            raise TaskFailure(f"{context} failed: {exc}") from exc
+
+    def _recover_from_task_failure(self, failure):
+        self._log(
+            f"[TASK-FAILURE] state={self.state.value}: {failure}; "
+            "attempt waypoint return."
+        )
+        if self.waypoint_pose is None:
+            self._log(
+                "[TASK-FAILURE] Waypoint is unavailable; skip return and "
+                "request landing."
+            )
+            return False
+
+        self._ensure_flight_safety("before task-failure waypoint return")
+        self.state = AgentState.RETURN_WAYPOINT
+        try:
+            self.return_waypoint()
+        except FlightSafetyError:
+            raise
+        except Exception as exc:
+            raise FlightSafetyError(
+                f"task-failure waypoint return failed: {exc}"
+            ) from exc
+        self._log("[TASK-FAILURE] Waypoint return completed; request landing.")
+        return False
 
     def search(self):
         """Collect detector boxes without running SAM or requesting depth."""
@@ -425,7 +567,10 @@ class TJKAgent:
             for i in range(self.search_rotation_count):
                 view_idx = height_idx * self.search_rotation_count + i
                 capture_started = time.perf_counter()
-                cur_frame = self.client.capture(include_depth=False)
+                cur_frame = self._capture_for_task(
+                    include_depth=False,
+                    context=f"search view={view_idx} RGB capture",
+                )
                 capture_rgb_s = time.perf_counter() - capture_started
                 detection_started = time.perf_counter()
                 all_detections = self.detect(cur_frame)
@@ -451,7 +596,9 @@ class TJKAgent:
 
                 if detections:
                     candidate_pose = self._copy_pose(
-                        self.client.get_pose()
+                        self._get_pose_for_flight(
+                            f"search view={view_idx} candidate pose"
+                        )
                     )
                     image_height, image_width = cur_frame.shape[:2]
                     image_area = float(image_height * image_width)
@@ -596,35 +743,40 @@ class TJKAgent:
             f"box_area={selected['box_area_ratio']:.3%} "
             f"confidence={selected['confidence']:.3f} "
             f"similar_area_candidates={len(similar_area_candidates)} "
-            f"pose=(x={selected_pose['x']:.2f}, "
-            f"y={selected_pose['y']:.2f}, z={selected_pose['z']:.2f}, "
-            f"yaw={selected_pose['yaw']:.2f})"
+            f"pose=(x={selected_pose['x']:.2f}cm, "
+            f"y={selected_pose['y']:.2f}cm, z={selected_pose['z']:.2f}cm, "
+            f"yaw={selected_pose['yaw']:.2f}deg)"
         )
         self._move_to_pose_hybrid(
             selected_pose,
             context=f"select candidate={selected['candidate_idx']}",
         )
 
-        actual_pose = self._copy_pose(self.client.get_pose())
+        actual_pose = self._copy_pose(
+            self._get_pose_for_flight("select candidate pose")
+        )
         pose_error = self._calculate_pose_error(
             selected_pose,
             actual_pose,
         )
         self._log(
             "[SELECT] Candidate pose reached: "
-            f"target=(x={selected_pose['x']:.2f}, "
-            f"y={selected_pose['y']:.2f}, z={selected_pose['z']:.2f}, "
-            f"yaw={selected_pose['yaw']:.2f}) "
-            f"actual=(x={actual_pose['x']:.2f}, "
-            f"y={actual_pose['y']:.2f}, z={actual_pose['z']:.2f}, "
-            f"yaw={actual_pose['yaw']:.2f}) "
+            f"target=(x={selected_pose['x']:.2f}cm, "
+            f"y={selected_pose['y']:.2f}cm, z={selected_pose['z']:.2f}cm, "
+            f"yaw={selected_pose['yaw']:.2f}deg) "
+            f"actual=(x={actual_pose['x']:.2f}cm, "
+            f"y={actual_pose['y']:.2f}cm, z={actual_pose['z']:.2f}cm, "
+            f"yaw={actual_pose['yaw']:.2f}deg) "
             f"error={self._format_motion_error(pose_error)}"
         )
 
         # Re-detect at the actual reached pose. The prompt embeddings are
         # already cached, and the stale search box is not reused.
         capture_started = time.perf_counter()
-        cur_frame = self.client.capture(include_depth=False)
+        cur_frame = self._capture_for_task(
+            include_depth=False,
+            context="select RGB capture",
+        )
         capture_s = time.perf_counter() - capture_started
         detector_started = time.perf_counter()
         all_detections = self.detect(cur_frame)
@@ -786,7 +938,10 @@ class TJKAgent:
                 break
 
             capture_started = time.perf_counter()
-            frame_rgb, depth_raw = self.client.capture(include_depth=True)
+            frame_rgb, depth_raw = self._capture_for_task(
+                include_depth=True,
+                context=f"track iteration={iterations} RGB/depth capture",
+            )
             capture_s = time.perf_counter() - capture_started
             track_frame_idx = self.tracker.frame_idx
             tracker_started = time.perf_counter()
@@ -811,7 +966,9 @@ class TJKAgent:
                 "depth_raw": depth_raw,
                 "bbox": np.asarray(bbox).copy(),
                 "mask": np.asarray(mask).copy(),
-                "pose": self.client.get_pose(),
+                "pose": self._get_pose_for_flight(
+                    f"track iteration={iterations} observation pose"
+                ),
             }
 
             angle_to_rotate = self.prepare_rotate_action_deg(horizontal_offset)
@@ -947,15 +1104,16 @@ class TJKAgent:
     def return_waypoint(self):
         """Return to the saved pose with one relative XYZ/yaw command."""
         if self.waypoint_pose is None:
-            raise RuntimeError("Waypoint pose is unavailable; call run() first")
+            raise TaskFailure("Waypoint pose is unavailable; call run() first")
 
+        self._ensure_flight_safety("return waypoint")
         target = self.waypoint_pose
         self._move_to_pose_hybrid(
             target,
             context="return_waypoint",
         )
 
-        final_pose = self.client.get_pose()
+        final_pose = self._get_pose_for_flight("verify waypoint return pose")
         position_error_cm = float(
             np.linalg.norm(
                 [
@@ -970,8 +1128,8 @@ class TJKAgent:
         )
         self._log(
             "[WAYPOINT] Return completed: "
-            f"x={final_pose['x']:.2f}, y={final_pose['y']:.2f}, "
-            f"z={final_pose['z']:.2f}, yaw={final_pose['yaw']:.2f}, "
+            f"x={final_pose['x']:.2f}cm, y={final_pose['y']:.2f}cm, "
+            f"z={final_pose['z']:.2f}cm, yaw={final_pose['yaw']:.2f}deg, "
             f"position_error={position_error_cm:.2f}cm, "
             f"yaw_error={yaw_error_deg:.2f}deg"
         )
@@ -1074,7 +1232,7 @@ class TJKAgent:
         self._command_idx += 1
         command_idx = self._command_idx
         self._last_motion_command_id = command_idx
-        pose = self.client.get_pose()
+        pose = self._get_pose_for_flight(f"{context or action.value} start pose")
         command = self._format_motion_command(dx_cm, dy_cm, dz_cm, dyaw_deg)
         last_error = self._format_motion_error(
             getattr(self, "last_motion_error", None)
@@ -1083,14 +1241,14 @@ class TJKAgent:
         self._log(
             f"[COMMAND] id={command_idx} action={action.value} "
             f"command={command} "
-            f"pose=(x={float(pose['x']):.2f}, y={float(pose['y']):.2f}, "
-            f"z={float(pose['z']):.2f}, yaw={float(pose['yaw']):.2f}) "
+            f"pose=(x={float(pose['x']):.2f}cm, y={float(pose['y']):.2f}cm, "
+            f"z={float(pose['z']):.2f}cm, yaw={float(pose['yaw']):.2f}deg) "
             f"last_error={last_error}{context_text}"
         )
         execution_started = time.perf_counter()
         try:
             result = operation()
-        except Exception:
+        except Exception as exc:
             drone_execution_s = time.perf_counter() - execution_started
             self._last_motion_timing = {
                 "drone_execution_s": drone_execution_s,
@@ -1101,9 +1259,13 @@ class TJKAgent:
                     command_id=command_idx,
                     execution=drone_execution_s,
                 )
-            raise
+            raise FlightSafetyError(
+                f"{context or action.value} motion command failed: {exc}"
+            ) from exc
         drone_execution_s = time.perf_counter() - execution_started
-        end_pose = self.client.get_pose()
+        end_pose = self._get_pose_for_flight(
+            f"{context or action.value} completion pose"
+        )
         self.last_motion_error = self._calculate_motion_error(
             pose,
             end_pose,
@@ -1155,7 +1317,7 @@ class TJKAgent:
         return -self.backward_ratio * self.max_fb_step_cm
 
     def get_current_z_cm(self) -> Optional[float]:
-        pose = self.client.get_pose()
+        pose = self._get_pose_for_flight("current altitude")
         return float(pose["z"])
 
     def check_box_offset(self, bbox):
@@ -1206,7 +1368,11 @@ class TJKAgent:
 
     def _relative_pose_delta(self, target_pose, current_pose=None):
         """Convert a world-frame target pose to one body-relative command."""
-        pose = self.client.get_pose() if current_pose is None else current_pose
+        pose = (
+            self._get_pose_for_flight("relative pose calculation")
+            if current_pose is None
+            else current_pose
+        )
         world_dx_cm = float(target_pose["x"]) - float(pose["x"])
         world_dy_cm = float(target_pose["y"]) - float(pose["y"])
         yaw_rad = np.radians(float(pose["yaw"]))
@@ -1292,25 +1458,30 @@ class TJKAgent:
             "[SCAN] Planned simple clock trajectory: "
             f"points={self.scan_num_points} radius={self.scan_radius_cm:.2f}cm "
             f"yaw_unit={self.scan_yaw_unit_deg:.2f}deg "
-            f"center=(x={float(pose['x']):.2f}, y={float(pose['y']):.2f}, "
-            f"z={float(pose['z']):.2f}, yaw={float(pose['yaw']):.2f}) "
+            f"center=(x={float(pose['x']):.2f}cm, y={float(pose['y']):.2f}cm, "
+            f"z={float(pose['z']):.2f}cm, yaw={float(pose['yaw']):.2f}deg) "
             f"yaw_offsets_deg=({yaw_offsets})"
         )
         return trajectory
 
     def _capture_scan_point(self, clock_hour, motion_timing):
         capture_started = time.perf_counter()
-        frame_rgb = self.client.capture(include_depth=False)
+        frame_rgb = self._capture_for_task(
+            include_depth=False,
+            context=f"scan clock_hour={clock_hour} RGB capture",
+        )
         capture_rgb_s = time.perf_counter() - capture_started
         image_path = Path(self.vis_dir) / f"scan_{clock_hour:02d}.png"
         save_image_started = time.perf_counter()
         Image.fromarray(frame_rgb).save(image_path)
         save_image_s = time.perf_counter() - save_image_started
-        pose = self.client.get_pose()
+        pose = self._get_pose_for_flight(
+            f"scan clock_hour={clock_hour} pose"
+        )
         self._log(
             f"[SCAN] Captured clock_hour={clock_hour} image={image_path} "
-            f"pose=(x={pose['x']:.2f}, y={pose['y']:.2f}, "
-            f"z={pose['z']:.2f}, yaw={pose['yaw']:.2f})"
+            f"pose=(x={pose['x']:.2f}cm, y={pose['y']:.2f}cm, "
+            f"z={pose['z']:.2f}cm, yaw={pose['yaw']:.2f}deg)"
         )
         total_s = (
             motion_timing["drone_execution_s"]
@@ -1675,16 +1846,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        default=str(Path(__file__).with_name("config_v11.yaml")),
+        default=str(Path(__file__).with_name("config_v13.yaml")),
         help="Required agent YAML config path",
     )
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="./test",
+        default=str(Path(__file__).resolve().parents[2] / "logs" / "test"),
         help=(
             "Experiment directory prefix; a timestamp suffix is added "
-            "automatically (default: ./test)"
+            "automatically (default: repository logs/test)"
         ),
     )
     parser.add_argument(
@@ -1731,6 +1902,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _land_after_task(client: BaseClient, logger: logging.Logger) -> dict:
+    result = client.land()
+    if not result.get("ok", False):
+        raise RuntimeError(
+            "Robot land failed: "
+            + str(result.get("error") or result.get("message") or result)
+        )
+    logger.info(f"[LAND] {result.get('message', 'landed')}")
+    return result
+
+
 def main():
     args = _build_arg_parser().parse_args()
     # Validate the required config before creating logs, clients, or models.
@@ -1772,8 +1954,20 @@ def main():
         detector_name=args.det,
         tracker_name=args.trk,
     )
-    tjkAgent.connect()
-    tjkAgent.run(args.obj)
+    try:
+        tjkAgent.connect()
+        task_succeeded = tjkAgent.run(args.obj)
+        logger.info(
+            f"[TASK-RESULT] succeeded={task_succeeded}; request landing."
+        )
+    except BaseException:
+        try:
+            _land_after_task(client, logger)
+        except Exception:
+            logger.exception("[LAND] failed while handling Agent exception")
+        raise
+    else:
+        _land_after_task(client, logger)
 
 if __name__ == "__main__":
     main()

@@ -47,6 +47,8 @@ class RobotController(VelocityController, Protocol):
 
     def get_pose(self) -> dict[str, Any]: ...
 
+    def close(self) -> dict[str, Any]: ...
+
 
 class Keepalive(Protocol):
     def start_keepalive(self) -> None: ...
@@ -290,9 +292,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 result = self.controller.rotate(**params)
             elif path == "/get_pose":
                 result = self.controller.get_pose()
-            elif path == "/end":
-                self.keepalive.stop_keepalive()   # 停止心跳
-                result = self.controller.end()
+            elif path == "/land":
+                result = self.controller.land()
+            elif path == "/close":
+                self.keepalive.stop_keepalive()
+                result = self.controller.close()
             elif path == "/health":
                 result = {"ok": True, "health": self.controller.health()}
             else:
@@ -335,7 +339,8 @@ def run_console(
     print(
         "Headless console ready. Commands: "
         "init | takeoff | k | get_rgb_meta | get_depth_meta | get_pose | "
-        "health | land | end | quit"
+        "move_rel_xyz X Y Z | move_rel_xyz_yaw X Y Z YAW | "
+        "rotate YAW | health | land | close | quit"
     )
     while True:
         try:
@@ -346,11 +351,12 @@ def run_console(
         if not raw:
             continue
 
-        cmd = raw.lower()
+        parts = raw.split()
+        cmd = parts[0].lower()
         try:
             if cmd in {"quit", "exit"}:
-                keepalive.stop_keepalive()  # 停止心跳
-                controller.end()
+                keepalive.stop_keepalive()
+                print(controller.close())
                 print("bye")
                 break
             if cmd == "init":
@@ -384,11 +390,36 @@ def run_console(
                 print(controller.get_depth_meta(save=True))
             elif cmd == "get_pose":
                 print(controller.get_pose())
+            elif cmd in {"move_rel_xyz", "move_relative_xyz"}:
+                if len(parts) != 4:
+                    raise ValueError("usage: move_rel_xyz X_CM Y_CM Z_CM")
+                x, y, z = (int(value) for value in parts[1:])
+                print(controller.move_relative_xyz(x=x, y=y, z=z))
+            elif cmd in {"move_rel_xyz_yaw", "move_relative_xyz_yaw"}:
+                if len(parts) != 5:
+                    raise ValueError(
+                        "usage: move_rel_xyz_yaw X_CM Y_CM Z_CM YAW_DEG"
+                    )
+                x, y, z, yaw = (int(value) for value in parts[1:])
+                print(
+                    controller.move_relative_xyz_yaw(
+                        x=x,
+                        y=y,
+                        z=z,
+                        yaw=yaw,
+                    )
+                )
+            elif cmd == "rotate":
+                if len(parts) != 2:
+                    raise ValueError("usage: rotate YAW_DEG")
+                print(controller.rotate(angle_deg=int(parts[1])))
             elif cmd == "health":
                 print({"ok": True, "health": controller.health()})
-            elif cmd in {"land", "end"}:
-                keepalive.stop_keepalive()  # 停止心跳
-                print(controller.end())
+            elif cmd == "land":
+                print(controller.land())
+            elif cmd == "close":
+                keepalive.stop_keepalive()
+                print(controller.close())
             else:
                 print("unknown command")
         except Exception as exc:
@@ -433,7 +464,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--vdir",
-        default=str(Path(__file__).resolve().parent / "captures"),
+        default=str(Path(__file__).resolve().parents[2] / "captures"),
         help="Directory for captured RGB images and depth data",
     )
     return parser
@@ -460,16 +491,30 @@ def main():
     print(
         "Endpoints: /init /takeoff /get_rgb_meta /get_rgb_byte "
         "/get_depth_meta /get_depth_np /velocity /move_relative_xyz "
-        "/move_relative_xyz_yaw /rotate /get_pose /end /health "
+        "/move_relative_xyz_yaw /rotate /get_pose /land /close /health "
         "/video_feed /preview"
     )
 
     try:
         run_console(controller, keepalive, keyboard_op)
     finally:
-        keepalive.stop_thread() # 安全退出心跳线程
-        server.shutdown()
-        server.server_close()
+        keepalive.stop_keepalive()
+        try:
+            close_result = controller.close()
+            if not close_result.get("ok", False):
+                print(
+                    {
+                        "ok": False,
+                        "error": "controller close failed",
+                        "result": close_result,
+                    }
+                )
+        except Exception as exc:
+            print({"ok": False, "error": f"controller close failed: {exc}"})
+        finally:
+            keepalive.stop_thread() # 安全退出心跳线程
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

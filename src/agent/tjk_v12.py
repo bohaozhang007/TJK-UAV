@@ -1,6 +1,4 @@
-# 1. SEARCH 仅使用 detector box，不运行 SAM 或获取 depth
-# 2. SELECT 面积优先；面积接近时按置信度选择
-# 3. sam 抽象为 tracker
+# v12：任务正常结束或异常退出前统一请求 land，不关闭 Robot Server。
 
 from __future__ import annotations
 
@@ -91,7 +89,7 @@ def _timestamped_experiment_dir(exp_name: str, timestamp: str) -> Path:
 
 def _configure_logger(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("tjk_v11")
+    logger = logging.getLogger("tjk_v12")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
@@ -1675,7 +1673,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        default=str(Path(__file__).with_name("config_v11.yaml")),
+        default=str(Path(__file__).with_name("config_v12.yaml")),
         help="Required agent YAML config path",
     )
     parser.add_argument(
@@ -1731,6 +1729,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _land_after_task(client: BaseClient, logger: logging.Logger) -> dict:
+    result = client.land()
+    if not result.get("ok", False):
+        raise RuntimeError(
+            "Robot land failed: "
+            + str(result.get("error") or result.get("message") or result)
+        )
+    logger.info(f"[LAND] {result.get('message', 'landed')}")
+    return result
+
+
 def main():
     args = _build_arg_parser().parse_args()
     # Validate the required config before creating logs, clients, or models.
@@ -1772,8 +1781,17 @@ def main():
         detector_name=args.det,
         tracker_name=args.trk,
     )
-    tjkAgent.connect()
-    tjkAgent.run(args.obj)
+    try:
+        tjkAgent.connect()
+        tjkAgent.run(args.obj)
+    except BaseException:
+        try:
+            _land_after_task(client, logger)
+        except Exception:
+            logger.exception("[LAND] failed while handling Agent exception")
+        raise
+    else:
+        _land_after_task(client, logger)
 
 if __name__ == "__main__":
     main()

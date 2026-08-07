@@ -344,7 +344,7 @@ class TJKAgent:
         else:
             print("[RES] Stopped before confirmed target because motion appears stalled or loop limit was reached.")
 
-        self.client.end()
+        self.client.land()
 
     def run(self, text_prompt):
         self.init_tracker(text_prompt)

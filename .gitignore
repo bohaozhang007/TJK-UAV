@@ -1,4 +1,11 @@
 __pycache__/
 *.py[cod]
-captures/
-test_*/
+*.log
+
+# Local-only tests and runtime artifacts.
+/tests/
+/logs/
+/captures/
+/test_*/
+/tjk_vis*/
+/.log*/

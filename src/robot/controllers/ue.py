@@ -300,16 +300,45 @@ class UEController:
             },
         }
 
-    def end(self) -> dict[str, Any]:
+    def land(self) -> dict[str, Any]:
+        with self._operation_lock:
+            if not self._sim.connected:
+                return {
+                    "ok": True,
+                    "message": "simulator is not connected; no landing command sent",
+                    "health": self.health(),
+                }
+            if not self._sim.airborne:
+                return {
+                    "ok": True,
+                    "message": "already landed; simulator communication remains active",
+                    "health": self.health(),
+                }
+            result = self._sim.land()
+            return {
+                "ok": bool(result.get("ok", True)),
+                "message": result.get(
+                    "message",
+                    "landed; simulator communication remains active",
+                ),
+                "pose": self._pose_copy(result.get("pose") or self._sim.get_pose()),
+                "health": self.health(),
+            }
+
+    def close(self) -> dict[str, Any]:
         with self._operation_lock:
             if not self._sim.connected:
                 self._xy_origin = None
-                return {"ok": True, "message": "already ended", "health": self.health()}
+                return {"ok": True, "message": "already closed", "health": self.health()}
 
             first_error: Exception | None = None
             if self._sim.airborne:
                 try:
-                    self._sim.land()
+                    landing = self.land()
+                    if not landing.get("ok", False):
+                        first_error = RuntimeError(
+                            str(landing.get("error") or landing.get("message"))
+                        )
                 except Exception as exc:
                     first_error = exc
             result = self._sim.close()
@@ -319,11 +348,11 @@ class UEController:
             if first_error is not None:
                 return {
                     "ok": False,
-                    "message": "ended with cleanup error",
+                    "message": "closed with landing or cleanup error",
                     "error": str(first_error),
                     "health": self.health(),
                 }
-            return {"ok": True, "message": "ended", "health": self.health()}
+            return {"ok": True, "message": "closed", "health": self.health()}
 
     def health(self) -> dict[str, Any]:
         return dict(self._sim.health())

@@ -14,9 +14,8 @@ from .tello import TelloClient
 class OwlClient(TelloClient):
     """OWL HTTP client with client-side DA3 metric depth estimation.
 
-    OWL and Tello use the same client-side RGB-to-depth pipeline. Motion is
-    inherited from ``BaseClient``: XYZ is sent first and yaw separately. Until
-    yaw control is validated, non-zero yaw requests fail explicitly on Server.
+    OWL and Tello use the same client-side RGB-to-depth pipeline. OWL motion
+    uses the Server's simultaneous XYZ/yaw endpoint.
     """
 
     def __init__(
@@ -39,7 +38,12 @@ class OwlClient(TelloClient):
         health = self._health_state()
         missing = [
             name
-            for name in ("odom_ok", "rgb_ok", "control_ready")
+            for name in (
+                "odom_ok",
+                "rgb_ok",
+                "yaw_link_ok",
+                "control_ready",
+            )
             if health.get(name) is not True
         ]
         if missing:
@@ -55,6 +59,30 @@ class OwlClient(TelloClient):
         raw: bool = True,
     ) -> np.ndarray | Tuple[np.ndarray, np.ndarray]:
         return super().capture(include_depth=include_depth, raw=raw)
+
+    def move_relative(
+        self,
+        dx: float = 0.0,
+        dy: float = 0.0,
+        dz: float = 0.0,
+        dyaw: float = 0.0,
+    ) -> JsonObject:
+        x, y, z = (int(round(value)) for value in (dx, dy, dz))
+        yaw = int(round(dyaw))
+        if not any((x, y, z, yaw)):
+            return {
+                "ok": True,
+                "message": "move_relative_xyz_yaw skipped",
+                "command": {"x": x, "y": y, "z": z, "yaw": yaw},
+            }
+        return self._require_ok(
+            self._request_json(
+                "POST",
+                "/move_relative_xyz_yaw",
+                {"x": x, "y": y, "z": z, "yaw": yaw},
+            ),
+            "move_relative_xyz_yaw",
+        )
 
 
 __all__ = ["OwlClient"]

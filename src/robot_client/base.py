@@ -33,6 +33,9 @@ class BaseClient:
         self.port = int(port)
         self.timeout_s = float(timeout_s)
         self.base_url = f"http://{self.host}:{self.port}"
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({})
+        )
 
     def _request(
         self,
@@ -57,7 +60,7 @@ class BaseClient:
         )
         timeout = self.timeout_s if timeout_s is None else float(timeout_s)
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 return response.read(), response.headers.get_content_type()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -321,8 +324,8 @@ class BaseClient:
             raise RuntimeError("get_pose returned non-numeric pose values") from exc
         return {"x": x, "y": y, "z": z, "yaw": yaw}
 
-    def end(self) -> JsonObject:
-        return self._request_json("POST", "/end", {})
-
     def land(self) -> JsonObject:
-        return self.end()
+        return self._request_json("POST", "/land", {})
+
+    def close(self) -> JsonObject:
+        return self._request_json("POST", "/close", {})

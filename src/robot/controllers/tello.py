@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime as dt
 import math
 import threading
@@ -207,29 +209,59 @@ class TelloController:
                 },
             }
 
-    def end(self) -> dict[str, Any]:
+    def land(self) -> dict[str, Any]:
         with self._lock:
             if not self._initialized:
                 return {
                     "ok": True,
-                    "message": "already ended",
+                    "message": "Tello is not initialized; no landing command sent",
                     "health": self.health(),
                 }
 
             tello = self._require_tello()
+            if not self._airborne:
+                return {
+                    "ok": True,
+                    "message": "already landed; Tello communication remains active",
+                    "health": self.health(),
+                }
+
+            try:
+                tello.land()
+                self._airborne = False
+                self._refresh_telemetry_pose(tello)
+                self._pose["z"] = 0.0
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": "failed to land",
+                    "error": str(exc),
+                    "health": self.health(),
+                }
+            return {
+                "ok": True,
+                "message": "landed; Tello communication remains active",
+                "health": self.health(),
+            }
+
+    def close(self) -> dict[str, Any]:
+        with self._lock:
+            if not self._initialized:
+                return {
+                    "ok": True,
+                    "message": "already closed",
+                    "health": self.health(),
+                }
+
+            landing_error = None
             if self._airborne:
-                try:
-                    tello.land()
-                    self._airborne = False
-                    self._refresh_telemetry_pose(tello)
-                    self._pose["z"] = 0.0
-                except Exception as exc:
-                    return {
-                        "ok": False,
-                        "message": "failed to land during end",
-                        "error": str(exc),
-                        "health": self.health(),
-                    }
+                landing = self.land()
+                if not landing.get("ok", False):
+                    landing_error = RuntimeError(
+                        str(landing.get("error") or landing.get("message"))
+                    )
+
+            tello = self._require_tello()
 
             with self._frame_lock:
                 frame_read = self._frame_read
@@ -241,14 +273,15 @@ class TelloController:
                 self._initialized = False
                 self._airborne = False
 
-            if cleanup_error is not None:
+            first_error = landing_error or cleanup_error
+            if first_error is not None:
                 return {
                     "ok": False,
-                    "message": "ended with cleanup error",
-                    "error": str(cleanup_error),
+                    "message": "closed with landing or cleanup error",
+                    "error": str(first_error),
                     "health": self.health(),
                 }
-            return {"ok": True, "message": "ended", "health": self.health()}
+            return {"ok": True, "message": "closed", "health": self.health()}
 
     def health(self) -> dict[str, Any]:
         with self._lock:
