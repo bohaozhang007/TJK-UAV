@@ -36,5 +36,5 @@ if "%USE_DA3%"=="1" (
 
 :da3_ready
 echo [START] Starting Agent v14...
-"%CONDA_EXE%" run --no-capture-output -n yolo python "%SCRIPT_DIR%src\agent\tjk_v14.py" !AGENT_ARGS!
+"%CONDA_EXE%" run --no-capture-output -n yolo python "%SCRIPT_DIR%src\agent\tjk\v14.py" !AGENT_ARGS!
 exit /b %ERRORLEVEL%

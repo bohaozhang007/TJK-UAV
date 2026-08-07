@@ -1,20 +1,18 @@
-# 1. 移动尺度由硬件决定
-# 2. 输出各阶段耗时
+# 1. search 高度扩展：h, h+50, h-50
+# 2. 增大 gd 置信度
 
 import argparse
-import datetime as dt
-import logging
 import os
 import sys
-import time
-from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 from PIL import Image
 
-SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, SRC_ROOT)
 
 GROUNDING_SAM_ROOT = r'C:\Users\colab999\Desktop\project\Grounded_SAM_2_main'
@@ -35,37 +33,6 @@ DOWN = 'down'
 RIGHT = 'right_rotate'
 LEFT = 'left_rotate'
 
-
-def _timestamped_dir(prefix: str, timestamp: str) -> Path:
-    return Path(f"{Path(prefix).expanduser()}_{timestamp}")
-
-
-def _timestamped_log_path(prefix: str, timestamp: str) -> Path:
-    path = Path(prefix).expanduser()
-    if path.suffix:
-        return path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
-    return Path(f"{path}_{timestamp}.log")
-
-
-def _configure_logger(log_path: Path) -> logging.Logger:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("tjk_v4")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    logger.handlers.clear()
-
-    formatter = logging.Formatter(
-        "%(asctime)s.%(msecs)03d %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
-    logger.addHandler(file_handler)
-    return logger
-
 class TJKAgent:
     def __init__(
         self,
@@ -73,21 +40,19 @@ class TJKAgent:
         vis_dir: str = './tjk_vis',
         save_vis: bool = True,
         save_depth: bool = False,
-        logger: logging.Logger | None = None,
     ):
         self.client = client
-        self.logger = logger
-        self._command_idx = 0
+        
         self.vis_dir = vis_dir
         self.save_vis = save_vis
         self.save_depth = save_depth
 
         # max step distance
-        self.max_fb_step_cm = 60 #150.0
-        self.max_z_step_cm = 40 #80.0
+        self.max_fb_step_cm = 150 # 60 #150.0
+        self.max_z_step_cm =  80 # 40 #80.0
 
         # min step distance
-        self.min_fb_step_cm = 20 #50.0
+        self.min_fb_step_cm = 50 #20 #50.0
         self.min_z_step_cm = 20.0
         self.min_rotate_deg = 5.0
 
@@ -140,54 +105,6 @@ class TJKAgent:
         )
         self.gd_box_threshold = 0.5 #0.35
         self.gd_text_threshold = 0.25
-
-    def _log(self, message: str) -> None:
-        if self.logger is None:
-            print(message)
-        else:
-            self.logger.info(message)
-
-    def _log_sam2_timing(self, phase: str, frame_idx: int, measured_total_s: float) -> None:
-        timing = getattr(self.tracker, "last_timing", {})
-        self._log(
-            f"[TIMING] phase={phase} frame={frame_idx} "
-            f"sam2_inference_s={float(timing.get('inference_s', measured_total_s)):.4f} "
-            f"sam2_postprocess_s={float(timing.get('postprocess_s', 0.0)):.4f} "
-            f"sam2_visualization_s={float(timing.get('visualization_s', 0.0)):.4f} "
-            f"sam2_total_s={float(timing.get('total_s', measured_total_s)):.4f}"
-        )
-
-    def _log_decision_timing(
-        self,
-        iteration: int | str,
-        started_at: float,
-        action: str,
-        command: str,
-    ) -> None:
-        self._log(
-            f"[TIMING] phase=track iteration={iteration} "
-            f"box_to_command_s={time.perf_counter() - started_at:.4f} "
-            f"selected_action={action} command={command}"
-        )
-
-    def _execute_motion(self, action: str, command: str, operation):
-        self._command_idx += 1
-        command_idx = self._command_idx
-        self._log(f"[COMMAND] id={command_idx} action={action} command={command}")
-        started_at = time.perf_counter()
-        try:
-            result = operation()
-        except Exception:
-            self._log(
-                f"[TIMING] command_id={command_idx} action={action} "
-                f"drone_execution_s={time.perf_counter() - started_at:.4f} status=error"
-            )
-            raise
-        self._log(
-            f"[TIMING] command_id={command_idx} action={action} "
-            f"drone_execution_s={time.perf_counter() - started_at:.4f} status=ok"
-        )
-        return result
 
     def detect_with_grounding_dino(self, image_rgb, text_prompt):
         image_tensor, _ = self.grounding_transform(Image.fromarray(image_rgb), None)
@@ -302,11 +219,9 @@ class TJKAgent:
     
     def exec_rotate_action_deg(self, angle_to_rotate, action):
         dyaw = float(angle_to_rotate)
-        return self._execute_motion(
-            action,
-            f"dyaw={dyaw:.2f}deg",
-            lambda: self.client.move_relative(dx=0.0, dy=0.0, dz=0.0, dyaw=dyaw),
-        )
+        print(f"[ACTION] Robot {action} {abs(dyaw):.2f} deg.")
+        result = self.client.move_relative(dx=0.0, dy=0.0, dz=0.0, dyaw=dyaw)
+        return result
     
     def prepare_z_action_cm(self, vertical_offset):
         dz_cm = (vertical_offset / self.img_height) * (2.0 * self.max_z_step_cm)
@@ -318,11 +233,9 @@ class TJKAgent:
         return dz_cm, action
     
     def exec_z_action_cm(self, dz_cm, action):
-        return self._execute_motion(
-            action,
-            f"dz={float(dz_cm):.2f}cm",
-            lambda: self.client.move_relative(dx=0.0, dy=0.0, dz=dz_cm, dyaw=0.0),
-        )
+        print(f"[ACTION] Robot move {action} {abs(dz_cm):.2f} cm.")
+        result = self.client.move_relative(dx=0.0, dy=0.0, dz=dz_cm, dyaw=0.0)
+        return result
 
     def get_backward_step_cm(self):
         return -self.backward_ratio * self.max_fb_step_cm
@@ -345,11 +258,9 @@ class TJKAgent:
         return step_cm, action
     
     def exec_fb_action_cm(self, step_cm, action):
-        return self._execute_motion(
-            action,
-            f"dx={float(step_cm):.2f}cm",
-            lambda: self.client.move_relative(dx=step_cm, dy=0.0, dz=0.0, dyaw=0.0),
-        )
+        print(f"[ACTION] Robot move {action} {abs(step_cm):.2f} cm.")
+        result = self.client.move_relative(dx=step_cm, dy=0.0, dz=0.0, dyaw=0.0)
+        return result
 
     def get_current_z_cm(self) -> Optional[float]:
         pose = self.client.get_pose()
@@ -364,25 +275,13 @@ class TJKAgent:
                 print(f"[WARN] Stop target loop after {self.max_exec_iters} iterations to avoid infinite motion.")
                 break
 
-            capture_started = time.perf_counter()
-            frame_rgb, depth_raw = self.client.capture(include_depth=True)
-            self._log(
-                f"[TIMING] phase=track iteration={iterations} "
-                f"capture_rgb_depth_s={time.perf_counter() - capture_started:.4f}"
-            )
+            frame_rgb, depth_raw = self.client.capture(include_depth=True)  
             track_frame_idx = self.tracker.frame_idx
-            sam2_started = time.perf_counter()
             bbox, mask = self.tracker.track_with_mask(frame_rgb)
-            self._log_sam2_timing(
-                "track",
-                track_frame_idx,
-                time.perf_counter() - sam2_started,
-            )
             if self.save_depth:
                 self.save_track_depth(depth_raw, track_frame_idx)
 
             # get box state
-            decision_started = time.perf_counter()
             state = self.get_bbox_state(bbox)
             box_ratio = state["box_ratio"]
             horizontal_offset = state["horizontal_offset"]
@@ -391,12 +290,6 @@ class TJKAgent:
             # 1. rotate
             angle_to_rotate, action = self.prepare_rotate_action_deg(horizontal_offset)
             if abs(angle_to_rotate) > self.min_rotate_deg:
-                self._log_decision_timing(
-                    iterations,
-                    decision_started,
-                    action,
-                    f"dyaw={float(angle_to_rotate):.2f}deg",
-                )
                 self.exec_rotate_action_deg(angle_to_rotate, action)
                 continue
             else:
@@ -413,12 +306,6 @@ class TJKAgent:
 
             if not z_blocked_by_safety:
                 if abs(dz_cm) > self.min_z_step_cm:
-                    self._log_decision_timing(
-                        iterations,
-                        decision_started,
-                        action,
-                        f"dz={float(dz_cm):.2f}cm",
-                    )
                     self.exec_z_action_cm(dz_cm, action)
                     continue            
                 else:
@@ -442,33 +329,15 @@ class TJKAgent:
                             f"(minimum {self.min_fb_step_cm:.2f} cm); stop at the safe distance."
                         )
                     else:
-                        self._log_decision_timing(
-                            iterations,
-                            decision_started,
-                            action,
-                            f"dx={float(step_cm):.2f}cm",
-                        )
                         self.exec_fb_action_cm(step_cm, action)
                         continue
                 else:
-                    self._log_decision_timing(
-                        iterations,
-                        decision_started,
-                        action,
-                        f"dx={float(step_cm):.2f}cm",
-                    )
                     self.exec_fb_action_cm(step_cm, action)
                     continue
             else:
                 print(f"[STALL] dx is {step_cm} cm and Stalled.")
 
             # 4. all stall
-            self._log_decision_timing(
-                iterations,
-                decision_started,
-                STABLE,
-                "none",
-            )
             success = True
             break
 
@@ -495,18 +364,8 @@ class TJKAgent:
 
             for i in range(12):
                 # Search only needs RGB. Depth estimation starts in move_to_target().
-                capture_started = time.perf_counter()
                 cur_frame = self.client.capture(include_depth=False)
-                self._log(
-                    f"[TIMING] phase=search candidate={height_idx * 12 + i} "
-                    f"capture_rgb_s={time.perf_counter() - capture_started:.4f}"
-                )
-                detection_started = time.perf_counter()
                 detection = self.detect_with_grounding_dino(cur_frame, text_prompt)
-                self._log(
-                    f"[TIMING] phase=search candidate={height_idx * 12 + i} "
-                    f"grounding_dino_s={time.perf_counter() - detection_started:.4f}"
-                )
                 candidate_idx = height_idx * 12 + i
 
                 if detection is not None:
@@ -529,25 +388,11 @@ class TJKAgent:
             raise RuntimeError("没有找到目标")
 
         # Initialize SAM2 tracking directly with GroundingDINO's xyxy box.
-        track_frame_idx = self.tracker.frame_idx
-        sam2_started = time.perf_counter()
         bbox = self.tracker.track(cur_frame, box=target_box)
-        self._log_sam2_timing(
-            "track_init",
-            track_frame_idx,
-            time.perf_counter() - sam2_started,
-        )
 
-        decision_started = time.perf_counter()
         state = self.get_bbox_state(bbox)
         horizontal_offset = state["horizontal_offset"]
         angle_to_rotate, action = self.prepare_rotate_action_deg(horizontal_offset)
-        self._log_decision_timing(
-            "init",
-            decision_started,
-            action,
-            f"dyaw={float(angle_to_rotate):.2f}deg",
-        )
         self.exec_rotate_action_deg(angle_to_rotate, action)
 
 
@@ -578,19 +423,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--vdir",
         type=str,
         default="./tjk_vis",
-        help="Prefix for the timestamped visualization directory (default: ./tjk_vis)",
-    )
-    parser.add_argument(
-        "--log",
-        type=str,
-        default="./.log",
-        help="Prefix or .log path for the timestamped run log (default: ./.log)",
+        help="Directory for visualization images and depth data (default: ./tjk_vis)",
     )
     parser.add_argument(
         "--obj",
         type=str,
         default="street lamp",
-        help="Object description used by GroundingDINO (default: street lamp)",
+        help="Object description used by GroundingDINO (default: white ball)",
     )
     parser.add_argument(
         "--client",
@@ -603,16 +442,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main():
     args = _build_arg_parser().parse_args()
-    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    vis_dir = _timestamped_dir(args.vdir, timestamp)
-    log_path = _timestamped_log_path(args.log, timestamp)
-    vis_dir.mkdir(parents=True, exist_ok=True)
-    logger = _configure_logger(log_path)
-    logger.info(
-        f"[RUN] client={args.client} object={args.obj!r} "
-        f"depth_source={'ue_native' if args.client == 'ue' else 'client_da3'} "
-        f"vdir={vis_dir} log={log_path}"
-    )
+    os.makedirs(args.vdir, exist_ok=True)
+    print(f"[MODE] GroundingDINO search: {args.obj!r}")
 
     client = build_client(
         args.client,
@@ -620,7 +451,7 @@ def main():
         server_port=8765,
         http_timeout_s=180.0,
     )
-    tjkAgent = TJKAgent(client=client, vis_dir=str(vis_dir), logger=logger)
+    tjkAgent = TJKAgent(client=client, vis_dir=args.vdir)
     tjkAgent.connect()
     tjkAgent.run(args.obj)
 

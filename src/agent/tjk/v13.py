@@ -18,7 +18,9 @@ import cv2
 import numpy as np
 import yaml
 
-SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, SRC_ROOT)
 
 from robot_client.base import BaseClient
@@ -1846,13 +1848,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        default=str(Path(__file__).with_name("config_v13.yaml")),
+        default=str(
+            Path(__file__).resolve().parents[1]
+            / "config"
+            / "base"
+            / "v13.yaml"
+        ),
         help="Required agent YAML config path",
     )
     parser.add_argument(
         "--exp_name",
         type=str,
-        default=str(Path(__file__).resolve().parents[2] / "logs" / "test"),
+        default=str(Path(__file__).resolve().parents[3] / "logs" / "test"),
         help=(
             "Experiment directory prefix; a timestamp suffix is added "
             "automatically (default: repository logs/test)"

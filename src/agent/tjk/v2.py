@@ -1,4 +1,6 @@
-# base
+# 1. search 阶段不会调用深度，track 阶段才需要
+# 2. 根据获取到的 img size 来确定模型的 img size，而不是固定为 640 * 480
+
 import argparse
 import os
 import sys
@@ -8,7 +10,9 @@ import cv2
 import numpy as np
 from PIL import Image
 
-SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, SRC_ROOT)
 
 GROUNDING_SAM_ROOT = r'C:\Users\colab999\Desktop\project\Grounded_SAM_2_main'
@@ -140,8 +144,15 @@ class TJKAgent:
     def connect(self):
         self.client.start()
         frame = self.client.capture(include_depth=False)
-        img_height, img_width = frame.shape[:2]
-        assert img_height == self.img_height and img_width == self.img_width, f'img height is {img_height} and img width is {img_width}, which are not equal to the preset !!!!'
+        height, width = frame.shape[:2]
+
+        self.img_height = height
+        self.img_width = width
+        self.horizontal_center = width / 2
+        self.vertical_center = height / 2
+
+        self.tracker.set_img_size(height, width)
+        print(f"[ROBOT-INFO] RGB resolution: {width}x{height}")
 
         pose = self.client.get_pose()
 
@@ -350,10 +361,10 @@ class TJKAgent:
     def init_tracker(self, text_prompt):
         # Search in place for at most one full turn and stop at the first GroundingDINO box.
         cur_frame = None
-        cur_depth_raw = None
         target_box = None
         for i in range(12):
-            cur_frame, cur_depth_raw = self.client.capture(include_depth=True)
+            # Search only needs RGB. Depth estimation starts in move_to_target().
+            cur_frame = self.client.capture(include_depth=False)
             detection = self.detect_with_grounding_dino(cur_frame, text_prompt)
 
             if detection is not None:
@@ -368,10 +379,7 @@ class TJKAgent:
             raise RuntimeError(f"GroundingDINO did not find target {text_prompt!r} after a full 360-degree search.")
 
         # Initialize SAM2 tracking directly with GroundingDINO's xyxy box.
-        track_frame_idx = self.tracker.frame_idx
         bbox = self.tracker.track(cur_frame, box=target_box)
-        if self.save_depth:
-            self.save_track_depth(cur_depth_raw, track_frame_idx)
 
         state = self.get_bbox_state(bbox)
         horizontal_offset = state["horizontal_offset"]

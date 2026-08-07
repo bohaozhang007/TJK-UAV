@@ -1,4 +1,7 @@
-# 1. 简易 scan
+# 1. 抽象出无人机状态
+# 2. 各阶段抽象为 search，track，return 等单独的函数
+# 3. 添加了 scan 操作
+# 4. yaml 配置参数
 
 import argparse
 import datetime as dt
@@ -15,7 +18,9 @@ import numpy as np
 import yaml
 from PIL import Image
 
-SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, SRC_ROOT)
 
 GROUNDING_SAM_ROOT = r'C:\Users\colab999\Desktop\project\Grounded_SAM_2_main'
@@ -74,7 +79,12 @@ def _config_number(
 
 class AgentAction(str, Enum):
     STABLE = "stable"
-    ROTATE = "rotate"
+    FORWARD = "forward"
+    BACKWARD = "backward"
+    UP = "up"
+    DOWN = "down"
+    RIGHT = "right_rotate"
+    LEFT = "left_rotate"
     XYZ_YAW_HYBRID = "xyz_yaw_hybrid"
 
 
@@ -85,13 +95,20 @@ class AgentState(str, Enum):
     RETURN_WAYPOINT = "RETURN_WAYPOINT"
 
 
-def _timestamped_experiment_dir(exp_name: str, timestamp: str) -> Path:
-    return Path(f"{Path(exp_name).expanduser()}_{timestamp}")
+def _timestamped_dir(prefix: str, timestamp: str) -> Path:
+    return Path(f"{Path(prefix).expanduser()}_{timestamp}")
+
+
+def _timestamped_log_path(prefix: str, timestamp: str) -> Path:
+    path = Path(prefix).expanduser()
+    if path.suffix:
+        return path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
+    return Path(f"{path}_{timestamp}.log")
 
 
 def _configure_logger(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("tjk_v8")
+    logger = logging.getLogger("tjk_v5")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
@@ -121,9 +138,6 @@ class TJKAgent:
         self.client = client
         self.logger = logger
         self._command_idx = 0
-        self.last_motion_error = None
-        self._last_motion_timing = {}
-        self._last_motion_command_id = None
         self.vis_dir = vis_dir
         self.save_vis = save_vis
         self.save_depth = save_depth
@@ -139,55 +153,41 @@ class TJKAgent:
         scan_config = _config_section(config, "scan")
         detection_config = _config_section(config, "detection")
 
-        # Forward/backward action.
+        # max step distance
         self.max_fb_step_cm = _config_number(
             motion_config, "max_fb_step_cm", minimum=1e-6
         )
-        self.min_reliable_fb_step_cm = _config_number(
-            motion_config, "min_reliable_fb_step_cm", minimum=0.0
+        self.max_z_step_cm = _config_number(
+            motion_config, "max_z_step_cm", minimum=1e-6
         )
+        self.max_rotate_deg = _config_number(
+            motion_config, "max_rotate_deg", minimum=1e-6
+        )
+
+        # min step distance
+        self.min_fb_step_cm = _config_number(
+            motion_config, "min_fb_step_cm", minimum=0.0
+        )
+        self.min_z_step_cm = _config_number(
+            motion_config, "min_z_step_cm", minimum=0.0
+        )
+        self.min_rotate_deg = _config_number(
+            motion_config, "min_rotate_deg", minimum=0.0
+        )
+        if self.min_fb_step_cm > self.max_fb_step_cm:
+            raise ValueError("motion.min_fb_step_cm cannot exceed max_fb_step_cm")
+        if self.min_z_step_cm > self.max_z_step_cm:
+            raise ValueError("motion.min_z_step_cm cannot exceed max_z_step_cm")
+        if self.min_rotate_deg > self.max_rotate_deg:
+            raise ValueError("motion.min_rotate_deg cannot exceed max_rotate_deg")
+
+        # fixed action
         self.backward_ratio = _config_number(
             motion_config,
             "backward_ratio",
             minimum=0.0,
             maximum=1.0,
         )
-
-        # Vertical action.
-        self.z_cm_per_pixel = _config_number(
-            motion_config, "z_cm_per_pixel", minimum=1e-6
-        )
-        self.max_z_step_cm = _config_number(
-            motion_config, "max_z_step_cm", minimum=1e-6
-        )
-        self.min_reliable_z_step_cm = _config_number(
-            motion_config, "min_reliable_z_step_cm", minimum=0.0
-        )
-
-        # Yaw action.
-        self.rotate_deg_per_pixel = _config_number(
-            motion_config, "rotate_deg_per_pixel", minimum=1e-6
-        )
-        self.max_rotate_deg = _config_number(
-            motion_config, "max_rotate_deg", minimum=1e-6
-        )
-        self.min_reliable_rotate_deg = _config_number(
-            motion_config, "min_reliable_rotate_deg", minimum=0.0
-        )
-
-        if self.min_reliable_fb_step_cm > self.max_fb_step_cm:
-            raise ValueError(
-                "motion.min_reliable_fb_step_cm cannot exceed max_fb_step_cm"
-            )
-        if self.min_reliable_z_step_cm > self.max_z_step_cm:
-            raise ValueError(
-                "motion.min_reliable_z_step_cm cannot exceed max_z_step_cm"
-            )
-        if self.min_reliable_rotate_deg > self.max_rotate_deg:
-            raise ValueError(
-                "motion.min_reliable_rotate_deg cannot exceed max_rotate_deg"
-            )
-
         self.search_rotation_step_deg = _config_number(
             search_config,
             "rotation_step_deg",
@@ -231,12 +231,6 @@ class TJKAgent:
             minimum=1e-6,
             maximum=1.0,
         )
-        self.yaw_only_threshold_deg = _config_number(
-            track_config,
-            "yaw_only_threshold_deg",
-            minimum=self.min_reliable_rotate_deg,
-            maximum=self.max_rotate_deg,
-        )
 
         # max exec iters
         self.max_exec_iters = _config_number(
@@ -251,17 +245,11 @@ class TJKAgent:
             scan_config,
             "num_points",
             integer=True,
-            minimum=12.0,
-            maximum=12.0,
+            minimum=3.0,
         )
         self.scan_radius_cm = _config_number(
             scan_config,
             "radius_cm",
-            minimum=1e-6,
-        )
-        self.scan_yaw_unit_deg = _config_number(
-            scan_config,
-            "yaw_unit_deg",
             minimum=1e-6,
         )
 
@@ -271,7 +259,6 @@ class TJKAgent:
         self.tracker = Sam2VideoPredictor(sam_cfg)
         self.tracker.set_vis_mode(self.save_vis)
         self.tracker.set_vis_dir(self.vis_dir)
-        self.tracker.set_track_vis_naming("track", index_width=2)
 
         if "device" not in detection_config:
             raise ValueError("Missing config value: detection.device")
@@ -315,189 +302,51 @@ class TJKAgent:
         else:
             self.logger.info(message)
 
-    def _log_timing(self, total_s: float, command_id=None, **fields) -> None:
-        command_id_text = "none" if command_id is None else str(command_id)
-        parts = [
-            f"[TIMING] command_id={command_id_text}",
-            f"total_s={float(total_s):.4f}",
-        ]
-        for name, value in fields.items():
-            time_name = name if name.endswith("_s") else f"{name}_s"
-            if isinstance(value, dict):
-                details = ", ".join(
-                    f"{detail_name if detail_name.endswith('_s') else f'{detail_name}_s'}="
-                    f"{float(detail_value):.4f}"
-                    for detail_name, detail_value in value.items()
-                )
-                parts.append(f"{name}:{{{details}}}")
-            elif isinstance(value, (int, float)):
-                parts.append(f"{time_name}={float(value):.4f}")
-            else:
-                parts.append(f"{time_name}={value}")
-        self._log(" ".join(parts))
+    def _log_sam2_timing(self, phase: str, frame_idx: int, measured_total_s: float) -> None:
+        timing = getattr(self.tracker, "last_timing", {})
+        self._log(
+            f"[TIMING] phase={phase} frame={frame_idx} "
+            f"sam2_inference_s={float(timing.get('inference_s', measured_total_s)):.4f} "
+            f"sam2_postprocess_s={float(timing.get('postprocess_s', 0.0)):.4f} "
+            f"sam2_visualization_s={float(timing.get('visualization_s', 0.0)):.4f} "
+            f"sam2_total_s={float(timing.get('total_s', measured_total_s)):.4f}"
+        )
 
-    @staticmethod
-    def _sam2_timing_fields(tracker, measured_total_s: float) -> dict:
-        timing = getattr(tracker, "last_timing", {})
-        return {
-            "total": float(measured_total_s),
-            "infer": float(
-                timing.get("inference_s", measured_total_s)
-            ),
-            "vis": float(
-                timing.get("visualization_s", 0.0)
-            ),
-        }
-
-    def _log_track_iteration_timing(
+    def _log_decision_timing(
         self,
-        capture_s,
-        save_depth_s,
-        sam2_fields,
-        decision_s,
-        motion_timing=None,
-    ) -> None:
-        motion = motion_timing or {
-            "drone_execution_s": 0.0,
-        }
-        total_s = (
-            capture_s
-            + save_depth_s
-            + sam2_fields["total"]
-            + decision_s
-            + motion["drone_execution_s"]
-        )
-        self._log_timing(
-            total_s,
-            command_id=(
-                self._last_motion_command_id
-                if motion_timing is not None
-                else None
-            ),
-            capture=capture_s,
-            save_depth=save_depth_s,
-            tracker=sam2_fields,
-            decision=decision_s,
-            execution=motion["drone_execution_s"],
-        )
-
-    @staticmethod
-    def _format_motion_command(dx_cm, dy_cm, dz_cm, dyaw_deg) -> str:
-        return (
-            f"(dx={float(dx_cm):.2f}cm, dy={float(dy_cm):.2f}cm, "
-            f"dz={float(dz_cm):.2f}cm, dyaw={float(dyaw_deg):.2f}deg)"
-        )
-
-    @staticmethod
-    def _format_motion_error(error) -> str:
-        if error is None:
-            return "(ex=N/A, ey=N/A, ez=N/A, eyaw=N/A, epos=N/A)"
-        return (
-            f"(ex={error['ex']:.2f}cm, ey={error['ey']:.2f}cm, "
-            f"ez={error['ez']:.2f}cm, eyaw={error['eyaw']:.2f}deg, "
-            f"epos={error['epos']:.2f}cm)"
-        )
-
-    def _calculate_motion_error(
-        self,
-        start_pose,
-        end_pose,
-        dx_cm,
-        dy_cm,
-        dz_cm,
-        dyaw_deg,
-    ) -> dict:
-        """Return requested-minus-actual error in the command's body frame."""
-        world_dx_cm = float(end_pose["x"]) - float(start_pose["x"])
-        world_dy_cm = float(end_pose["y"]) - float(start_pose["y"])
-        start_yaw_rad = np.radians(float(start_pose["yaw"]))
-        actual_dx_cm = float(
-            np.cos(start_yaw_rad) * world_dx_cm
-            + np.sin(start_yaw_rad) * world_dy_cm
-        )
-        actual_dy_cm = float(
-            -np.sin(start_yaw_rad) * world_dx_cm
-            + np.cos(start_yaw_rad) * world_dy_cm
-        )
-        actual_dz_cm = float(end_pose["z"]) - float(start_pose["z"])
-        actual_dyaw_deg = self._normalize_angle_deg(
-            float(end_pose["yaw"]) - float(start_pose["yaw"])
-        )
-        ex_cm = float(dx_cm) - actual_dx_cm
-        ey_cm = float(dy_cm) - actual_dy_cm
-        ez_cm = float(dz_cm) - actual_dz_cm
-        eyaw_deg = self._normalize_angle_deg(
-            float(dyaw_deg) - actual_dyaw_deg
-        )
-        return {
-            "ex": ex_cm,
-            "ey": ey_cm,
-            "ez": ez_cm,
-            "eyaw": eyaw_deg,
-            "epos": float(np.linalg.norm([ex_cm, ey_cm, ez_cm])),
-        }
-
-    def _execute_motion(
-        self,
+        iteration: int | str,
+        started_at: float,
         action: AgentAction,
-        dx_cm,
-        dy_cm,
-        dz_cm,
-        dyaw_deg,
-        operation,
-        context="",
-        log_timing=True,
-    ):
+        command: str,
+    ) -> None:
+        self._log(
+            f"[TIMING] phase=track iteration={iteration} "
+            f"box_to_command_s={time.perf_counter() - started_at:.4f} "
+            f"selected_action={action.value} command={command}"
+        )
+
+    def _execute_motion(self, action: AgentAction, command: str, operation):
         self._command_idx += 1
         command_idx = self._command_idx
-        self._last_motion_command_id = command_idx
         pose = self.client.get_pose()
-        command = self._format_motion_command(dx_cm, dy_cm, dz_cm, dyaw_deg)
-        last_error = self._format_motion_error(
-            getattr(self, "last_motion_error", None)
-        )
-        context_text = f" context={context}" if context else ""
         self._log(
-            f"[COMMAND] id={command_idx} action={action.value} "
-            f"command={command} "
+            f"[COMMAND] id={command_idx} action={action.value} command={command} "
             f"pose=(x={float(pose['x']):.2f}, y={float(pose['y']):.2f}, "
-            f"z={float(pose['z']):.2f}, yaw={float(pose['yaw']):.2f}) "
-            f"last_error={last_error}{context_text}"
+            f"z={float(pose['z']):.2f}, yaw={float(pose['yaw']):.2f})"
         )
-        execution_started = time.perf_counter()
+        started_at = time.perf_counter()
         try:
             result = operation()
         except Exception:
-            drone_execution_s = time.perf_counter() - execution_started
-            self._last_motion_timing = {
-                "drone_execution_s": drone_execution_s,
-            }
-            if log_timing:
-                self._log_timing(
-                    drone_execution_s,
-                    command_id=command_idx,
-                    execution=drone_execution_s,
-                )
-            raise
-        drone_execution_s = time.perf_counter() - execution_started
-        end_pose = self.client.get_pose()
-        self.last_motion_error = self._calculate_motion_error(
-            pose,
-            end_pose,
-            dx_cm,
-            dy_cm,
-            dz_cm,
-            dyaw_deg,
-        )
-        self._last_motion_timing = {
-            "drone_execution_s": drone_execution_s,
-        }
-        if log_timing:
-            self._log_timing(
-                drone_execution_s,
-                command_id=command_idx,
-                execution=drone_execution_s,
+            self._log(
+                f"[TIMING] command_id={command_idx} action={action.value} "
+                f"drone_execution_s={time.perf_counter() - started_at:.4f} status=error"
             )
+            raise
+        self._log(
+            f"[TIMING] command_id={command_idx} action={action.value} "
+            f"drone_execution_s={time.perf_counter() - started_at:.4f} status=ok"
+        )
         return result
 
     def detect_with_grounding_dino(self, image_rgb, text_prompt):
@@ -553,7 +402,7 @@ class TJKAgent:
         print(f"[ROBOT-INFO] Connected to {self.client.base_url}; pose: {pose_str}")
 
     def save_track_depth(self, depth_raw, frame_idx):
-        depth_path = os.path.join(self.vis_dir, f"track_{frame_idx:02d}.npy")
+        depth_path = os.path.join(self.vis_dir, f"sam2_trak_{frame_idx}.npy")
         np.save(depth_path, depth_raw)
         print(f"[DEPTH] Saved raw centimeter depth in {depth_path}")
 
@@ -604,53 +453,65 @@ class TJKAgent:
         }
 
     def prepare_rotate_action_deg(self, horizontal_offset):
-        angle_to_rotate = horizontal_offset * self.rotate_deg_per_pixel
-        angle_to_rotate = np.clip(
-            angle_to_rotate,
-            -self.max_rotate_deg,
-            self.max_rotate_deg,
-        )
-        return float(angle_to_rotate)
+        angle_to_rotate = (
+            horizontal_offset / self.img_width
+        ) * self.max_rotate_deg
+        if angle_to_rotate > 0:
+            action = AgentAction.RIGHT
+        else:
+            action = AgentAction.LEFT
+        return angle_to_rotate, action
     
-    def exec_rotate_action_deg(
-        self,
-        angle_to_rotate,
-        context="",
-        log_timing=True,
-    ):
+    def exec_rotate_action_deg(self, angle_to_rotate, action):
         dyaw = float(angle_to_rotate)
         return self._execute_motion(
-            AgentAction.ROTATE,
-            0.0,
-            0.0,
-            0.0,
-            dyaw,
+            action,
+            f"dyaw={dyaw:.2f}deg",
             lambda: self.client.move_relative(dx=0.0, dy=0.0, dz=0.0, dyaw=dyaw),
-            context=context,
-            log_timing=log_timing,
         )
     
     def prepare_z_action_cm(self, vertical_offset):
-        dz_cm = vertical_offset * self.z_cm_per_pixel
+        dz_cm = (vertical_offset / self.img_height) * (2.0 * self.max_z_step_cm)
         dz_cm = float(np.clip(dz_cm, -self.max_z_step_cm, self.max_z_step_cm))
-        return dz_cm
+        if dz_cm > 0:
+            action = AgentAction.UP
+        else:
+            action = AgentAction.DOWN
+        return dz_cm, action
+    
+    def exec_z_action_cm(self, dz_cm, action):
+        return self._execute_motion(
+            action,
+            f"dz={float(dz_cm):.2f}cm",
+            lambda: self.client.move_relative(dx=0.0, dy=0.0, dz=dz_cm, dyaw=0.0),
+        )
 
     def get_backward_step_cm(self):
         return -self.backward_ratio * self.max_fb_step_cm
     
     def prepare_fb_action_cm(self, box_ratio):
         target = self.target_stop_ratio
-        deadband = self.min_reliable_fb_step_cm / self.max_fb_step_cm * target
+        deadband = self.min_fb_step_cm / self.max_fb_step_cm * target
 
         if box_ratio > target + deadband:
             step_cm = self.get_backward_step_cm()
+            action = AgentAction.BACKWARD
         elif box_ratio < target - deadband:
             progress = box_ratio / target
             step_cm = self.max_fb_step_cm * (1.0 - progress)
+            action = AgentAction.FORWARD
         else:
             step_cm = 0.0
+            action = AgentAction.STABLE
 
-        return float(step_cm)
+        return step_cm, action
+    
+    def exec_fb_action_cm(self, step_cm, action):
+        return self._execute_motion(
+            action,
+            f"dx={float(step_cm):.2f}cm",
+            lambda: self.client.move_relative(dx=step_cm, dy=0.0, dz=0.0, dyaw=0.0),
+        )
 
     def get_current_z_cm(self) -> Optional[float]:
         pose = self.client.get_pose()
@@ -668,18 +529,20 @@ class TJKAgent:
 
             capture_started = time.perf_counter()
             frame_rgb, depth_raw = self.client.capture(include_depth=True)
-            capture_s = time.perf_counter() - capture_started
+            self._log(
+                f"[TIMING] phase=track iteration={iterations} "
+                f"capture_rgb_depth_s={time.perf_counter() - capture_started:.4f}"
+            )
             track_frame_idx = self.tracker.frame_idx
             sam2_started = time.perf_counter()
             bbox, mask = self.tracker.track_with_mask(frame_rgb)
-            sam2_fields = self._sam2_timing_fields(
-                self.tracker,
+            self._log_sam2_timing(
+                "track",
+                track_frame_idx,
                 time.perf_counter() - sam2_started,
             )
-            save_depth_started = time.perf_counter()
             if self.save_depth:
                 self.save_track_depth(depth_raw, track_frame_idx)
-            save_depth_s = time.perf_counter() - save_depth_started
 
             # get box state
             decision_started = time.perf_counter()
@@ -695,101 +558,86 @@ class TJKAgent:
                 "pose": self.client.get_pose(),
             }
 
-            angle_to_rotate = self.prepare_rotate_action_deg(horizontal_offset)
-
-            # Large yaw errors are corrected without translation. Once yaw is
-            # approximately aligned, all remaining axes share one command.
-            if abs(angle_to_rotate) > self.yaw_only_threshold_deg:
-                decision_s = time.perf_counter() - decision_started
-                self.exec_rotate_action_deg(
-                    angle_to_rotate,
-                    context=f"track iteration={iterations} yaw_only",
-                    log_timing=False,
+            # 1. rotate
+            angle_to_rotate, action = self.prepare_rotate_action_deg(horizontal_offset)
+            if abs(angle_to_rotate) > self.min_rotate_deg:
+                self._log_decision_timing(
+                    iterations,
+                    decision_started,
+                    action,
+                    f"dyaw={float(angle_to_rotate):.2f}deg",
                 )
-                self._log_track_iteration_timing(
-                    capture_s,
-                    save_depth_s,
-                    sam2_fields,
-                    decision_s,
-                    self._last_motion_timing,
-                )
+                self.exec_rotate_action_deg(angle_to_rotate, action)
                 continue
-            if abs(angle_to_rotate) > self.min_reliable_rotate_deg:
-                dyaw_deg = angle_to_rotate
             else:
-                dyaw_deg = 0.0
                 print(f"[STALL] angle is {angle_to_rotate} and Stalled.")
 
-            dz_cm = self.prepare_z_action_cm(vertical_offset)
-            if dz_cm < 0.0:
+            # 2. z
+            dz_cm, action = self.prepare_z_action_cm(vertical_offset)
+            z_blocked_by_safety  = False
+            if action == AgentAction.DOWN:
                 cur_z_cm = self.get_current_z_cm()
-                if cur_z_cm <= self.safe_z_cm:
-                    dz_cm = 0.0
-                    print(
-                        f"[STALL] Downward motion is blocked at safe_z="
-                        f"{self.safe_z_cm:.2f} cm."
-                    )
-                else:
+                z_blocked_by_safety = cur_z_cm <= self.safe_z_cm
+                if not z_blocked_by_safety:
                     dz_cm = max(dz_cm, self.safe_z_cm - cur_z_cm)
 
-            if abs(dz_cm) <= self.min_reliable_z_step_cm:
-                print(f"[STALL] dz_cm is {dz_cm} and Stalled.")
-                dz_cm = 0.0
-
-            dx_cm = self.prepare_fb_action_cm(box_ratio)
-            if abs(dx_cm) <= self.min_reliable_fb_step_cm:
-                print(f"[STALL] dx is {dx_cm} cm and Stalled.")
-                dx_cm = 0.0
-            elif dx_cm > 0.0:
-                requested_dx_cm = dx_cm
-                path_depth_cm = self.get_nearest_path_depth_cm(depth_raw, mask)
-                available_dx_cm = max(
-                    0.0,
-                    path_depth_cm - self.depth_safe_distance_cm,
-                )
-                dx_cm = min(requested_dx_cm, available_dx_cm)
-                print(
-                    f"[DEPTH] path_p01={path_depth_cm:.2f} cm, "
-                    f"safe={self.depth_safe_distance_cm:.2f} cm, "
-                    f"requested={requested_dx_cm:.2f} cm, "
-                    f"available={available_dx_cm:.2f} cm, "
-                    f"forward={dx_cm:.2f} cm."
-                )
-                if dx_cm <= self.min_reliable_fb_step_cm:
-                    print(
-                        f"[STALL] Depth-limited forward step {dx_cm:.2f} cm "
-                        f"is not executable (minimum "
-                        f"{self.min_reliable_fb_step_cm:.2f} cm); stop at the safe "
-                        "distance."
+            if not z_blocked_by_safety:
+                if abs(dz_cm) > self.min_z_step_cm:
+                    self._log_decision_timing(
+                        iterations,
+                        decision_started,
+                        action,
+                        f"dz={float(dz_cm):.2f}cm",
                     )
-                    dx_cm = 0.0
+                    self.exec_z_action_cm(dz_cm, action)
+                    continue            
+                else:
+                    print(f"[STALL] dz_cm is {dz_cm} and Stalled.")
 
-            if any(value != 0.0 for value in (dx_cm, dz_cm, dyaw_deg)):
-                decision_s = time.perf_counter() - decision_started
-                self.exec_xyz_yaw_hybrid(
-                    dx_cm,
-                    0.0,
-                    dz_cm,
-                    dyaw_deg,
-                    context=f"track iteration={iterations}",
-                    log_timing=False,
-                )
-                self._log_track_iteration_timing(
-                    capture_s,
-                    save_depth_s,
-                    sam2_fields,
-                    decision_s,
-                    self._last_motion_timing,
-                )
-                continue
+            # 3. fb
+            step_cm, action = self.prepare_fb_action_cm(box_ratio)
+            if abs(step_cm) > self.min_fb_step_cm:
+                if action == AgentAction.FORWARD:
+                    x1 = step_cm
+                    path_depth_cm = self.get_nearest_path_depth_cm(depth_raw, mask)
+                    x2 = max(0.0, path_depth_cm - self.depth_safe_distance_cm)
+                    step_cm = min(x1, x2)
+                    print(
+                        f"[DEPTH] path_p01={path_depth_cm:.2f} cm, safe={self.depth_safe_distance_cm:.2f} cm, "
+                        f"x1={x1:.2f} cm, x2={x2:.2f} cm, forward={step_cm:.2f} cm."
+                    )
+                    if step_cm <= self.min_fb_step_cm:
+                        print(
+                            f"[STALL] Depth-limited forward step {step_cm:.2f} cm is not executable "
+                            f"(minimum {self.min_fb_step_cm:.2f} cm); stop at the safe distance."
+                        )
+                    else:
+                        self._log_decision_timing(
+                            iterations,
+                            decision_started,
+                            action,
+                            f"dx={float(step_cm):.2f}cm",
+                        )
+                        self.exec_fb_action_cm(step_cm, action)
+                        continue
+                else:
+                    self._log_decision_timing(
+                        iterations,
+                        decision_started,
+                        action,
+                        f"dx={float(step_cm):.2f}cm",
+                    )
+                    self.exec_fb_action_cm(step_cm, action)
+                    continue
+            else:
+                print(f"[STALL] dx is {step_cm} cm and Stalled.")
 
-            # All axes are inside their stop thresholds.
-            decision_s = time.perf_counter() - decision_started
-            self._log_track_iteration_timing(
-                capture_s,
-                save_depth_s,
-                sam2_fields,
-                decision_s,
+            # 4. all stall
+            self._log_decision_timing(
+                iterations,
+                decision_started,
+                AgentAction.STABLE,
+                "none",
             )
             success = True
             break
@@ -826,70 +674,100 @@ class TJKAgent:
         dz_cm,
         dyaw_deg,
         context="",
-        log_timing=True,
     ):
         """Send XYZ translation and yaw through one move_relative call."""
+        context_text = f" context={context}" if context else ""
         return self._execute_motion(
             AgentAction.XYZ_YAW_HYBRID,
-            dx_cm,
-            dy_cm,
-            dz_cm,
-            dyaw_deg,
+            f"dx={float(dx_cm):.2f}cm dy={float(dy_cm):.2f}cm "
+            f"dz={float(dz_cm):.2f}cm dyaw={float(dyaw_deg):.2f}deg"
+            f"{context_text}",
             lambda: self.client.move_relative(
                 dx=dx_cm,
                 dy=dy_cm,
                 dz=dz_cm,
                 dyaw=dyaw_deg,
             ),
-            context=context,
-            log_timing=log_timing,
         )
 
-    def _move_to_pose_hybrid(self, target_pose, context, log_timing=True):
+    def _move_to_pose_hybrid(self, target_pose, context):
         delta = self._relative_pose_delta(target_pose)
-        return self.exec_xyz_yaw_hybrid(
-            *delta,
-            context=context,
-            log_timing=log_timing,
-        )
+        return self.exec_xyz_yaw_hybrid(*delta, context=context)
+
+    def _get_target_depth_cm(self, depth_raw, mask) -> Optional[float]:
+        mask = np.asarray(mask, dtype=bool).squeeze()
+        if mask.ndim != 2:
+            return None
+        if depth_raw.shape != mask.shape:
+            depth_raw = cv2.resize(
+                depth_raw,
+                (mask.shape[1], mask.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        target_depths = depth_raw[
+            mask & np.isfinite(depth_raw) & (depth_raw > 0)
+        ]
+        if target_depths.size == 0:
+            return None
+        return float(np.median(target_depths))
 
     def _estimate_scan_circle(self):
-        """Plan a 12-point clock-face circle around the track-end pose."""
+        """Plan a local vertical circle around the track-end drone position."""
         observation = self.last_track_observation
         if observation is None:
             raise RuntimeError("Last track observation is unavailable for scan")
 
         pose = observation["pose"]
+        bbox_state = self.get_bbox_state(observation["bbox"])
+        target_distance_cm = self._get_target_depth_cm(
+            observation["depth_raw"],
+            observation["mask"],
+        )
+        if target_distance_cm is None:
+            target_distance_cm = self.depth_safe_distance_cm
+            self._log(
+                "[SCAN] Target depth unavailable; use "
+                f"fallback_distance={target_distance_cm:.2f}cm"
+            )
+
+        horizontal_angle_deg = (
+            bbox_state["horizontal_offset"] / self.img_width
+        ) * self.max_rotate_deg
+        vertical_span_deg = self.max_rotate_deg * self.img_height / self.img_width
+        vertical_angle_deg = (
+            bbox_state["vertical_offset"] / self.img_height
+        ) * vertical_span_deg
+        horizontal_distance_cm = max(
+            1.0,
+            float(
+                target_distance_cm
+                * np.cos(np.radians(vertical_angle_deg))
+            ),
+        )
+        target_bearing_deg = self._normalize_angle_deg(
+            float(pose["yaw"]) + horizontal_angle_deg
+        )
+        target_bearing_rad = np.radians(target_bearing_deg)
+        target_world_x = float(pose["x"]) + float(
+            np.cos(target_bearing_rad) * horizontal_distance_cm
+        )
+        target_world_y = float(pose["y"]) + float(
+            np.sin(target_bearing_rad) * horizontal_distance_cm
+        )
+        target_world_z = float(pose["z"]) + float(
+            target_distance_cm * np.sin(np.radians(vertical_angle_deg))
+        )
+
         origin_yaw_rad = np.radians(float(pose["yaw"]))
-        # Positive dyaw is a right turn in the agent command convention.
-        yaw_steps_by_hour = {
-            1: -1,
-            2: -2,
-            3: -3,
-            4: -2,
-            5: -1,
-            6: 0,
-            7: 1,
-            8: 2,
-            9: 3,
-            10: 2,
-            11: 1,
-            12: 0,
-        }
         trajectory = []
-        clock_hours = [12, *range(1, self.scan_num_points)]
-        for clock_hour in clock_hours:
-            clock_angle_rad = 2.0 * np.pi * clock_hour / self.scan_num_points
+        for point_idx in range(self.scan_num_points):
+            circle_angle_rad = 2.0 * np.pi * point_idx / self.scan_num_points
             right_offset_cm = float(
-                np.sin(clock_angle_rad) * self.scan_radius_cm
+                np.cos(circle_angle_rad) * self.scan_radius_cm
             )
             up_offset_cm = float(
-                np.cos(clock_angle_rad) * self.scan_radius_cm
+                np.sin(circle_angle_rad) * self.scan_radius_cm
             )
-            if clock_hour in (6, 12):
-                right_offset_cm = 0.0
-            if clock_hour in (3, 9):
-                up_offset_cm = 0.0
             point_x = float(pose["x"]) - float(
                 np.sin(origin_yaw_rad) * right_offset_cm
             )
@@ -900,80 +778,65 @@ class TJKAgent:
                 self.safe_z_cm,
                 float(pose["z"]) + up_offset_cm,
             )
-            point_yaw = self._normalize_angle_deg(
-                float(pose["yaw"])
-                + yaw_steps_by_hour[clock_hour] * self.scan_yaw_unit_deg
+            point_yaw = float(
+                np.degrees(
+                    np.arctan2(
+                        target_world_y - point_y,
+                        target_world_x - point_x,
+                    )
+                )
             )
             trajectory.append(
                 {
                     "x": point_x,
                     "y": point_y,
                     "z": point_z,
-                    "yaw": point_yaw,
-                    "clock_hour": clock_hour,
+                    "yaw": self._normalize_angle_deg(point_yaw),
                 }
             )
 
-        yaw_offsets = ", ".join(
-            f"{point['clock_hour']}="
-            f"{self._normalize_angle_deg(point['yaw'] - float(pose['yaw'])):.2f}"
-            for point in trajectory
-        )
         self._log(
-            "[SCAN] Planned simple clock trajectory: "
+            "[SCAN] Planned local vertical circle: "
             f"points={self.scan_num_points} radius={self.scan_radius_cm:.2f}cm "
-            f"yaw_unit={self.scan_yaw_unit_deg:.2f}deg "
+            f"estimated_target_distance={horizontal_distance_cm:.2f}cm "
             f"center=(x={float(pose['x']):.2f}, y={float(pose['y']):.2f}, "
-            f"z={float(pose['z']):.2f}, yaw={float(pose['yaw']):.2f}) "
-            f"yaw_offsets_deg=({yaw_offsets})"
+            f"z={float(pose['z']):.2f}) "
+            f"target=(x={target_world_x:.2f}, y={target_world_y:.2f}, "
+            f"z={target_world_z:.2f})"
         )
         return trajectory
 
-    def _capture_scan_point(self, clock_hour, motion_timing):
+    def _capture_scan_point(self, point_idx):
         capture_started = time.perf_counter()
         frame_rgb = self.client.capture(include_depth=False)
-        capture_rgb_s = time.perf_counter() - capture_started
-        image_path = Path(self.vis_dir) / f"scan_{clock_hour:02d}.png"
-        save_image_started = time.perf_counter()
+        self._log(
+            f"[TIMING] phase=scan point={point_idx} "
+            f"capture_rgb_s={time.perf_counter() - capture_started:.4f}"
+        )
+        image_path = Path(self.vis_dir) / f"scan_{point_idx:02d}.png"
         Image.fromarray(frame_rgb).save(image_path)
-        save_image_s = time.perf_counter() - save_image_started
         pose = self.client.get_pose()
         self._log(
-            f"[SCAN] Captured clock_hour={clock_hour} image={image_path} "
+            f"[SCAN] Captured point={point_idx} image={image_path} "
             f"pose=(x={pose['x']:.2f}, y={pose['y']:.2f}, "
             f"z={pose['z']:.2f}, yaw={pose['yaw']:.2f})"
-        )
-        total_s = (
-            motion_timing["drone_execution_s"]
-            + capture_rgb_s
-            + save_image_s
-        )
-        self._log_timing(
-            total_s,
-            command_id=self._last_motion_command_id,
-            capture=capture_rgb_s,
-            save_image=save_image_s,
-            execution=motion_timing["drone_execution_s"],
         )
         return pose
 
     def scan(self):
         """Follow a small local circle and capture one RGB image at each point."""
         trajectory = self._estimate_scan_circle()
-        for target_pose in trajectory:
-            clock_hour = target_pose["clock_hour"]
+        for point_idx, target_pose in enumerate(trajectory):
             self._move_to_pose_hybrid(
                 target_pose,
-                context=f"scan_clock_hour={clock_hour}",
-                log_timing=False,
+                context=f"scan_point={point_idx}",
             )
-            self._capture_scan_point(clock_hour, self._last_motion_timing)
+            self._capture_scan_point(point_idx)
 
-        # Close the 30-degree arc from 11 o'clock to 12 o'clock without
-        # taking a duplicate image.
+        # Close the final 30-degree arc without taking a duplicate image.
         self._move_to_pose_hybrid(
             trajectory[0],
-            context="scan_close_circle clock_hour=12",
+            context="scan_close_circle",
         )
 
         self._log(
@@ -1054,20 +917,14 @@ class TJKAgent:
         )
         for height_idx, height_offset_cm in enumerate(search_height_offsets_cm):
             if height_idx == 1:
-                self.exec_xyz_yaw_hybrid(
-                    0.0,
-                    0.0,
+                self.exec_z_action_cm(
                     self.search_height_offset_cm,
-                    0.0,
-                    context="search_height_up",
+                    AgentAction.UP,
                 )
             elif height_idx == 2:
-                self.exec_xyz_yaw_hybrid(
-                    0.0,
-                    0.0,
+                self.exec_z_action_cm(
                     -2 * self.search_height_offset_cm,
-                    0.0,
-                    context="search_height_down",
+                    AgentAction.DOWN,
                 )
 
             for i in range(self.search_rotation_count):
@@ -1075,63 +932,31 @@ class TJKAgent:
                 # Search only needs RGB. Depth estimation starts in track().
                 capture_started = time.perf_counter()
                 cur_frame = self.client.capture(include_depth=False)
-                capture_rgb_s = time.perf_counter() - capture_started
+                self._log(
+                    f"[TIMING] phase=search candidate={candidate_idx} "
+                    f"capture_rgb_s={time.perf_counter() - capture_started:.4f}"
+                )
                 detection_started = time.perf_counter()
                 detection = self.detect_with_grounding_dino(cur_frame, text_prompt)
-                grounding_dino_s = time.perf_counter() - detection_started
+                self._log(
+                    f"[TIMING] phase=search candidate={candidate_idx} "
+                    f"grounding_dino_s={time.perf_counter() - detection_started:.4f}"
+                )
 
                 if detection is not None:
                     target_box, confidence, label = detection
-                    visualization_started = time.perf_counter()
-                    show_fig(
-                        cur_frame,
-                        f"{self.vis_dir}/candidate_{candidate_idx:02d}.png",
-                        box_coords=target_box,
-                    )
-                    visualization_s = time.perf_counter() - visualization_started
+                    show_fig(cur_frame, f"{self.vis_dir}/candidate_{candidate_idx}.png", box_coords=target_box)
                     print(
                         f"[SEARCH] Found {label} with confidence={confidence:.3f} "
                         f"at height offset={height_offset_cm:+d} cm, "
                         f"heading={i * self.search_rotation_step_deg:.1f} deg."
                     )
-                    self._log_timing(
-                        capture_rgb_s + grounding_dino_s + visualization_s,
-                        command_id=None,
-                        capture=capture_rgb_s,
-                        detector={
-                            "total": grounding_dino_s + visualization_s,
-                            "infer": grounding_dino_s,
-                            "vis": visualization_s,
-                        },
-                        execution=0.0,
-                    )
                     break
 
-                visualization_started = time.perf_counter()
-                show_fig(
-                    cur_frame,
-                    f"{self.vis_dir}/candidate_{candidate_idx:02d}.png",
-                )
-                visualization_s = time.perf_counter() - visualization_started
+                show_fig(cur_frame, f"{self.vis_dir}/candidate_{candidate_idx}.png")
                 self.exec_rotate_action_deg(
                     self.search_rotation_step_deg,
-                    context=f"search candidate={candidate_idx}",
-                    log_timing=False,
-                )
-                motion_timing = self._last_motion_timing
-                self._log_timing(
-                    capture_rgb_s
-                    + grounding_dino_s
-                    + visualization_s
-                    + motion_timing["drone_execution_s"],
-                    command_id=self._last_motion_command_id,
-                    capture=capture_rgb_s,
-                    detector={
-                        "total": grounding_dino_s + visualization_s,
-                        "infer": grounding_dino_s,
-                        "vis": visualization_s,
-                    },
-                    execution=motion_timing["drone_execution_s"],
+                    AgentAction.RIGHT,
                 )
 
             if target_box is not None:
@@ -1142,33 +967,26 @@ class TJKAgent:
             return False
 
         # Initialize SAM2 tracking directly with GroundingDINO's xyxy box.
+        track_frame_idx = self.tracker.frame_idx
         sam2_started = time.perf_counter()
         bbox = self.tracker.track(cur_frame, box=target_box)
-        sam2_fields = self._sam2_timing_fields(
-            self.tracker,
+        self._log_sam2_timing(
+            "track_init",
+            track_frame_idx,
             time.perf_counter() - sam2_started,
         )
 
         decision_started = time.perf_counter()
         state = self.get_bbox_state(bbox)
         horizontal_offset = state["horizontal_offset"]
-        angle_to_rotate = self.prepare_rotate_action_deg(horizontal_offset)
-        decision_s = time.perf_counter() - decision_started
-        self.exec_rotate_action_deg(
-            angle_to_rotate,
-            context="track_init",
-            log_timing=False,
+        angle_to_rotate, action = self.prepare_rotate_action_deg(horizontal_offset)
+        self._log_decision_timing(
+            "init",
+            decision_started,
+            action,
+            f"dyaw={float(angle_to_rotate):.2f}deg",
         )
-        motion_timing = self._last_motion_timing
-        self._log_timing(
-            sam2_fields["total"]
-            + decision_s
-            + motion_timing["drone_execution_s"],
-            command_id=self._last_motion_command_id,
-            tracker=sam2_fields,
-            decision=decision_s,
-            execution=motion_timing["drone_execution_s"],
-        )
+        self.exec_rotate_action_deg(angle_to_rotate, action)
 
         return True
 
@@ -1236,17 +1054,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        default="config_v8.yaml",
+        default=str(
+            Path(__file__).resolve().parents[1]
+            / "config"
+            / "base"
+            / "v5.yaml"
+        ),
         help="Required agent YAML config path",
     )
     parser.add_argument(
-        "--exp_name",
+        "--vdir",
         type=str,
-        default="./test",
-        help=(
-            "Experiment directory prefix; a timestamp suffix is added "
-            "automatically (default: ./test)"
-        ),
+        default="./tjk_vis",
+        help="Prefix for the timestamped visualization directory (default: ./tjk_vis)",
+    )
+    parser.add_argument(
+        "--log",
+        type=str,
+        default="./.log",
+        help="Prefix or .log path for the timestamped run log (default: ./.log)",
     )
     parser.add_argument(
         "--obj",
@@ -1268,16 +1094,15 @@ def main():
     # Validate the required config before creating logs, clients, or models.
     _load_config(args.config)
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_dir = _timestamped_experiment_dir(args.exp_name, timestamp)
-    vis_dir = exp_dir / "vis"
-    log_path = exp_dir / "log.txt"
+    vis_dir = _timestamped_dir(args.vdir, timestamp)
+    log_path = _timestamped_log_path(args.log, timestamp)
     vis_dir.mkdir(parents=True, exist_ok=True)
     logger = _configure_logger(log_path)
     logger.info(
         f"[RUN] client={args.client} object={args.obj!r} "
         f"depth_source={'ue_native' if args.client == 'ue' else 'client_da3'} "
         f"config={Path(args.config).expanduser().resolve()} "
-        f"exp_dir={exp_dir} vis={vis_dir} log={log_path}"
+        f"vdir={vis_dir} log={log_path}"
     )
 
     client = build_client(

@@ -1,4 +1,4 @@
-# 1. 单航点处 select 最近的目标
+# 1. track 像素映射
 
 import argparse
 import datetime as dt
@@ -15,7 +15,9 @@ import numpy as np
 import yaml
 from PIL import Image
 
-SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, SRC_ROOT)
 
 GROUNDING_SAM_ROOT = r'C:\Users\colab999\Desktop\project\Grounded_SAM_2_main'
@@ -80,7 +82,6 @@ class AgentAction(str, Enum):
 
 class AgentState(str, Enum):
     SEARCH = "SEARCH"
-    SELECT = "SELECT"
     TRACK = "TRACK"
     SCAN = "SCAN"
     RETURN_WAYPOINT = "RETURN_WAYPOINT"
@@ -92,7 +93,7 @@ def _timestamped_experiment_dir(exp_name: str, timestamp: str) -> Path:
 
 def _configure_logger(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("tjk_v9")
+    logger = logging.getLogger("tjk_v7")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
@@ -130,8 +131,6 @@ class TJKAgent:
         self.save_depth = save_depth
         self.state = AgentState.SEARCH
         self.waypoint_pose = None
-        self.search_candidates = []
-        self.selected_candidate = None
         self.last_track_observation = None
         self.config_path = Path(config_path).expanduser().resolve()
         config = _load_config(self.config_path)
@@ -254,17 +253,11 @@ class TJKAgent:
             scan_config,
             "num_points",
             integer=True,
-            minimum=12.0,
-            maximum=12.0,
+            minimum=3.0,
         )
         self.scan_radius_cm = _config_number(
             scan_config,
             "radius_cm",
-            minimum=1e-6,
-        )
-        self.scan_yaw_unit_deg = _config_number(
-            scan_config,
-            "yaw_unit_deg",
             minimum=1e-6,
         )
 
@@ -531,53 +524,6 @@ class TJKAgent:
         box_xyxy[[0, 2]] = np.clip(box_xyxy[[0, 2]], 0, image_w - 1)
         box_xyxy[[1, 3]] = np.clip(box_xyxy[[1, 3]], 0, image_h - 1)
         return box_xyxy, float(confidences[best_idx]), labels[best_idx]
-
-    @staticmethod
-    def _copy_pose(pose):
-        return {
-            axis: float(pose[axis])
-            for axis in ("x", "y", "z", "yaw")
-        }
-
-    @staticmethod
-    def _mask_median_depth_cm(depth_raw, mask) -> Optional[float]:
-        mask = np.asarray(mask, dtype=bool).squeeze()
-        if mask.ndim != 2:
-            return None
-        depth = np.asarray(depth_raw)
-        if depth.shape != mask.shape:
-            depth = cv2.resize(
-                depth,
-                (mask.shape[1], mask.shape[0]),
-                interpolation=cv2.INTER_NEAREST,
-            )
-        valid_depths = depth[
-            mask & np.isfinite(depth) & (depth > 0)
-        ]
-        if valid_depths.size == 0:
-            return None
-        return float(np.median(valid_depths))
-
-    def _segment_search_candidate(self, frame_rgb, target_box):
-        """Run an independent box-prompted SAM segmentation for one candidate."""
-        self.tracker.reset()
-        self.tracker.set_vis_mode(False)
-        try:
-            tracker_started = time.perf_counter()
-            bbox, mask = self.tracker.track_with_mask(
-                frame_rgb,
-                box=target_box,
-            )
-            tracker_fields = self._sam2_timing_fields(
-                self.tracker,
-                time.perf_counter() - tracker_started,
-            )
-            return bbox, mask, tracker_fields
-        finally:
-            # Search candidates are independent. Do not let one candidate's
-            # temporal state influence the next candidate or final tracking.
-            self.tracker.set_vis_mode(self.save_vis)
-            self.tracker.reset()
 
     def connect(self):
         self.client.start()
@@ -903,43 +849,79 @@ class TJKAgent:
             log_timing=log_timing,
         )
 
+    def _get_target_depth_cm(self, depth_raw, mask) -> Optional[float]:
+        mask = np.asarray(mask, dtype=bool).squeeze()
+        if mask.ndim != 2:
+            return None
+        if depth_raw.shape != mask.shape:
+            depth_raw = cv2.resize(
+                depth_raw,
+                (mask.shape[1], mask.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        target_depths = depth_raw[
+            mask & np.isfinite(depth_raw) & (depth_raw > 0)
+        ]
+        if target_depths.size == 0:
+            return None
+        return float(np.median(target_depths))
+
     def _estimate_scan_circle(self):
-        """Plan a 12-point clock-face circle around the track-end pose."""
+        """Plan a local vertical circle around the track-end drone position."""
         observation = self.last_track_observation
         if observation is None:
             raise RuntimeError("Last track observation is unavailable for scan")
 
         pose = observation["pose"]
+        bbox_state = self.get_bbox_state(observation["bbox"])
+        target_distance_cm = self._get_target_depth_cm(
+            observation["depth_raw"],
+            observation["mask"],
+        )
+        if target_distance_cm is None:
+            target_distance_cm = self.depth_safe_distance_cm
+            self._log(
+                "[SCAN] Target depth unavailable; use "
+                f"fallback_distance={target_distance_cm:.2f}cm"
+            )
+
+        horizontal_angle_deg = (
+            bbox_state["horizontal_offset"] * self.rotate_deg_per_pixel
+        )
+        vertical_angle_deg = (
+            bbox_state["vertical_offset"] * self.rotate_deg_per_pixel
+        )
+        horizontal_distance_cm = max(
+            1.0,
+            float(
+                target_distance_cm
+                * np.cos(np.radians(vertical_angle_deg))
+            ),
+        )
+        target_bearing_deg = self._normalize_angle_deg(
+            float(pose["yaw"]) + horizontal_angle_deg
+        )
+        target_bearing_rad = np.radians(target_bearing_deg)
+        target_world_x = float(pose["x"]) + float(
+            np.cos(target_bearing_rad) * horizontal_distance_cm
+        )
+        target_world_y = float(pose["y"]) + float(
+            np.sin(target_bearing_rad) * horizontal_distance_cm
+        )
+        target_world_z = float(pose["z"]) + float(
+            target_distance_cm * np.sin(np.radians(vertical_angle_deg))
+        )
+
         origin_yaw_rad = np.radians(float(pose["yaw"]))
-        # Positive dyaw is a right turn in the agent command convention.
-        yaw_steps_by_hour = {
-            1: -1,
-            2: -2,
-            3: -3,
-            4: -2,
-            5: -1,
-            6: 0,
-            7: 1,
-            8: 2,
-            9: 3,
-            10: 2,
-            11: 1,
-            12: 0,
-        }
         trajectory = []
-        clock_hours = [12, *range(1, self.scan_num_points)]
-        for clock_hour in clock_hours:
-            clock_angle_rad = 2.0 * np.pi * clock_hour / self.scan_num_points
+        for point_idx in range(self.scan_num_points):
+            circle_angle_rad = 2.0 * np.pi * point_idx / self.scan_num_points
             right_offset_cm = float(
-                np.sin(clock_angle_rad) * self.scan_radius_cm
+                np.cos(circle_angle_rad) * self.scan_radius_cm
             )
             up_offset_cm = float(
-                np.cos(clock_angle_rad) * self.scan_radius_cm
+                np.sin(circle_angle_rad) * self.scan_radius_cm
             )
-            if clock_hour in (6, 12):
-                right_offset_cm = 0.0
-            if clock_hour in (3, 9):
-                up_offset_cm = 0.0
             point_x = float(pose["x"]) - float(
                 np.sin(origin_yaw_rad) * right_offset_cm
             )
@@ -950,46 +932,45 @@ class TJKAgent:
                 self.safe_z_cm,
                 float(pose["z"]) + up_offset_cm,
             )
-            point_yaw = self._normalize_angle_deg(
-                float(pose["yaw"])
-                + yaw_steps_by_hour[clock_hour] * self.scan_yaw_unit_deg
+            point_yaw = float(
+                np.degrees(
+                    np.arctan2(
+                        target_world_y - point_y,
+                        target_world_x - point_x,
+                    )
+                )
             )
             trajectory.append(
                 {
                     "x": point_x,
                     "y": point_y,
                     "z": point_z,
-                    "yaw": point_yaw,
-                    "clock_hour": clock_hour,
+                    "yaw": self._normalize_angle_deg(point_yaw),
                 }
             )
 
-        yaw_offsets = ", ".join(
-            f"{point['clock_hour']}="
-            f"{self._normalize_angle_deg(point['yaw'] - float(pose['yaw'])):.2f}"
-            for point in trajectory
-        )
         self._log(
-            "[SCAN] Planned simple clock trajectory: "
+            "[SCAN] Planned local vertical circle: "
             f"points={self.scan_num_points} radius={self.scan_radius_cm:.2f}cm "
-            f"yaw_unit={self.scan_yaw_unit_deg:.2f}deg "
+            f"estimated_target_distance={horizontal_distance_cm:.2f}cm "
             f"center=(x={float(pose['x']):.2f}, y={float(pose['y']):.2f}, "
-            f"z={float(pose['z']):.2f}, yaw={float(pose['yaw']):.2f}) "
-            f"yaw_offsets_deg=({yaw_offsets})"
+            f"z={float(pose['z']):.2f}) "
+            f"target=(x={target_world_x:.2f}, y={target_world_y:.2f}, "
+            f"z={target_world_z:.2f})"
         )
         return trajectory
 
-    def _capture_scan_point(self, clock_hour, motion_timing):
+    def _capture_scan_point(self, point_idx, motion_timing):
         capture_started = time.perf_counter()
         frame_rgb = self.client.capture(include_depth=False)
         capture_rgb_s = time.perf_counter() - capture_started
-        image_path = Path(self.vis_dir) / f"scan_{clock_hour:02d}.png"
+        image_path = Path(self.vis_dir) / f"scan_{point_idx:02d}.png"
         save_image_started = time.perf_counter()
         Image.fromarray(frame_rgb).save(image_path)
         save_image_s = time.perf_counter() - save_image_started
         pose = self.client.get_pose()
         self._log(
-            f"[SCAN] Captured clock_hour={clock_hour} image={image_path} "
+            f"[SCAN] Captured point={point_idx} image={image_path} "
             f"pose=(x={pose['x']:.2f}, y={pose['y']:.2f}, "
             f"z={pose['z']:.2f}, yaw={pose['yaw']:.2f})"
         )
@@ -1010,20 +991,18 @@ class TJKAgent:
     def scan(self):
         """Follow a small local circle and capture one RGB image at each point."""
         trajectory = self._estimate_scan_circle()
-        for target_pose in trajectory:
-            clock_hour = target_pose["clock_hour"]
+        for point_idx, target_pose in enumerate(trajectory):
             self._move_to_pose_hybrid(
                 target_pose,
-                context=f"scan_clock_hour={clock_hour}",
+                context=f"scan_point={point_idx}",
                 log_timing=False,
             )
-            self._capture_scan_point(clock_hour, self._last_motion_timing)
+            self._capture_scan_point(point_idx, self._last_motion_timing)
 
-        # Close the 30-degree arc from 11 o'clock to 12 o'clock without
-        # taking a duplicate image.
+        # Close the final 30-degree arc without taking a duplicate image.
         self._move_to_pose_hybrid(
             trajectory[0],
-            context="scan_close_circle clock_hour=12",
+            context="scan_close_circle",
         )
 
         self._log(
@@ -1041,7 +1020,6 @@ class TJKAgent:
         )
 
         search_succeeded = False
-        select_succeeded = False
         track_succeeded = False
         scan_succeeded = False
         self.state = AgentState.SEARCH
@@ -1053,15 +1031,8 @@ class TJKAgent:
                 if self.state == AgentState.SEARCH:
                     search_succeeded = self.search(text_prompt)
                     self.state = (
-                        AgentState.SELECT
-                        if search_succeeded
-                        else AgentState.RETURN_WAYPOINT
-                    )
-                elif self.state == AgentState.SELECT:
-                    select_succeeded = self.select()
-                    self.state = (
                         AgentState.TRACK
-                        if select_succeeded
+                        if search_succeeded
                         else AgentState.RETURN_WAYPOINT
                     )
                 elif self.state == AgentState.TRACK:
@@ -1089,28 +1060,22 @@ class TJKAgent:
                 self.return_waypoint()
             raise
 
-        succeeded = (
-            search_succeeded
-            and select_succeeded
-            and track_succeeded
-            and scan_succeeded
-        )
+        succeeded = search_succeeded and track_succeeded and scan_succeeded
         self._log(
-            f"[RES] Waypoint task completed; candidates="
-            f"{len(self.search_candidates)} target_selected={select_succeeded} "
-            f"target_reached={track_succeeded} "
+            f"[RES] Waypoint task completed; target_reached={track_succeeded} "
             f"scan_completed={scan_succeeded}."
         )
         return succeeded
 
     def search(self, text_prompt):
-        """Scan all three height levels and collect every detected candidate."""
+        """Search three height levels and initialize the tracker on detection."""
+        # Each waypoint is an independent tracking segment.
         self.tracker.reset()
-        self.search_candidates = []
-        self.selected_candidate = None
         self.last_track_observation = None
 
         # Search at h, h+offset, and h-offset, one full turn at each height.
+        cur_frame = None
+        target_box = None
         search_height_offsets_cm = (
             0,
             self.search_height_offset_cm,
@@ -1136,171 +1101,78 @@ class TJKAgent:
 
             for i in range(self.search_rotation_count):
                 candidate_idx = height_idx * self.search_rotation_count + i
+                # Search only needs RGB. Depth estimation starts in track().
                 capture_started = time.perf_counter()
-                cur_frame, depth_raw = self.client.capture(include_depth=True)
+                cur_frame = self.client.capture(include_depth=False)
                 capture_rgb_s = time.perf_counter() - capture_started
                 detection_started = time.perf_counter()
                 detection = self.detect_with_grounding_dino(cur_frame, text_prompt)
                 grounding_dino_s = time.perf_counter() - detection_started
-                tracker_fields = None
 
                 if detection is not None:
                     target_box, confidence, label = detection
-                    sam_bbox, mask, tracker_fields = (
-                        self._segment_search_candidate(
-                            cur_frame,
-                            target_box,
-                        )
-                    )
-                    distance_cm = self._mask_median_depth_cm(
-                        depth_raw,
-                        mask,
-                    )
-                    if distance_cm is None:
-                        self._log(
-                            f"[SEARCH] Skip candidate={candidate_idx}: "
-                            "SAM mask contains no valid positive depth."
-                        )
-                    else:
-                        candidate_pose = self._copy_pose(
-                            self.client.get_pose()
-                        )
-                        candidate = {
-                            "candidate_idx": candidate_idx,
-                            "height_offset_cm": height_offset_cm,
-                            "heading_deg": (
-                                i * self.search_rotation_step_deg
-                            ),
-                            "pose": candidate_pose,
-                            "box": np.asarray(target_box).copy(),
-                            "sam_bbox": np.asarray(sam_bbox).copy(),
-                            "mask": np.asarray(mask).copy(),
-                            "distance_cm": distance_cm,
-                            "confidence": float(confidence),
-                            "label": str(label),
-                        }
-                        self.search_candidates.append(candidate)
-                        self._log(
-                            f"[SEARCH] Queued candidate={candidate_idx} "
-                            f"label={label} confidence={confidence:.3f} "
-                            f"distance={distance_cm:.2f}cm "
-                            f"height_offset={height_offset_cm:+d}cm "
-                            f"heading={candidate['heading_deg']:.1f}deg "
-                            f"pose=(x={candidate_pose['x']:.2f}, "
-                            f"y={candidate_pose['y']:.2f}, "
-                            f"z={candidate_pose['z']:.2f}, "
-                            f"yaw={candidate_pose['yaw']:.2f})"
-                        )
                     visualization_started = time.perf_counter()
                     show_fig(
                         cur_frame,
                         f"{self.vis_dir}/candidate_{candidate_idx:02d}.png",
-                        masks=[mask],
                         box_coords=target_box,
                     )
                     visualization_s = time.perf_counter() - visualization_started
-                else:
-                    visualization_started = time.perf_counter()
-                    show_fig(
-                        cur_frame,
-                        f"{self.vis_dir}/candidate_{candidate_idx:02d}.png",
+                    print(
+                        f"[SEARCH] Found {label} with confidence={confidence:.3f} "
+                        f"at height offset={height_offset_cm:+d} cm, "
+                        f"heading={i * self.search_rotation_step_deg:.1f} deg."
                     )
-                    visualization_s = (
-                        time.perf_counter() - visualization_started
+                    self._log_timing(
+                        capture_rgb_s + grounding_dino_s + visualization_s,
+                        command_id=None,
+                        capture=capture_rgb_s,
+                        detector={
+                            "total": grounding_dino_s + visualization_s,
+                            "infer": grounding_dino_s,
+                            "vis": visualization_s,
+                        },
+                        execution=0.0,
                     )
+                    break
 
-                # Always complete the full rotation, even after a detection.
+                visualization_started = time.perf_counter()
+                show_fig(
+                    cur_frame,
+                    f"{self.vis_dir}/candidate_{candidate_idx:02d}.png",
+                )
+                visualization_s = time.perf_counter() - visualization_started
                 self.exec_rotate_action_deg(
                     self.search_rotation_step_deg,
                     context=f"search candidate={candidate_idx}",
                     log_timing=False,
                 )
                 motion_timing = self._last_motion_timing
-                total_s = (
+                self._log_timing(
                     capture_rgb_s
                     + grounding_dino_s
                     + visualization_s
-                    + (
-                        tracker_fields["total"]
-                        if tracker_fields is not None
-                        else 0.0
-                    )
-                    + motion_timing["drone_execution_s"]
-                )
-                timing_fields = {
-                    "capture": capture_rgb_s,
-                    "detector": {
+                    + motion_timing["drone_execution_s"],
+                    command_id=self._last_motion_command_id,
+                    capture=capture_rgb_s,
+                    detector={
                         "total": grounding_dino_s + visualization_s,
                         "infer": grounding_dino_s,
                         "vis": visualization_s,
                     },
-                }
-                if tracker_fields is not None:
-                    timing_fields["tracker"] = tracker_fields
-                timing_fields["execution"] = (
-                    motion_timing["drone_execution_s"]
-                )
-                self._log_timing(
-                    total_s,
-                    command_id=self._last_motion_command_id,
-                    **timing_fields,
+                    execution=motion_timing["drone_execution_s"],
                 )
 
-        if not self.search_candidates:
-            self._log(
-                "[SEARCH] Completed all height levels; candidate queue is "
-                "empty, return to the waypoint."
-            )
+            if target_box is not None:
+                break
+
+        if target_box is None:
+            self._log("[SEARCH] Target was not found; return to the waypoint.")
             return False
 
-        nearest = min(
-            self.search_candidates,
-            key=lambda candidate: candidate["distance_cm"],
-        )
-        self._log(
-            f"[SEARCH] Completed all height levels; queued="
-            f"{len(self.search_candidates)} nearest_candidate="
-            f"{nearest['candidate_idx']} "
-            f"distance={nearest['distance_cm']:.2f}cm."
-        )
-        return True
-
-    def select(self):
-        """Return to the nearest candidate pose and initialize SAM tracking."""
-        if not self.search_candidates:
-            self._log("[SELECT] Candidate queue is empty.")
-            return False
-
-        selected = min(
-            self.search_candidates,
-            key=lambda candidate: candidate["distance_cm"],
-        )
-        self.selected_candidate = selected
-        selected_pose = selected["pose"]
-        self._log(
-            f"[SELECT] Selected candidate={selected['candidate_idx']} "
-            f"distance={selected['distance_cm']:.2f}cm "
-            f"confidence={selected['confidence']:.3f} "
-            f"pose=(x={selected_pose['x']:.2f}, "
-            f"y={selected_pose['y']:.2f}, z={selected_pose['z']:.2f}, "
-            f"yaw={selected_pose['yaw']:.2f})"
-        )
-        self._move_to_pose_hybrid(
-            selected_pose,
-            context=f"select candidate={selected['candidate_idx']}",
-        )
-
-        # Re-capture at the recorded pose and initialize SAM directly from
-        # the saved detector box. GroundingDINO is intentionally not called.
-        capture_started = time.perf_counter()
-        cur_frame = self.client.capture(include_depth=False)
-        capture_s = time.perf_counter() - capture_started
-        self.tracker.reset()
+        # Initialize SAM2 tracking directly with GroundingDINO's xyxy box.
         sam2_started = time.perf_counter()
-        bbox, _mask = self.tracker.track_with_mask(
-            cur_frame,
-            box=selected["box"],
-        )
+        bbox = self.tracker.track(cur_frame, box=target_box)
         sam2_fields = self._sam2_timing_fields(
             self.tracker,
             time.perf_counter() - sam2_started,
@@ -1313,17 +1185,15 @@ class TJKAgent:
         decision_s = time.perf_counter() - decision_started
         self.exec_rotate_action_deg(
             angle_to_rotate,
-            context=f"track_init candidate={selected['candidate_idx']}",
+            context="track_init",
             log_timing=False,
         )
         motion_timing = self._last_motion_timing
         self._log_timing(
-            capture_s
-            + sam2_fields["total"]
+            sam2_fields["total"]
             + decision_s
             + motion_timing["drone_execution_s"],
             command_id=self._last_motion_command_id,
-            capture=capture_s,
             tracker=sam2_fields,
             decision=decision_s,
             execution=motion_timing["drone_execution_s"],
@@ -1395,7 +1265,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        default="config_v9.yaml",
+        default=str(
+            Path(__file__).resolve().parents[1]
+            / "config"
+            / "base"
+            / "v7.yaml"
+        ),
         help="Required agent YAML config path",
     )
     parser.add_argument(
@@ -1410,7 +1285,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--obj",
         type=str,
-        default="white light bulb",
+        default="white ball",
         help="Object description used by GroundingDINO (default: street lamp)",
     )
     parser.add_argument(

@@ -1,5 +1,4 @@
-# 1. track 同轴控制
-# 2. log 优化
+# 1. 简易 scan
 
 import argparse
 import datetime as dt
@@ -16,7 +15,9 @@ import numpy as np
 import yaml
 from PIL import Image
 
-SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, SRC_ROOT)
 
 GROUNDING_SAM_ROOT = r'C:\Users\colab999\Desktop\project\Grounded_SAM_2_main'
@@ -92,7 +93,7 @@ def _timestamped_experiment_dir(exp_name: str, timestamp: str) -> Path:
 
 def _configure_logger(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("tjk_v6")
+    logger = logging.getLogger("tjk_v8")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
@@ -140,41 +141,55 @@ class TJKAgent:
         scan_config = _config_section(config, "scan")
         detection_config = _config_section(config, "detection")
 
-        # max step distance
+        # Forward/backward action.
         self.max_fb_step_cm = _config_number(
             motion_config, "max_fb_step_cm", minimum=1e-6
         )
-        self.max_z_step_cm = _config_number(
-            motion_config, "max_z_step_cm", minimum=1e-6
+        self.min_reliable_fb_step_cm = _config_number(
+            motion_config, "min_reliable_fb_step_cm", minimum=0.0
         )
-        self.max_rotate_deg = _config_number(
-            motion_config, "max_rotate_deg", minimum=1e-6
-        )
-
-        # min step distance
-        self.min_fb_step_cm = _config_number(
-            motion_config, "min_fb_step_cm", minimum=0.0
-        )
-        self.min_z_step_cm = _config_number(
-            motion_config, "min_z_step_cm", minimum=0.0
-        )
-        self.min_rotate_deg = _config_number(
-            motion_config, "min_rotate_deg", minimum=0.0
-        )
-        if self.min_fb_step_cm > self.max_fb_step_cm:
-            raise ValueError("motion.min_fb_step_cm cannot exceed max_fb_step_cm")
-        if self.min_z_step_cm > self.max_z_step_cm:
-            raise ValueError("motion.min_z_step_cm cannot exceed max_z_step_cm")
-        if self.min_rotate_deg > self.max_rotate_deg:
-            raise ValueError("motion.min_rotate_deg cannot exceed max_rotate_deg")
-
-        # fixed action
         self.backward_ratio = _config_number(
             motion_config,
             "backward_ratio",
             minimum=0.0,
             maximum=1.0,
         )
+
+        # Vertical action.
+        self.z_cm_per_pixel = _config_number(
+            motion_config, "z_cm_per_pixel", minimum=1e-6
+        )
+        self.max_z_step_cm = _config_number(
+            motion_config, "max_z_step_cm", minimum=1e-6
+        )
+        self.min_reliable_z_step_cm = _config_number(
+            motion_config, "min_reliable_z_step_cm", minimum=0.0
+        )
+
+        # Yaw action.
+        self.rotate_deg_per_pixel = _config_number(
+            motion_config, "rotate_deg_per_pixel", minimum=1e-6
+        )
+        self.max_rotate_deg = _config_number(
+            motion_config, "max_rotate_deg", minimum=1e-6
+        )
+        self.min_reliable_rotate_deg = _config_number(
+            motion_config, "min_reliable_rotate_deg", minimum=0.0
+        )
+
+        if self.min_reliable_fb_step_cm > self.max_fb_step_cm:
+            raise ValueError(
+                "motion.min_reliable_fb_step_cm cannot exceed max_fb_step_cm"
+            )
+        if self.min_reliable_z_step_cm > self.max_z_step_cm:
+            raise ValueError(
+                "motion.min_reliable_z_step_cm cannot exceed max_z_step_cm"
+            )
+        if self.min_reliable_rotate_deg > self.max_rotate_deg:
+            raise ValueError(
+                "motion.min_reliable_rotate_deg cannot exceed max_rotate_deg"
+            )
+
         self.search_rotation_step_deg = _config_number(
             search_config,
             "rotation_step_deg",
@@ -221,7 +236,7 @@ class TJKAgent:
         self.yaw_only_threshold_deg = _config_number(
             track_config,
             "yaw_only_threshold_deg",
-            minimum=self.min_rotate_deg,
+            minimum=self.min_reliable_rotate_deg,
             maximum=self.max_rotate_deg,
         )
 
@@ -238,11 +253,17 @@ class TJKAgent:
             scan_config,
             "num_points",
             integer=True,
-            minimum=3.0,
+            minimum=12.0,
+            maximum=12.0,
         )
         self.scan_radius_cm = _config_number(
             scan_config,
             "radius_cm",
+            minimum=1e-6,
+        )
+        self.scan_yaw_unit_deg = _config_number(
+            scan_config,
+            "yaw_unit_deg",
             minimum=1e-6,
         )
 
@@ -585,9 +606,12 @@ class TJKAgent:
         }
 
     def prepare_rotate_action_deg(self, horizontal_offset):
-        angle_to_rotate = (
-            horizontal_offset / self.img_width
-        ) * self.max_rotate_deg
+        angle_to_rotate = horizontal_offset * self.rotate_deg_per_pixel
+        angle_to_rotate = np.clip(
+            angle_to_rotate,
+            -self.max_rotate_deg,
+            self.max_rotate_deg,
+        )
         return float(angle_to_rotate)
     
     def exec_rotate_action_deg(
@@ -609,7 +633,7 @@ class TJKAgent:
         )
     
     def prepare_z_action_cm(self, vertical_offset):
-        dz_cm = (vertical_offset / self.img_height) * (2.0 * self.max_z_step_cm)
+        dz_cm = vertical_offset * self.z_cm_per_pixel
         dz_cm = float(np.clip(dz_cm, -self.max_z_step_cm, self.max_z_step_cm))
         return dz_cm
 
@@ -618,7 +642,7 @@ class TJKAgent:
     
     def prepare_fb_action_cm(self, box_ratio):
         target = self.target_stop_ratio
-        deadband = self.min_fb_step_cm / self.max_fb_step_cm * target
+        deadband = self.min_reliable_fb_step_cm / self.max_fb_step_cm * target
 
         if box_ratio > target + deadband:
             step_cm = self.get_backward_step_cm()
@@ -692,7 +716,7 @@ class TJKAgent:
                     self._last_motion_timing,
                 )
                 continue
-            if abs(angle_to_rotate) > self.min_rotate_deg:
+            if abs(angle_to_rotate) > self.min_reliable_rotate_deg:
                 dyaw_deg = angle_to_rotate
             else:
                 dyaw_deg = 0.0
@@ -710,12 +734,12 @@ class TJKAgent:
                 else:
                     dz_cm = max(dz_cm, self.safe_z_cm - cur_z_cm)
 
-            if abs(dz_cm) <= self.min_z_step_cm:
+            if abs(dz_cm) <= self.min_reliable_z_step_cm:
                 print(f"[STALL] dz_cm is {dz_cm} and Stalled.")
                 dz_cm = 0.0
 
             dx_cm = self.prepare_fb_action_cm(box_ratio)
-            if abs(dx_cm) <= self.min_fb_step_cm:
+            if abs(dx_cm) <= self.min_reliable_fb_step_cm:
                 print(f"[STALL] dx is {dx_cm} cm and Stalled.")
                 dx_cm = 0.0
             elif dx_cm > 0.0:
@@ -733,11 +757,11 @@ class TJKAgent:
                     f"available={available_dx_cm:.2f} cm, "
                     f"forward={dx_cm:.2f} cm."
                 )
-                if dx_cm <= self.min_fb_step_cm:
+                if dx_cm <= self.min_reliable_fb_step_cm:
                     print(
                         f"[STALL] Depth-limited forward step {dx_cm:.2f} cm "
                         f"is not executable (minimum "
-                        f"{self.min_fb_step_cm:.2f} cm); stop at the safe "
+                        f"{self.min_reliable_fb_step_cm:.2f} cm); stop at the safe "
                         "distance."
                     )
                     dx_cm = 0.0
@@ -831,80 +855,43 @@ class TJKAgent:
             log_timing=log_timing,
         )
 
-    def _get_target_depth_cm(self, depth_raw, mask) -> Optional[float]:
-        mask = np.asarray(mask, dtype=bool).squeeze()
-        if mask.ndim != 2:
-            return None
-        if depth_raw.shape != mask.shape:
-            depth_raw = cv2.resize(
-                depth_raw,
-                (mask.shape[1], mask.shape[0]),
-                interpolation=cv2.INTER_NEAREST,
-            )
-        target_depths = depth_raw[
-            mask & np.isfinite(depth_raw) & (depth_raw > 0)
-        ]
-        if target_depths.size == 0:
-            return None
-        return float(np.median(target_depths))
-
     def _estimate_scan_circle(self):
-        """Plan a local vertical circle around the track-end drone position."""
+        """Plan a 12-point clock-face circle around the track-end pose."""
         observation = self.last_track_observation
         if observation is None:
             raise RuntimeError("Last track observation is unavailable for scan")
 
         pose = observation["pose"]
-        bbox_state = self.get_bbox_state(observation["bbox"])
-        target_distance_cm = self._get_target_depth_cm(
-            observation["depth_raw"],
-            observation["mask"],
-        )
-        if target_distance_cm is None:
-            target_distance_cm = self.depth_safe_distance_cm
-            self._log(
-                "[SCAN] Target depth unavailable; use "
-                f"fallback_distance={target_distance_cm:.2f}cm"
-            )
-
-        horizontal_angle_deg = (
-            bbox_state["horizontal_offset"] / self.img_width
-        ) * self.max_rotate_deg
-        vertical_span_deg = self.max_rotate_deg * self.img_height / self.img_width
-        vertical_angle_deg = (
-            bbox_state["vertical_offset"] / self.img_height
-        ) * vertical_span_deg
-        horizontal_distance_cm = max(
-            1.0,
-            float(
-                target_distance_cm
-                * np.cos(np.radians(vertical_angle_deg))
-            ),
-        )
-        target_bearing_deg = self._normalize_angle_deg(
-            float(pose["yaw"]) + horizontal_angle_deg
-        )
-        target_bearing_rad = np.radians(target_bearing_deg)
-        target_world_x = float(pose["x"]) + float(
-            np.cos(target_bearing_rad) * horizontal_distance_cm
-        )
-        target_world_y = float(pose["y"]) + float(
-            np.sin(target_bearing_rad) * horizontal_distance_cm
-        )
-        target_world_z = float(pose["z"]) + float(
-            target_distance_cm * np.sin(np.radians(vertical_angle_deg))
-        )
-
         origin_yaw_rad = np.radians(float(pose["yaw"]))
+        # Positive dyaw is a right turn in the agent command convention.
+        yaw_steps_by_hour = {
+            1: -1,
+            2: -2,
+            3: -3,
+            4: -2,
+            5: -1,
+            6: 0,
+            7: 1,
+            8: 2,
+            9: 3,
+            10: 2,
+            11: 1,
+            12: 0,
+        }
         trajectory = []
-        for point_idx in range(self.scan_num_points):
-            circle_angle_rad = 2.0 * np.pi * point_idx / self.scan_num_points
+        clock_hours = [12, *range(1, self.scan_num_points)]
+        for clock_hour in clock_hours:
+            clock_angle_rad = 2.0 * np.pi * clock_hour / self.scan_num_points
             right_offset_cm = float(
-                np.cos(circle_angle_rad) * self.scan_radius_cm
+                np.sin(clock_angle_rad) * self.scan_radius_cm
             )
             up_offset_cm = float(
-                np.sin(circle_angle_rad) * self.scan_radius_cm
+                np.cos(clock_angle_rad) * self.scan_radius_cm
             )
+            if clock_hour in (6, 12):
+                right_offset_cm = 0.0
+            if clock_hour in (3, 9):
+                up_offset_cm = 0.0
             point_x = float(pose["x"]) - float(
                 np.sin(origin_yaw_rad) * right_offset_cm
             )
@@ -915,45 +902,46 @@ class TJKAgent:
                 self.safe_z_cm,
                 float(pose["z"]) + up_offset_cm,
             )
-            point_yaw = float(
-                np.degrees(
-                    np.arctan2(
-                        target_world_y - point_y,
-                        target_world_x - point_x,
-                    )
-                )
+            point_yaw = self._normalize_angle_deg(
+                float(pose["yaw"])
+                + yaw_steps_by_hour[clock_hour] * self.scan_yaw_unit_deg
             )
             trajectory.append(
                 {
                     "x": point_x,
                     "y": point_y,
                     "z": point_z,
-                    "yaw": self._normalize_angle_deg(point_yaw),
+                    "yaw": point_yaw,
+                    "clock_hour": clock_hour,
                 }
             )
 
+        yaw_offsets = ", ".join(
+            f"{point['clock_hour']}="
+            f"{self._normalize_angle_deg(point['yaw'] - float(pose['yaw'])):.2f}"
+            for point in trajectory
+        )
         self._log(
-            "[SCAN] Planned local vertical circle: "
+            "[SCAN] Planned simple clock trajectory: "
             f"points={self.scan_num_points} radius={self.scan_radius_cm:.2f}cm "
-            f"estimated_target_distance={horizontal_distance_cm:.2f}cm "
+            f"yaw_unit={self.scan_yaw_unit_deg:.2f}deg "
             f"center=(x={float(pose['x']):.2f}, y={float(pose['y']):.2f}, "
-            f"z={float(pose['z']):.2f}) "
-            f"target=(x={target_world_x:.2f}, y={target_world_y:.2f}, "
-            f"z={target_world_z:.2f})"
+            f"z={float(pose['z']):.2f}, yaw={float(pose['yaw']):.2f}) "
+            f"yaw_offsets_deg=({yaw_offsets})"
         )
         return trajectory
 
-    def _capture_scan_point(self, point_idx, motion_timing):
+    def _capture_scan_point(self, clock_hour, motion_timing):
         capture_started = time.perf_counter()
         frame_rgb = self.client.capture(include_depth=False)
         capture_rgb_s = time.perf_counter() - capture_started
-        image_path = Path(self.vis_dir) / f"scan_{point_idx:02d}.png"
+        image_path = Path(self.vis_dir) / f"scan_{clock_hour:02d}.png"
         save_image_started = time.perf_counter()
         Image.fromarray(frame_rgb).save(image_path)
         save_image_s = time.perf_counter() - save_image_started
         pose = self.client.get_pose()
         self._log(
-            f"[SCAN] Captured point={point_idx} image={image_path} "
+            f"[SCAN] Captured clock_hour={clock_hour} image={image_path} "
             f"pose=(x={pose['x']:.2f}, y={pose['y']:.2f}, "
             f"z={pose['z']:.2f}, yaw={pose['yaw']:.2f})"
         )
@@ -974,18 +962,20 @@ class TJKAgent:
     def scan(self):
         """Follow a small local circle and capture one RGB image at each point."""
         trajectory = self._estimate_scan_circle()
-        for point_idx, target_pose in enumerate(trajectory):
+        for target_pose in trajectory:
+            clock_hour = target_pose["clock_hour"]
             self._move_to_pose_hybrid(
                 target_pose,
-                context=f"scan_point={point_idx}",
+                context=f"scan_clock_hour={clock_hour}",
                 log_timing=False,
             )
-            self._capture_scan_point(point_idx, self._last_motion_timing)
+            self._capture_scan_point(clock_hour, self._last_motion_timing)
 
-        # Close the final 30-degree arc without taking a duplicate image.
+        # Close the 30-degree arc from 11 o'clock to 12 o'clock without
+        # taking a duplicate image.
         self._move_to_pose_hybrid(
             trajectory[0],
-            context="scan_close_circle",
+            context="scan_close_circle clock_hour=12",
         )
 
         self._log(
@@ -1248,7 +1238,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        default="config.yaml",
+        default=str(
+            Path(__file__).resolve().parents[1]
+            / "config"
+            / "base"
+            / "v8.yaml"
+        ),
         help="Required agent YAML config path",
     )
     parser.add_argument(

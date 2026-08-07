@@ -1,9 +1,8 @@
-# 1. 使用 yolo
-# 2. detector 每帧选 top 5 作为候选
+# 1. track 同轴控制
+# 2. log 优化
 
 import argparse
 import datetime as dt
-import importlib
 import logging
 import os
 import sys
@@ -11,15 +10,22 @@ import time
 from enum import Enum
 from pathlib import Path
 from typing import Optional
-from PIL import Image
 
 import cv2
 import numpy as np
 import yaml
+from PIL import Image
 
-SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, SRC_ROOT)
 
+GROUNDING_SAM_ROOT = r'C:\Users\colab999\Desktop\project\Grounded_SAM_2_main'
+sys.path.insert(0, os.path.join(GROUNDING_SAM_ROOT, "grounding_dino"))
+
+import groundingdino.datasets.transforms as T
+from groundingdino.util.inference import load_model, predict
 from third_party.sam2_stream import Sam2VideoPredictor, SAM2Config
 from robot_client.base import BaseClient
 from utils import show_fig
@@ -77,7 +83,6 @@ class AgentAction(str, Enum):
 
 class AgentState(str, Enum):
     SEARCH = "SEARCH"
-    SELECT = "SELECT"
     TRACK = "TRACK"
     SCAN = "SCAN"
     RETURN_WAYPOINT = "RETURN_WAYPOINT"
@@ -89,7 +94,7 @@ def _timestamped_experiment_dir(exp_name: str, timestamp: str) -> Path:
 
 def _configure_logger(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("tjk_v10")
+    logger = logging.getLogger("tjk_v6")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
@@ -110,9 +115,7 @@ class TJKAgent:
     def __init__(
         self,
         client: BaseClient,
-        detector,
-        config: dict,
-        detector_name: str,
+        config_path: str | Path,
         vis_dir: str = './tjk_vis',
         save_vis: bool = True,
         save_depth: bool = False,
@@ -129,66 +132,51 @@ class TJKAgent:
         self.save_depth = save_depth
         self.state = AgentState.SEARCH
         self.waypoint_pose = None
-        self.search_candidates = []
-        self.selected_candidate = None
         self.last_track_observation = None
+        self.config_path = Path(config_path).expanduser().resolve()
+        config = _load_config(self.config_path)
         motion_config = _config_section(config, "motion")
         search_config = _config_section(config, "search")
-        detection_config = _config_section(config, "detection")
         safety_config = _config_section(config, "safety")
         track_config = _config_section(config, "track")
         scan_config = _config_section(config, "scan")
-        self.detector_name = detector_name
+        detection_config = _config_section(config, "detection")
 
-        # Forward/backward action.
+        # max step distance
         self.max_fb_step_cm = _config_number(
             motion_config, "max_fb_step_cm", minimum=1e-6
         )
-        self.min_reliable_fb_step_cm = _config_number(
-            motion_config, "min_reliable_fb_step_cm", minimum=0.0
+        self.max_z_step_cm = _config_number(
+            motion_config, "max_z_step_cm", minimum=1e-6
         )
+        self.max_rotate_deg = _config_number(
+            motion_config, "max_rotate_deg", minimum=1e-6
+        )
+
+        # min step distance
+        self.min_fb_step_cm = _config_number(
+            motion_config, "min_fb_step_cm", minimum=0.0
+        )
+        self.min_z_step_cm = _config_number(
+            motion_config, "min_z_step_cm", minimum=0.0
+        )
+        self.min_rotate_deg = _config_number(
+            motion_config, "min_rotate_deg", minimum=0.0
+        )
+        if self.min_fb_step_cm > self.max_fb_step_cm:
+            raise ValueError("motion.min_fb_step_cm cannot exceed max_fb_step_cm")
+        if self.min_z_step_cm > self.max_z_step_cm:
+            raise ValueError("motion.min_z_step_cm cannot exceed max_z_step_cm")
+        if self.min_rotate_deg > self.max_rotate_deg:
+            raise ValueError("motion.min_rotate_deg cannot exceed max_rotate_deg")
+
+        # fixed action
         self.backward_ratio = _config_number(
             motion_config,
             "backward_ratio",
             minimum=0.0,
             maximum=1.0,
         )
-
-        # Vertical action.
-        self.z_cm_per_pixel = _config_number(
-            motion_config, "z_cm_per_pixel", minimum=1e-6
-        )
-        self.max_z_step_cm = _config_number(
-            motion_config, "max_z_step_cm", minimum=1e-6
-        )
-        self.min_reliable_z_step_cm = _config_number(
-            motion_config, "min_reliable_z_step_cm", minimum=0.0
-        )
-
-        # Yaw action.
-        self.rotate_deg_per_pixel = _config_number(
-            motion_config, "rotate_deg_per_pixel", minimum=1e-6
-        )
-        self.max_rotate_deg = _config_number(
-            motion_config, "max_rotate_deg", minimum=1e-6
-        )
-        self.min_reliable_rotate_deg = _config_number(
-            motion_config, "min_reliable_rotate_deg", minimum=0.0
-        )
-
-        if self.min_reliable_fb_step_cm > self.max_fb_step_cm:
-            raise ValueError(
-                "motion.min_reliable_fb_step_cm cannot exceed max_fb_step_cm"
-            )
-        if self.min_reliable_z_step_cm > self.max_z_step_cm:
-            raise ValueError(
-                "motion.min_reliable_z_step_cm cannot exceed max_z_step_cm"
-            )
-        if self.min_reliable_rotate_deg > self.max_rotate_deg:
-            raise ValueError(
-                "motion.min_reliable_rotate_deg cannot exceed max_rotate_deg"
-            )
-
         self.search_rotation_step_deg = _config_number(
             search_config,
             "rotation_step_deg",
@@ -207,12 +195,6 @@ class TJKAgent:
             "height_offset_cm",
             integer=True,
             minimum=0.0,
-        )
-        self.max_candidates_per_frame = _config_number(
-            detection_config,
-            "max_candidates_per_frame",
-            integer=True,
-            minimum=1.0,
         )
 
         # safe thresh
@@ -241,7 +223,7 @@ class TJKAgent:
         self.yaw_only_threshold_deg = _config_number(
             track_config,
             "yaw_only_threshold_deg",
-            minimum=self.min_reliable_rotate_deg,
+            minimum=self.min_rotate_deg,
             maximum=self.max_rotate_deg,
         )
 
@@ -258,17 +240,11 @@ class TJKAgent:
             scan_config,
             "num_points",
             integer=True,
-            minimum=12.0,
-            maximum=12.0,
+            minimum=3.0,
         )
         self.scan_radius_cm = _config_number(
             scan_config,
             "radius_cm",
-            minimum=1e-6,
-        )
-        self.scan_yaw_unit_deg = _config_number(
-            scan_config,
-            "yaw_unit_deg",
             minimum=1e-6,
         )
 
@@ -279,7 +255,42 @@ class TJKAgent:
         self.tracker.set_vis_mode(self.save_vis)
         self.tracker.set_vis_dir(self.vis_dir)
         self.tracker.set_track_vis_naming("track", index_width=2)
-        self.detector = detector
+
+        if "device" not in detection_config:
+            raise ValueError("Missing config value: detection.device")
+        self.grounding_device = detection_config["device"]
+        if not isinstance(self.grounding_device, str) or not self.grounding_device:
+            raise ValueError("Config value detection.device must be a non-empty string")
+        self.grounding_model = load_model(
+            os.path.join(
+                GROUNDING_SAM_ROOT,
+                "grounding_dino",
+                "groundingdino",
+                "config",
+                "GroundingDINO_SwinB_cfg.py",
+            ),
+            os.path.join(GROUNDING_SAM_ROOT, "gdino_checkpoints", "groundingdino_swinb_cogcoor.pth"),
+            device=self.grounding_device,
+        )
+        self.grounding_transform = T.Compose(
+            [
+                T.RandomResize([800], max_size=1333),
+                T.ToTensor(),
+                T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ]
+        )
+        self.gd_box_threshold = _config_number(
+            detection_config,
+            "box_threshold",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.gd_text_threshold = _config_number(
+            detection_config,
+            "text_threshold",
+            minimum=0.0,
+            maximum=1.0,
+        )
 
     def _log(self, message: str) -> None:
         if self.logger is None:
@@ -472,56 +483,34 @@ class TJKAgent:
             )
         return result
 
-    def detect(self, image_rgb):
-        """Run the selected backend through the common detector interface."""
-        return self.detector.detect(image_rgb)
-
-    @staticmethod
-    def _copy_pose(pose):
-        return {
-            axis: float(pose[axis])
-            for axis in ("x", "y", "z", "yaw")
-        }
-
-    @staticmethod
-    def _mask_median_depth_cm(depth_raw, mask) -> Optional[float]:
-        mask = np.asarray(mask, dtype=bool).squeeze()
-        if mask.ndim != 2:
+    def detect_with_grounding_dino(self, image_rgb, text_prompt):
+        image_tensor, _ = self.grounding_transform(Image.fromarray(image_rgb), None)
+        boxes, confidences, labels = predict(
+            model=self.grounding_model,
+            image=image_tensor,
+            caption=text_prompt,
+            box_threshold=self.gd_box_threshold,
+            text_threshold=self.gd_text_threshold,
+            device=self.grounding_device,
+        )
+        if len(boxes) == 0:
             return None
-        depth = np.asarray(depth_raw)
-        if depth.shape != mask.shape:
-            depth = cv2.resize(
-                depth,
-                (mask.shape[1], mask.shape[0]),
-                interpolation=cv2.INTER_NEAREST,
-            )
-        valid_depths = depth[
-            mask & np.isfinite(depth) & (depth > 0)
-        ]
-        if valid_depths.size == 0:
-            return None
-        return float(np.median(valid_depths))
 
-    def _segment_search_candidate(self, frame_rgb, target_box):
-        """Run an independent box-prompted SAM segmentation for one candidate."""
-        self.tracker.reset()
-        self.tracker.set_vis_mode(False)
-        try:
-            tracker_started = time.perf_counter()
-            bbox, mask = self.tracker.track_with_mask(
-                frame_rgb,
-                box=target_box,
-            )
-            tracker_fields = self._sam2_timing_fields(
-                self.tracker,
-                time.perf_counter() - tracker_started,
-            )
-            return bbox, mask, tracker_fields
-        finally:
-            # Search candidates are independent. Do not let one candidate's
-            # temporal state influence the next candidate or final tracking.
-            self.tracker.set_vis_mode(self.save_vis)
-            self.tracker.reset()
+        best_idx = int(confidences.argmax().item())
+        cx, cy, box_w, box_h = boxes[best_idx].numpy()
+        image_h, image_w = image_rgb.shape[:2]
+        box_xyxy = np.array(
+            [
+                (cx - box_w / 2) * image_w,
+                (cy - box_h / 2) * image_h,
+                (cx + box_w / 2) * image_w,
+                (cy + box_h / 2) * image_h,
+            ],
+            dtype=np.float32,
+        )
+        box_xyxy[[0, 2]] = np.clip(box_xyxy[[0, 2]], 0, image_w - 1)
+        box_xyxy[[1, 3]] = np.clip(box_xyxy[[1, 3]], 0, image_h - 1)
+        return box_xyxy, float(confidences[best_idx]), labels[best_idx]
 
     def connect(self):
         self.client.start()
@@ -598,12 +587,9 @@ class TJKAgent:
         }
 
     def prepare_rotate_action_deg(self, horizontal_offset):
-        angle_to_rotate = horizontal_offset * self.rotate_deg_per_pixel
-        angle_to_rotate = np.clip(
-            angle_to_rotate,
-            -self.max_rotate_deg,
-            self.max_rotate_deg,
-        )
+        angle_to_rotate = (
+            horizontal_offset / self.img_width
+        ) * self.max_rotate_deg
         return float(angle_to_rotate)
     
     def exec_rotate_action_deg(
@@ -625,7 +611,7 @@ class TJKAgent:
         )
     
     def prepare_z_action_cm(self, vertical_offset):
-        dz_cm = vertical_offset * self.z_cm_per_pixel
+        dz_cm = (vertical_offset / self.img_height) * (2.0 * self.max_z_step_cm)
         dz_cm = float(np.clip(dz_cm, -self.max_z_step_cm, self.max_z_step_cm))
         return dz_cm
 
@@ -634,7 +620,7 @@ class TJKAgent:
     
     def prepare_fb_action_cm(self, box_ratio):
         target = self.target_stop_ratio
-        deadband = self.min_reliable_fb_step_cm / self.max_fb_step_cm * target
+        deadband = self.min_fb_step_cm / self.max_fb_step_cm * target
 
         if box_ratio > target + deadband:
             step_cm = self.get_backward_step_cm()
@@ -708,7 +694,7 @@ class TJKAgent:
                     self._last_motion_timing,
                 )
                 continue
-            if abs(angle_to_rotate) > self.min_reliable_rotate_deg:
+            if abs(angle_to_rotate) > self.min_rotate_deg:
                 dyaw_deg = angle_to_rotate
             else:
                 dyaw_deg = 0.0
@@ -726,12 +712,12 @@ class TJKAgent:
                 else:
                     dz_cm = max(dz_cm, self.safe_z_cm - cur_z_cm)
 
-            if abs(dz_cm) <= self.min_reliable_z_step_cm:
+            if abs(dz_cm) <= self.min_z_step_cm:
                 print(f"[STALL] dz_cm is {dz_cm} and Stalled.")
                 dz_cm = 0.0
 
             dx_cm = self.prepare_fb_action_cm(box_ratio)
-            if abs(dx_cm) <= self.min_reliable_fb_step_cm:
+            if abs(dx_cm) <= self.min_fb_step_cm:
                 print(f"[STALL] dx is {dx_cm} cm and Stalled.")
                 dx_cm = 0.0
             elif dx_cm > 0.0:
@@ -749,11 +735,11 @@ class TJKAgent:
                     f"available={available_dx_cm:.2f} cm, "
                     f"forward={dx_cm:.2f} cm."
                 )
-                if dx_cm <= self.min_reliable_fb_step_cm:
+                if dx_cm <= self.min_fb_step_cm:
                     print(
                         f"[STALL] Depth-limited forward step {dx_cm:.2f} cm "
                         f"is not executable (minimum "
-                        f"{self.min_reliable_fb_step_cm:.2f} cm); stop at the safe "
+                        f"{self.min_fb_step_cm:.2f} cm); stop at the safe "
                         "distance."
                     )
                     dx_cm = 0.0
@@ -847,43 +833,80 @@ class TJKAgent:
             log_timing=log_timing,
         )
 
+    def _get_target_depth_cm(self, depth_raw, mask) -> Optional[float]:
+        mask = np.asarray(mask, dtype=bool).squeeze()
+        if mask.ndim != 2:
+            return None
+        if depth_raw.shape != mask.shape:
+            depth_raw = cv2.resize(
+                depth_raw,
+                (mask.shape[1], mask.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        target_depths = depth_raw[
+            mask & np.isfinite(depth_raw) & (depth_raw > 0)
+        ]
+        if target_depths.size == 0:
+            return None
+        return float(np.median(target_depths))
+
     def _estimate_scan_circle(self):
-        """Plan a 12-point clock-face circle around the track-end pose."""
+        """Plan a local vertical circle around the track-end drone position."""
         observation = self.last_track_observation
         if observation is None:
             raise RuntimeError("Last track observation is unavailable for scan")
 
         pose = observation["pose"]
+        bbox_state = self.get_bbox_state(observation["bbox"])
+        target_distance_cm = self._get_target_depth_cm(
+            observation["depth_raw"],
+            observation["mask"],
+        )
+        if target_distance_cm is None:
+            target_distance_cm = self.depth_safe_distance_cm
+            self._log(
+                "[SCAN] Target depth unavailable; use "
+                f"fallback_distance={target_distance_cm:.2f}cm"
+            )
+
+        horizontal_angle_deg = (
+            bbox_state["horizontal_offset"] / self.img_width
+        ) * self.max_rotate_deg
+        vertical_span_deg = self.max_rotate_deg * self.img_height / self.img_width
+        vertical_angle_deg = (
+            bbox_state["vertical_offset"] / self.img_height
+        ) * vertical_span_deg
+        horizontal_distance_cm = max(
+            1.0,
+            float(
+                target_distance_cm
+                * np.cos(np.radians(vertical_angle_deg))
+            ),
+        )
+        target_bearing_deg = self._normalize_angle_deg(
+            float(pose["yaw"]) + horizontal_angle_deg
+        )
+        target_bearing_rad = np.radians(target_bearing_deg)
+        target_world_x = float(pose["x"]) + float(
+            np.cos(target_bearing_rad) * horizontal_distance_cm
+        )
+        target_world_y = float(pose["y"]) + float(
+            np.sin(target_bearing_rad) * horizontal_distance_cm
+        )
+        target_world_z = float(pose["z"]) + float(
+            target_distance_cm * np.sin(np.radians(vertical_angle_deg))
+        )
+
         origin_yaw_rad = np.radians(float(pose["yaw"]))
-        # Positive dyaw is a right turn in the agent command convention.
-        yaw_steps_by_hour = {
-            1: -1,
-            2: -2,
-            3: -3,
-            4: -2,
-            5: -1,
-            6: 0,
-            7: 1,
-            8: 2,
-            9: 3,
-            10: 2,
-            11: 1,
-            12: 0,
-        }
         trajectory = []
-        clock_hours = [12, *range(1, self.scan_num_points)]
-        for clock_hour in clock_hours:
-            clock_angle_rad = 2.0 * np.pi * clock_hour / self.scan_num_points
+        for point_idx in range(self.scan_num_points):
+            circle_angle_rad = 2.0 * np.pi * point_idx / self.scan_num_points
             right_offset_cm = float(
-                np.sin(clock_angle_rad) * self.scan_radius_cm
+                np.cos(circle_angle_rad) * self.scan_radius_cm
             )
             up_offset_cm = float(
-                np.cos(clock_angle_rad) * self.scan_radius_cm
+                np.sin(circle_angle_rad) * self.scan_radius_cm
             )
-            if clock_hour in (6, 12):
-                right_offset_cm = 0.0
-            if clock_hour in (3, 9):
-                up_offset_cm = 0.0
             point_x = float(pose["x"]) - float(
                 np.sin(origin_yaw_rad) * right_offset_cm
             )
@@ -894,46 +917,45 @@ class TJKAgent:
                 self.safe_z_cm,
                 float(pose["z"]) + up_offset_cm,
             )
-            point_yaw = self._normalize_angle_deg(
-                float(pose["yaw"])
-                + yaw_steps_by_hour[clock_hour] * self.scan_yaw_unit_deg
+            point_yaw = float(
+                np.degrees(
+                    np.arctan2(
+                        target_world_y - point_y,
+                        target_world_x - point_x,
+                    )
+                )
             )
             trajectory.append(
                 {
                     "x": point_x,
                     "y": point_y,
                     "z": point_z,
-                    "yaw": point_yaw,
-                    "clock_hour": clock_hour,
+                    "yaw": self._normalize_angle_deg(point_yaw),
                 }
             )
 
-        yaw_offsets = ", ".join(
-            f"{point['clock_hour']}="
-            f"{self._normalize_angle_deg(point['yaw'] - float(pose['yaw'])):.2f}"
-            for point in trajectory
-        )
         self._log(
-            "[SCAN] Planned simple clock trajectory: "
+            "[SCAN] Planned local vertical circle: "
             f"points={self.scan_num_points} radius={self.scan_radius_cm:.2f}cm "
-            f"yaw_unit={self.scan_yaw_unit_deg:.2f}deg "
+            f"estimated_target_distance={horizontal_distance_cm:.2f}cm "
             f"center=(x={float(pose['x']):.2f}, y={float(pose['y']):.2f}, "
-            f"z={float(pose['z']):.2f}, yaw={float(pose['yaw']):.2f}) "
-            f"yaw_offsets_deg=({yaw_offsets})"
+            f"z={float(pose['z']):.2f}) "
+            f"target=(x={target_world_x:.2f}, y={target_world_y:.2f}, "
+            f"z={target_world_z:.2f})"
         )
         return trajectory
 
-    def _capture_scan_point(self, clock_hour, motion_timing):
+    def _capture_scan_point(self, point_idx, motion_timing):
         capture_started = time.perf_counter()
         frame_rgb = self.client.capture(include_depth=False)
         capture_rgb_s = time.perf_counter() - capture_started
-        image_path = Path(self.vis_dir) / f"scan_{clock_hour:02d}.png"
+        image_path = Path(self.vis_dir) / f"scan_{point_idx:02d}.png"
         save_image_started = time.perf_counter()
         Image.fromarray(frame_rgb).save(image_path)
         save_image_s = time.perf_counter() - save_image_started
         pose = self.client.get_pose()
         self._log(
-            f"[SCAN] Captured clock_hour={clock_hour} image={image_path} "
+            f"[SCAN] Captured point={point_idx} image={image_path} "
             f"pose=(x={pose['x']:.2f}, y={pose['y']:.2f}, "
             f"z={pose['z']:.2f}, yaw={pose['yaw']:.2f})"
         )
@@ -954,20 +976,18 @@ class TJKAgent:
     def scan(self):
         """Follow a small local circle and capture one RGB image at each point."""
         trajectory = self._estimate_scan_circle()
-        for target_pose in trajectory:
-            clock_hour = target_pose["clock_hour"]
+        for point_idx, target_pose in enumerate(trajectory):
             self._move_to_pose_hybrid(
                 target_pose,
-                context=f"scan_clock_hour={clock_hour}",
+                context=f"scan_point={point_idx}",
                 log_timing=False,
             )
-            self._capture_scan_point(clock_hour, self._last_motion_timing)
+            self._capture_scan_point(point_idx, self._last_motion_timing)
 
-        # Close the 30-degree arc from 11 o'clock to 12 o'clock without
-        # taking a duplicate image.
+        # Close the final 30-degree arc without taking a duplicate image.
         self._move_to_pose_hybrid(
             trajectory[0],
-            context="scan_close_circle clock_hour=12",
+            context="scan_close_circle",
         )
 
         self._log(
@@ -977,18 +997,6 @@ class TJKAgent:
 
     def run(self, text_prompt):
         """Run one waypoint task without ending the client or simulation."""
-        prompt_updated = self.detector.set_prompt(text_prompt)
-        cache_builds = getattr(self.detector, "prompt_cache_builds", None)
-        cache_text = (
-            f" cache_builds={cache_builds}"
-            if cache_builds is not None
-            else ""
-        )
-        self._log(
-            f"[DETECTOR] backend={self.detector_name} "
-            f"prompt={text_prompt!r} prompt_updated={prompt_updated}"
-            f"{cache_text}"
-        )
         self.waypoint_pose = self.client.get_pose()
         self._log(
             "[WAYPOINT] Saved initial pose: "
@@ -997,7 +1005,6 @@ class TJKAgent:
         )
 
         search_succeeded = False
-        select_succeeded = False
         track_succeeded = False
         scan_succeeded = False
         self.state = AgentState.SEARCH
@@ -1007,17 +1014,10 @@ class TJKAgent:
                 self._log(f"[STATE] Enter {self.state.value}")
 
                 if self.state == AgentState.SEARCH:
-                    search_succeeded = self.search()
-                    self.state = (
-                        AgentState.SELECT
-                        if search_succeeded
-                        else AgentState.RETURN_WAYPOINT
-                    )
-                elif self.state == AgentState.SELECT:
-                    select_succeeded = self.select()
+                    search_succeeded = self.search(text_prompt)
                     self.state = (
                         AgentState.TRACK
-                        if select_succeeded
+                        if search_succeeded
                         else AgentState.RETURN_WAYPOINT
                     )
                 elif self.state == AgentState.TRACK:
@@ -1045,28 +1045,22 @@ class TJKAgent:
                 self.return_waypoint()
             raise
 
-        succeeded = (
-            search_succeeded
-            and select_succeeded
-            and track_succeeded
-            and scan_succeeded
-        )
+        succeeded = search_succeeded and track_succeeded and scan_succeeded
         self._log(
-            f"[RES] Waypoint task completed; candidates="
-            f"{len(self.search_candidates)} target_selected={select_succeeded} "
-            f"target_reached={track_succeeded} "
+            f"[RES] Waypoint task completed; target_reached={track_succeeded} "
             f"scan_completed={scan_succeeded}."
         )
         return succeeded
 
-    def search(self):
-        """Scan all three height levels and collect every detected candidate."""
+    def search(self, text_prompt):
+        """Search three height levels and initialize the tracker on detection."""
+        # Each waypoint is an independent tracking segment.
         self.tracker.reset()
-        self.search_candidates = []
-        self.selected_candidate = None
         self.last_track_observation = None
 
         # Search at h, h+offset, and h-offset, one full turn at each height.
+        cur_frame = None
+        target_box = None
         search_height_offsets_cm = (
             0,
             self.search_height_offset_cm,
@@ -1091,219 +1085,79 @@ class TJKAgent:
                 )
 
             for i in range(self.search_rotation_count):
-                view_idx = height_idx * self.search_rotation_count + i
+                candidate_idx = height_idx * self.search_rotation_count + i
+                # Search only needs RGB. Depth estimation starts in track().
                 capture_started = time.perf_counter()
-                cur_frame, depth_raw = self.client.capture(include_depth=True)
+                cur_frame = self.client.capture(include_depth=False)
                 capture_rgb_s = time.perf_counter() - capture_started
                 detection_started = time.perf_counter()
-                all_detections = self.detect(cur_frame)
-                detector_s = time.perf_counter() - detection_started
-                detector_inference_s = float(
-                    getattr(self.detector, "last_timing", {}).get(
-                        "inference_s",
-                        detector_s,
-                    )
-                )
-                detections = all_detections[
-                    :self.max_candidates_per_frame
-                ]
-                tracker_fields = None
-                candidate_boxes = []
-                candidate_box_labels = []
+                detection = self.detect_with_grounding_dino(cur_frame, text_prompt)
+                grounding_dino_s = time.perf_counter() - detection_started
 
-                if len(all_detections) > len(detections):
-                    self._log(
-                        f"[SEARCH] View={view_idx} detections="
-                        f"{len(all_detections)} processing="
-                        f"{len(detections)}."
+                if detection is not None:
+                    target_box, confidence, label = detection
+                    visualization_started = time.perf_counter()
+                    show_fig(
+                        cur_frame,
+                        f"{self.vis_dir}/candidate_{candidate_idx:02d}.png",
+                        box_coords=target_box,
                     )
-
-                if detections:
-                    candidate_pose = self._copy_pose(
-                        self.client.get_pose()
+                    visualization_s = time.perf_counter() - visualization_started
+                    print(
+                        f"[SEARCH] Found {label} with confidence={confidence:.3f} "
+                        f"at height offset={height_offset_cm:+d} cm, "
+                        f"heading={i * self.search_rotation_step_deg:.1f} deg."
                     )
-                    tracker_fields = {
-                        "total": 0.0,
-                        "infer": 0.0,
-                        "vis": 0.0,
-                    }
-                    for detection_rank, detection in enumerate(detections):
-                        candidate_idx = (
-                            view_idx * self.max_candidates_per_frame
-                            + detection_rank
-                        )
-                        target_box = detection["box"]
-                        confidence = float(detection["confidence"])
-                        label = str(detection["label"])
-                        sam_bbox, mask, candidate_tracker_fields = (
-                            self._segment_search_candidate(
-                                cur_frame,
-                                target_box,
-                            )
-                        )
-                        candidate_boxes.append(target_box)
-                        candidate_box_labels.append(
-                            f"candidate {candidate_idx}: "
-                            f"{label}, {confidence:.2f}"
-                        )
-                        for timing_name in tracker_fields:
-                            tracker_fields[timing_name] += (
-                                candidate_tracker_fields[timing_name]
-                            )
-
-                        distance_cm = self._mask_median_depth_cm(
-                            depth_raw,
-                            mask,
-                        )
-                        if distance_cm is None:
-                            self._log(
-                                f"[SEARCH] Skip candidate={candidate_idx}: "
-                                "SAM mask contains no valid positive depth."
-                            )
-                        else:
-                            candidate = {
-                                "candidate_idx": candidate_idx,
-                                "view_idx": view_idx,
-                                "detection_rank": detection_rank,
-                                "height_offset_cm": height_offset_cm,
-                                "heading_deg": (
-                                    i * self.search_rotation_step_deg
-                                ),
-                                "pose": candidate_pose.copy(),
-                                "box": np.asarray(target_box).copy(),
-                                "sam_bbox": np.asarray(sam_bbox).copy(),
-                                "mask": np.asarray(mask).copy(),
-                                "distance_cm": distance_cm,
-                                "confidence": confidence,
-                                "label": label,
-                            }
-                            self.search_candidates.append(candidate)
-                            self._log(
-                                f"[SEARCH] Queued candidate={candidate_idx} "
-                                f"view={view_idx} rank={detection_rank} "
-                                f"label={label} "
-                                f"confidence={confidence:.3f} "
-                                f"distance={distance_cm:.2f}cm "
-                                f"height_offset={height_offset_cm:+d}cm "
-                                f"heading={candidate['heading_deg']:.1f}deg "
-                                f"pose=(x={candidate_pose['x']:.2f}, "
-                                f"y={candidate_pose['y']:.2f}, "
-                                f"z={candidate_pose['z']:.2f}, "
-                                f"yaw={candidate_pose['yaw']:.2f})"
-                            )
+                    self._log_timing(
+                        capture_rgb_s + grounding_dino_s + visualization_s,
+                        command_id=None,
+                        capture=capture_rgb_s,
+                        detector={
+                            "total": grounding_dino_s + visualization_s,
+                            "infer": grounding_dino_s,
+                            "vis": visualization_s,
+                        },
+                        execution=0.0,
+                    )
+                    break
 
                 visualization_started = time.perf_counter()
                 show_fig(
                     cur_frame,
-                    f"{self.vis_dir}/search_view_{view_idx:02d}.png",
-                    box_coords=(
-                        np.asarray(candidate_boxes)
-                        if candidate_boxes
-                        else None
-                    ),
-                    box_labels=(
-                        candidate_box_labels
-                        if candidate_box_labels
-                        else None
-                    ),
+                    f"{self.vis_dir}/candidate_{candidate_idx:02d}.png",
                 )
-                visualization_s = (
-                    time.perf_counter() - visualization_started
-                )
-
-                # Always complete the full rotation, even after a detection.
+                visualization_s = time.perf_counter() - visualization_started
                 self.exec_rotate_action_deg(
                     self.search_rotation_step_deg,
-                    context=f"search view={view_idx}",
+                    context=f"search candidate={candidate_idx}",
                     log_timing=False,
                 )
                 motion_timing = self._last_motion_timing
-                total_s = (
+                self._log_timing(
                     capture_rgb_s
-                    + detector_s
+                    + grounding_dino_s
                     + visualization_s
-                    + (
-                        tracker_fields["total"]
-                        if tracker_fields is not None
-                        else 0.0
-                    )
-                    + motion_timing["drone_execution_s"]
-                )
-                timing_fields = {
-                    "capture": capture_rgb_s,
-                    "detector": {
-                        "total": detector_s + visualization_s,
-                        "infer": detector_inference_s,
+                    + motion_timing["drone_execution_s"],
+                    command_id=self._last_motion_command_id,
+                    capture=capture_rgb_s,
+                    detector={
+                        "total": grounding_dino_s + visualization_s,
+                        "infer": grounding_dino_s,
                         "vis": visualization_s,
                     },
-                }
-                if tracker_fields is not None:
-                    timing_fields["tracker"] = tracker_fields
-                timing_fields["execution"] = (
-                    motion_timing["drone_execution_s"]
-                )
-                self._log_timing(
-                    total_s,
-                    command_id=self._last_motion_command_id,
-                    **timing_fields,
+                    execution=motion_timing["drone_execution_s"],
                 )
 
-        if not self.search_candidates:
-            self._log(
-                "[SEARCH] Completed all height levels; candidate queue is "
-                "empty, return to the waypoint."
-            )
+            if target_box is not None:
+                break
+
+        if target_box is None:
+            self._log("[SEARCH] Target was not found; return to the waypoint.")
             return False
 
-        nearest = min(
-            self.search_candidates,
-            key=lambda candidate: candidate["distance_cm"],
-        )
-        self._log(
-            f"[SEARCH] Completed all height levels; queued="
-            f"{len(self.search_candidates)} nearest_candidate="
-            f"{nearest['candidate_idx']} "
-            f"distance={nearest['distance_cm']:.2f}cm."
-        )
-        return True
-
-    def select(self):
-        """Return to the nearest candidate pose and initialize SAM tracking."""
-        if not self.search_candidates:
-            self._log("[SELECT] Candidate queue is empty.")
-            return False
-
-        selected = min(
-            self.search_candidates,
-            key=lambda candidate: candidate["distance_cm"],
-        )
-        self.selected_candidate = selected
-        selected_pose = selected["pose"]
-        self._log(
-            f"[SELECT] Selected candidate={selected['candidate_idx']} "
-            f"view={selected['view_idx']} "
-            f"distance={selected['distance_cm']:.2f}cm "
-            f"confidence={selected['confidence']:.3f} "
-            f"pose=(x={selected_pose['x']:.2f}, "
-            f"y={selected_pose['y']:.2f}, z={selected_pose['z']:.2f}, "
-            f"yaw={selected_pose['yaw']:.2f})"
-        )
-        self._move_to_pose_hybrid(
-            selected_pose,
-            context=f"select candidate={selected['candidate_idx']}",
-        )
-
-        # Re-capture at the recorded pose and initialize SAM directly from
-        # the saved detector box. The detector is intentionally not called.
-        capture_started = time.perf_counter()
-        cur_frame = self.client.capture(include_depth=False)
-        capture_s = time.perf_counter() - capture_started
-        self.tracker.reset()
+        # Initialize SAM2 tracking directly with GroundingDINO's xyxy box.
         sam2_started = time.perf_counter()
-        bbox, _mask = self.tracker.track_with_mask(
-            cur_frame,
-            box=selected["box"],
-        )
+        bbox = self.tracker.track(cur_frame, box=target_box)
         sam2_fields = self._sam2_timing_fields(
             self.tracker,
             time.perf_counter() - sam2_started,
@@ -1316,17 +1170,15 @@ class TJKAgent:
         decision_s = time.perf_counter() - decision_started
         self.exec_rotate_action_deg(
             angle_to_rotate,
-            context=f"track_init candidate={selected['candidate_idx']}",
+            context="track_init",
             log_timing=False,
         )
         motion_timing = self._last_motion_timing
         self._log_timing(
-            capture_s
-            + sam2_fields["total"]
+            sam2_fields["total"]
             + decision_s
             + motion_timing["drone_execution_s"],
             command_id=self._last_motion_command_id,
-            capture=capture_s,
             tracker=sam2_fields,
             decision=decision_s,
             execution=motion_timing["drone_execution_s"],
@@ -1393,82 +1245,17 @@ def build_client(
     raise ValueError(f"unsupported client: {client_name}")
 
 
-_DETECTOR_BACKENDS = {
-    "yolo": {
-        "module": "third_party.yolo_world_x_640",
-        "detector_class": "YOLOWorldX640Detector",
-        "config_class": "YOLOWorldX640Config",
-        "config_keys": {
-            "input_size",
-            "score_threshold",
-            "nms_iou_threshold",
-            "fp16",
-        },
-    },
-    "grounding_dino": {
-        "module": "third_party.grounding_dino_detector",
-        "detector_class": "GroundingDINODetector",
-        "config_class": "GroundingDINOConfig",
-        "config_keys": {
-            "box_threshold",
-            "text_threshold",
-        },
-    },
-}
-
-
-def build_detector(detector_name: str, config: dict):
-    try:
-        backend = _DETECTOR_BACKENDS[detector_name]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unsupported detector backend: {detector_name!r}"
-        ) from exc
-
-    detectors_config = _config_section(config, "detectors")
-    detector_config = _config_section(detectors_config, detector_name)
-    expected_keys = backend["config_keys"]
-    missing_keys = sorted(expected_keys - detector_config.keys())
-    unknown_keys = sorted(detector_config.keys() - expected_keys)
-    if missing_keys or unknown_keys:
-        details = []
-        if missing_keys:
-            details.append(f"missing={missing_keys}")
-        if unknown_keys:
-            details.append(f"unknown={unknown_keys}")
-        raise ValueError(
-            f"Invalid config for detector backend {detector_name!r}: "
-            + " ".join(details)
-        )
-
-    module_name = backend["module"]
-    detector_class_name = backend["detector_class"]
-    config_class_name = backend["config_class"]
-    module = importlib.import_module(module_name)
-    try:
-        detector_class = getattr(module, detector_class_name)
-        config_class = getattr(module, config_class_name)
-    except AttributeError as exc:
-        raise ImportError(
-            f"Invalid detector backend {detector_name!r}: "
-            f"{module_name}.{exc.name} does not exist"
-        ) from exc
-
-    try:
-        backend_config = config_class(**detector_config)
-    except TypeError as exc:
-        raise ValueError(
-            f"Invalid config for detector backend {detector_name!r}"
-        ) from exc
-    return detector_class(backend_config)
-
-
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config",
         type=str,
-        default=str(Path(__file__).with_name("config_v10.yaml")),
+        default=str(
+            Path(__file__).resolve().parents[1]
+            / "config"
+            / "base"
+            / "v6.yaml"
+        ),
         help="Required agent YAML config path",
     )
     parser.add_argument(
@@ -1483,14 +1270,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--obj",
         type=str,
-        default="white light bulb",
-        help="Object prompt used by the selected detector",
-    )
-    parser.add_argument(
-        "--det",
-        choices=("yolo", "grounding_dino"),
-        default="yolo",
-        help="Detector backend loaded at runtime (default: yolo)",
+        default="white ball",
+        help="Object description used by GroundingDINO (default: street lamp)",
     )
     parser.add_argument(
         "--client",
@@ -1504,7 +1285,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main():
     args = _build_arg_parser().parse_args()
     # Validate the required config before creating logs, clients, or models.
-    config = _load_config(args.config)
+    _load_config(args.config)
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_dir = _timestamped_experiment_dir(args.exp_name, timestamp)
     vis_dir = exp_dir / "vis"
@@ -1512,8 +1293,7 @@ def main():
     vis_dir.mkdir(parents=True, exist_ok=True)
     logger = _configure_logger(log_path)
     logger.info(
-        f"[RUN] client={args.client} detector={args.det} "
-        f"object={args.obj!r} "
+        f"[RUN] client={args.client} object={args.obj!r} "
         f"depth_source={'ue_native' if args.client == 'ue' else 'client_da3'} "
         f"config={Path(args.config).expanduser().resolve()} "
         f"exp_dir={exp_dir} vis={vis_dir} log={log_path}"
@@ -1525,14 +1305,11 @@ def main():
         server_port=8765,
         http_timeout_s=180.0,
     )
-    detector = build_detector(args.det, config)
     tjkAgent = TJKAgent(
         client=client,
-        detector=detector,
-        config=config,
         vis_dir=str(vis_dir),
         logger=logger,
-        detector_name=args.det,
+        config_path=args.config,
     )
     tjkAgent.connect()
     tjkAgent.run(args.obj)
