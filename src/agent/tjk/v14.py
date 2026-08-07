@@ -2238,8 +2238,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Agent YAML config path; defaults to config/owl/v14.yaml for "
-            "OWL and config/base/v14.yaml for other robots"
+            "YAML path relative to src/agent/config, such as owl/v14.yaml; "
+            "absolute paths are also supported. Defaults to owl/v14.yaml "
+            "for OWL and base/v14.yaml for other robots"
         ),
     )
     parser.add_argument(
@@ -2300,6 +2301,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_config_path(config_path: str | None, client_name: str) -> Path:
+    config_root = Path(__file__).resolve().parents[1] / "config"
+    if config_path is None:
+        config_profile = "owl" if client_name == "owl" else "base"
+        return (config_root / config_profile / "v14.yaml").resolve()
+
+    requested_path = Path(config_path).expanduser()
+    if requested_path.is_absolute():
+        return requested_path.resolve()
+    return (config_root / requested_path).resolve()
+
+
 def _land_after_task(client: BaseClient, logger: logging.Logger) -> dict:
     result = client.land()
     if not result.get("ok", False):
@@ -2313,14 +2326,7 @@ def _land_after_task(client: BaseClient, logger: logging.Logger) -> dict:
 
 def main():
     args = _build_arg_parser().parse_args()
-    if args.config is None:
-        config_profile = "owl" if args.client == "owl" else "base"
-        args.config = str(
-            Path(__file__).resolve().parents[1]
-            / "config"
-            / config_profile
-            / "v14.yaml"
-        )
+    args.config = str(_resolve_config_path(args.config, args.client))
     # Validate the required config before creating logs, clients, or models.
     config = _load_config(args.config)
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
