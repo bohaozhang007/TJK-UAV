@@ -14,28 +14,40 @@ mission:
   # target must remain at or above the planner's 50cm world-height limit.
   waypoints:
     - name: waypoint_1
-      x_cm: 250.0
+      x_cm: 0.0
+      y_cm: 200.0
+      z_cm: 0.0
+      yaw_deg: 0.0
+
+    - name: waypoint_2
+      x_cm: 300.0
       y_cm: 0.0
       z_cm: 0.0
+      yaw_deg: 0.0
+
+    - name: waypoint_3
+      x_cm: 300.0
+      y_cm: 300.0
+      z_cm: 50.0
       yaw_deg: 0.0
 
 
 # Motion limits and pixel-error conversion used while tracking the target.
 motion:
   # Forward/backward action.
-  max_fb_step_cm: 60.0
-  min_reliable_fb_step_cm: 10.0
-  backward_ratio: 0.25
+  max_fb_step_cm: 20.0 # 60.0
+  min_reliable_fb_step_cm: 5.0
+  backward_ratio: 0.5
 
   # Vertical action.
-  max_z_step_cm: 60.0
-  min_reliable_z_step_cm: 10.0
-  z_cm_per_pixel: 0.18
+  max_z_step_cm: 30.0 # 60.0
+  min_reliable_z_step_cm: 10.0 # 5.0
+  z_cm_per_pixel: 0.15 # 0.18
 
   # Yaw action.
-  max_rotate_deg: 45.0
-  min_reliable_rotate_deg: 5.0
-  rotate_deg_per_pixel: 0.1
+  max_rotate_deg: 30.0 # 45.0
+  min_reliable_rotate_deg: 5.0 # 3.0
+  rotate_deg_per_pixel: 0.1 # 0.1
 
 # Flight safety thresholds.
 safety:
@@ -59,7 +71,7 @@ select:
 # Target approach and convergence settings.
 track:
   target_stop_ratio: 0.40
-  yaw_only_threshold_deg: 30.0
+  yaw_only_threshold_deg: 10.0
   max_exec_iters: 200
 
 # Circular multi-view scan settings.
@@ -74,7 +86,7 @@ scan:
 detectors:
   yolo:
     input_size: 640
-    score_threshold: 0.05 # 0.1
+    score_threshold: 0.1
     nms_iou_threshold: 0.70
     fp16: true
 
