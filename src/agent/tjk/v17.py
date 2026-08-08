@@ -2681,10 +2681,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--client",
         "--robot",
         dest="client",
-        choices=("owl",),
-        default="owl",
+        choices=("tello", "ue", "owl"),
+        default="ue",
         help=(
-            "Robot to use; v17 is configured for OWL (default: owl)"
+            "Robot to use: tello, ue, or owl; --robot is an alias for "
+            "--client (default: ue)"
         ),
     )
     parser.add_argument(
