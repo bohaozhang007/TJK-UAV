@@ -27,6 +27,8 @@ class Sam3DetectorConfig:
 class Sam3Detector:
     """Implement the common detector API without importing SAM3 locally."""
 
+    SEARCH_COMPOSITE_LIMIT = 3
+
     def __init__(self, cfg: Sam3DetectorConfig) -> None:
         if not 0.0 <= float(cfg.confidence_threshold) <= 1.0:
             raise ValueError("confidence_threshold must be in [0, 1]")
@@ -44,6 +46,7 @@ class Sam3Detector:
         self._vis_dir: Path | None = None
         self._next_vis_name: str | None = None
         self._composite_index = 0
+        self._saved_search_composites = 0
         self.health()
 
     def set_vis_dir(self, vis_dir: str) -> None:
@@ -52,6 +55,7 @@ class Sam3Detector:
         self._vis_dir = path
         self._next_vis_name = None
         self._composite_index = 0
+        self._saved_search_composites = 0
 
     def set_next_vis_name(self, name: str) -> None:
         safe_name = "".join(
@@ -204,6 +208,10 @@ class Sam3Detector:
             if self._prompt_key[0] != "visual":
                 return None
             name = self._next_vis_name or f"detect_{self._composite_index:04d}"
+            if name.startswith("search_view_"):
+                if self._saved_search_composites >= self.SEARCH_COMPOSITE_LIMIT:
+                    return None
+                self._saved_search_composites += 1
             return self._vis_dir / f"sam3_input_{name}.png"
         finally:
             self._next_vis_name = None

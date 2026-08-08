@@ -1460,10 +1460,14 @@ class TJKAgent:
         )
 
         self.tracker.reset()
+        track_init_frame_idx = self.tracker.frame_idx
         tracker_started = time.perf_counter()
         bbox, _mask = self.tracker.track_with_mask(
             cur_frame,
             box=redetected["box"],
+        )
+        track_init_id, track_init_image = self._track_frame_reference(
+            track_init_frame_idx
         )
         tracker_fields = self._tracker_timing_fields(
             self.tracker,
@@ -1477,7 +1481,11 @@ class TJKAgent:
         decision_s = time.perf_counter() - decision_started
         self.exec_rotate_action_deg(
             angle_to_rotate,
-            context=f"track_init candidate={selected['candidate_idx']}",
+            context=(
+                f"track_init track_id={track_init_id} "
+                f"image={track_init_image} "
+                f"candidate={selected['candidate_idx']}"
+            ),
             log_timing=False,
         )
         motion_timing = self._last_motion_timing
@@ -1521,6 +1529,9 @@ class TJKAgent:
             track_frame_idx = self.tracker.frame_idx
             tracker_started = time.perf_counter()
             bbox, mask = self.tracker.track_with_mask(frame_rgb)
+            track_id, track_image = self._track_frame_reference(
+                track_frame_idx
+            )
             tracker_fields = self._tracker_timing_fields(
                 self.tracker,
                 time.perf_counter() - tracker_started,
@@ -1554,7 +1565,10 @@ class TJKAgent:
                 decision_s = time.perf_counter() - decision_started
                 self.exec_rotate_action_deg(
                     angle_to_rotate,
-                    context=f"track iteration={iterations} yaw_only",
+                    context=(
+                        f"track track_id={track_id} image={track_image} "
+                        f"iteration={iterations} yaw_only"
+                    ),
                     log_timing=False,
                 )
                 self._log_track_iteration_timing(
@@ -1622,7 +1636,10 @@ class TJKAgent:
                     0.0,
                     dz_cm,
                     dyaw_deg,
-                    context=f"track iteration={iterations}",
+                    context=(
+                        f"track track_id={track_id} image={track_image} "
+                        f"iteration={iterations}"
+                    ),
                     log_timing=False,
                 )
                 self._log_track_iteration_timing(
@@ -1651,6 +1668,15 @@ class TJKAgent:
             print("[RES] Stopped before confirmed target because motion appears stalled or loop limit was reached.")
 
         return success
+
+    def _track_frame_reference(self, frame_idx):
+        """Return the identifier and saved PNG name for one SAM2 frame."""
+        prefix = str(getattr(self.tracker, "track_vis_prefix", "track"))
+        index_width = int(
+            getattr(self.tracker, "track_vis_index_width", 2)
+        )
+        track_id = f"{prefix}_{int(frame_idx):0{index_width}d}"
+        return track_id, f"{track_id}.png"
 
     def scan(self):
         """Follow a small local circle and capture one RGB image at each point."""
