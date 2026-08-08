@@ -2360,7 +2360,7 @@ def build_client(
 
 _DETECTOR_BACKENDS = {
     "yolo": {
-        "module": "third_party.yolo_world_x_640",
+        "module": "third_party.yolo_world.detector",
         "detector_class": "YOLOWorldX640Detector",
         "config_class": "YOLOWorldX640Config",
         "config_keys": {
@@ -2371,7 +2371,7 @@ _DETECTOR_BACKENDS = {
         },
     },
     "grounding_dino": {
-        "module": "third_party.grounding_dino_detector",
+        "module": "third_party.grounding_dino.detector",
         "detector_class": "GroundingDINODetector",
         "config_class": "GroundingDINOConfig",
         "config_keys": {
@@ -2430,7 +2430,7 @@ def build_detector(detector_name: str, config: dict):
 
 _TRACKER_BACKENDS = {
     "sam2": {
-        "module": "third_party.sam2_stream",
+        "module": "third_party.sam2.stream",
         "tracker_class": "Sam2VideoPredictor",
         "config_class": "SAM2Config",
         "config_keys": set(),

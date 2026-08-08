@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 GROUNDED_SAM_ROOT = PROJECT_ROOT / "Grounded_SAM_2_main"
 DEFAULT_MODEL_CONFIG = (
     GROUNDED_SAM_ROOT

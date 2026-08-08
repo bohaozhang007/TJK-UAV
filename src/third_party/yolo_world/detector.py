@@ -1,7 +1,7 @@
 """YOLO-World-V2.1-X-640 adapter for agents and standalone inference.
 
 Example:
-    conda run -n yolo python yolo_world_x_640.py ^
+    conda run -n yolo python src/third_party/yolo_world/detector.py ^
         --image path/to/image.jpg --prompt "white light bulb"
 """
 
@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 YOLO_WORLD_ROOT = PROJECT_ROOT / "YOLO-World"
 DEFAULT_MODEL_CONFIG = (
     YOLO_WORLD_ROOT

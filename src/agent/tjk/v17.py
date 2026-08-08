@@ -1,8 +1,9 @@
-# v14：新增任务世界坐标多航点编排，逐航点执行并返回，全部完成后返航降落。
+# v17：搜索采集与通用 detector 单 worker 异步流水执行。
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import importlib
 import logging
@@ -115,7 +116,7 @@ def _timestamped_experiment_dir(exp_name: str, timestamp: str) -> Path:
 
 def _configure_logger(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("tjk_v14")
+    logger = logging.getLogger("tjk_v17")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
@@ -166,6 +167,7 @@ class TJKAgent:
         self.waypoint_results = []
         self.waypoint_pose = None
         self.search_candidates = []
+        self.ranked_search_candidates = []
         self.selected_candidate = None
         self.last_track_observation = None
         self.detector = detector
@@ -275,11 +277,35 @@ class TJKAgent:
             integer=True,
             minimum=1.0,
         )
-        self.select_box_area_ratio = _config_number(
+        self.select_dedup_iou_threshold = _config_number(
             select_config,
-            "box_area_ratio",
+            "dedup_iou_threshold",
             minimum=0.0,
             maximum=1.0,
+        )
+        self.select_min_edge_margin_ratio = _config_number(
+            select_config,
+            "min_edge_margin_ratio",
+            minimum=0.0,
+            maximum=0.5,
+        )
+        self.select_area_top_k = _config_number(
+            select_config,
+            "area_top_k",
+            integer=True,
+            minimum=1.0,
+        )
+        self.select_confidence_top_k = _config_number(
+            select_config,
+            "confidence_top_k",
+            integer=True,
+            minimum=1.0,
+        )
+        self.select_max_view_attempts = _config_number(
+            select_config,
+            "max_view_attempts",
+            integer=True,
+            minimum=1.0,
         )
 
         # safe thresh
@@ -298,7 +324,9 @@ class TJKAgent:
         )
 
         # img setting
-        self.img_height = 480
+        # OWL gimbal stream is 640x360. connect() still replaces these
+        # defaults with the actual frame shape reported by Robot Server.
+        self.img_height = 360
         self.img_width = 640
         self.horizontal_center = self.img_width / 2
         self.vertical_center = self.img_height / 2
@@ -437,7 +465,7 @@ class TJKAgent:
             "(x=0.00cm, y=0.00cm, z=0.00cm, yaw=0.00deg)."
         )
 
-    def run_mission(self, text_prompt):
+    def run_mission(self, detector_prompt):
         """Visit configured world waypoints, run each task, then return home."""
         if self.mission_origin_pose is None:
             raise FlightSafetyError("mission origin is unavailable; call connect first")
@@ -452,7 +480,7 @@ class TJKAgent:
                 waypoint_name=waypoint["name"],
             )
             succeeded = self.run(
-                text_prompt,
+                detector_prompt,
                 waypoint_pose=world_pose,
                 waypoint_index=index,
                 waypoint_name=waypoint["name"],
@@ -544,6 +572,7 @@ class TJKAgent:
         self.current_waypoint_index = index
         self.current_waypoint = name
         self.search_candidates = []
+        self.ranked_search_candidates = []
         self.selected_candidate = None
         self.last_track_observation = None
         self.last_motion_error = None
@@ -564,6 +593,9 @@ class TJKAgent:
         set_vis_dir = getattr(self.tracker, "set_vis_dir", None)
         if callable(set_vis_dir):
             set_vis_dir(self.vis_dir)
+        detector_set_vis_dir = getattr(self.detector, "set_vis_dir", None)
+        if callable(detector_set_vis_dir):
+            detector_set_vis_dir(self.vis_dir)
         set_track_vis_naming = getattr(
             self.tracker,
             "set_track_vis_naming",
@@ -661,7 +693,7 @@ class TJKAgent:
 
     def run(
         self,
-        text_prompt,
+        detector_prompt,
         waypoint_pose=None,
         waypoint_index=None,
         waypoint_name=None,
@@ -684,7 +716,7 @@ class TJKAgent:
         )
 
         try:
-            prompt_updated = self.detector.set_prompt(text_prompt)
+            prompt_updated = self.detector.set_prompt(detector_prompt)
         except Exception as exc:
             return self._recover_from_task_failure(
                 TaskFailure(f"detector prompt setup failed: {exc}")
@@ -697,7 +729,7 @@ class TJKAgent:
         )
         self._log(
             f"[DETECTOR] backend={self.detector_name} "
-            f"prompt={text_prompt!r} prompt_updated={prompt_updated}"
+            f"prompt={detector_prompt!r} prompt_updated={prompt_updated}"
             f"{cache_text}"
         )
         search_succeeded = False
@@ -897,169 +929,119 @@ class TJKAgent:
         return False
 
     def search(self):
-        """Collect detector boxes without running SAM or requesting depth."""
+        """Capture views continuously while one detector worker consumes them."""
         self.search_candidates = []
+        self.ranked_search_candidates = []
         self.selected_candidate = None
         self.last_track_observation = None
-
-        # Search at h, h+offset, and h-offset, one full turn at each height.
-        for height_idx, height_offset_cm, target_z_cm in (
-            self._search_height_targets()
-        ):
-            current_pose = self._get_pose_for_flight(
-                f"search height={height_idx} pose"
-            )
-            dz_cm = target_z_cm - float(current_pose["z"])
-            if abs(dz_cm) > 1e-6:
-                self.exec_xyz_yaw_hybrid(
-                    0.0,
-                    0.0,
-                    dz_cm,
-                    0.0,
-                    context=f"search_height={height_idx}",
+        search_started = time.perf_counter()
+        pending_views = []
+        executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="tjk-detector",
+        )
+        try:
+            # Search at h, h+offset, and h-offset, one full turn at each height.
+            for height_idx, height_offset_cm, target_z_cm in (
+                self._search_height_targets()
+            ):
+                self._raise_search_worker_errors(pending_views)
+                current_pose = self._get_pose_for_flight(
+                    f"search height={height_idx} pose"
                 )
-
-            for i in range(self.search_rotation_count):
-                view_idx = height_idx * self.search_rotation_count + i
-                capture_started = time.perf_counter()
-                cur_frame = self._capture_for_task(
-                    include_depth=False,
-                    context=f"search view={view_idx} RGB capture",
-                )
-                capture_rgb_s = time.perf_counter() - capture_started
-                detection_started = time.perf_counter()
-                all_detections = self.detect(cur_frame)
-                detector_s = time.perf_counter() - detection_started
-                detector_inference_s = float(
-                    getattr(self.detector, "last_timing", {}).get(
-                        "inference_s",
-                        detector_s,
-                    )
-                )
-                detections = all_detections[
-                    :self.max_candidates_per_frame
-                ]
-                candidate_boxes = []
-                candidate_box_labels = []
-
-                if len(all_detections) > len(detections):
-                    self._log(
-                        f"[SEARCH] View={view_idx} detections="
-                        f"{len(all_detections)} processing="
-                        f"{len(detections)}."
+                dz_cm = target_z_cm - float(current_pose["z"])
+                if abs(dz_cm) > 1e-6:
+                    self.exec_xyz_yaw_hybrid(
+                        0.0,
+                        0.0,
+                        dz_cm,
+                        0.0,
+                        context=f"search_height={height_idx}",
                     )
 
-                if detections:
-                    candidate_pose = self._copy_pose(
+                for i in range(self.search_rotation_count):
+                    self._raise_search_worker_errors(pending_views)
+                    view_idx = height_idx * self.search_rotation_count + i
+                    capture_started = time.perf_counter()
+                    cur_frame = self._capture_for_task(
+                        include_depth=False,
+                        context=f"search view={view_idx} RGB capture",
+                    )
+                    capture_rgb_s = time.perf_counter() - capture_started
+                    capture_pose = self._copy_pose(
                         self._get_pose_for_flight(
-                            f"search view={view_idx} candidate pose"
+                            f"search view={view_idx} capture pose"
                         )
                     )
-                    image_height, image_width = cur_frame.shape[:2]
-                    image_area = float(image_height * image_width)
-                    for detection_rank, detection in enumerate(detections):
-                        candidate_idx = (
-                            view_idx * self.max_candidates_per_frame
-                            + detection_rank
-                        )
-                        target_box = np.asarray(
-                            detection["box"],
-                            dtype=np.float32,
-                        ).reshape(-1)
-                        if target_box.size != 4:
-                            raise ValueError(
-                                "Detector box must contain four xyxy values, "
-                                f"got shape={target_box.shape}"
-                            )
-                        confidence = float(detection["confidence"])
-                        label = str(detection["label"])
-                        box_width = max(
-                            0.0,
-                            float(target_box[2] - target_box[0]),
-                        )
-                        box_height = max(
-                            0.0,
-                            float(target_box[3] - target_box[1]),
-                        )
-                        box_area_px = box_width * box_height
-                        if box_area_px <= 0.0:
-                            self._log(
-                                f"[SEARCH] Skip candidate={candidate_idx}: "
-                                "detector box has zero area."
-                            )
-                            continue
-                        box_area_ratio = box_area_px / image_area
+                    submitted_at = time.perf_counter()
+                    detection_future = executor.submit(
+                        self._detect_search_view,
+                        cur_frame.copy(),
+                        view_idx,
+                        submitted_at,
+                    )
+                    view_record = {
+                        "view_idx": view_idx,
+                        "rotation_idx": i,
+                        "height_offset_cm": height_offset_cm,
+                        "frame": cur_frame,
+                        "pose": capture_pose,
+                        "capture_s": capture_rgb_s,
+                        "submitted_at": submitted_at,
+                        "future": detection_future,
+                    }
+                    pending_views.append(view_record)
+                    self._log(
+                        f"[SEARCH-PIPELINE] Enqueued view={view_idx} "
+                        f"height={height_idx} pending="
+                        f"{sum(not item['future'].done() for item in pending_views)} "
+                        f"pose={self._format_pose(capture_pose)}"
+                    )
 
-                        candidate_boxes.append(target_box)
-                        candidate_box_labels.append(
-                            f"id: {candidate_idx}, "
-                            f"conf: {confidence:.2f}"
-                        )
-                        candidate = {
-                            "candidate_idx": candidate_idx,
-                            "view_idx": view_idx,
-                            "detection_rank": detection_rank,
-                            "height_offset_cm": height_offset_cm,
-                            "heading_deg": (
-                                i * self.search_rotation_step_deg
-                            ),
-                            "pose": candidate_pose.copy(),
-                            "box": target_box.copy(),
-                            "box_area_px": box_area_px,
-                            "box_area_ratio": box_area_ratio,
-                            "confidence": confidence,
-                            "label": label,
-                        }
-                        self.search_candidates.append(candidate)
+                    # The detector consumes this frame while the main thread
+                    # commands and waits for the next stable camera view.
+                    self.exec_rotate_action_deg(
+                        self.search_rotation_step_deg,
+                        context=f"search view={view_idx}",
+                        log_timing=False,
+                    )
+                    view_record["motion_timing"] = dict(
+                        self._last_motion_timing
+                    )
+                    view_record["command_id"] = self._last_motion_command_id
+        except BaseException as exc:
+            for view_record in pending_views:
+                view_record["future"].cancel()
+            executor.shutdown(
+                wait=isinstance(exc, TaskFailure),
+                cancel_futures=True,
+            )
+            raise
 
-                visualization_started = time.perf_counter()
-                show_fig(
-                    cur_frame,
-                    f"{self.vis_dir}/search_view_{view_idx:02d}.png",
-                    box_coords=(
-                        np.asarray(candidate_boxes)
-                        if candidate_boxes
-                        else None
-                    ),
-                    box_labels=(
-                        candidate_box_labels
-                        if candidate_box_labels
-                        else None
-                    ),
-                )
-                visualization_s = (
-                    time.perf_counter() - visualization_started
-                )
+        drain_started = time.perf_counter()
+        try:
+            for view_record in pending_views:
+                try:
+                    detection_result = view_record["future"].result()
+                except Exception as exc:
+                    raise TaskFailure(
+                        "search detector worker failed for "
+                        f"view={view_record['view_idx']}: {exc}"
+                    ) from exc
+                self._consume_search_view(view_record, detection_result)
+        except BaseException:
+            for view_record in pending_views:
+                view_record["future"].cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
-                # Always complete the full rotation, even after a detection.
-                self.exec_rotate_action_deg(
-                    self.search_rotation_step_deg,
-                    context=f"search view={view_idx}",
-                    log_timing=False,
-                )
-                motion_timing = self._last_motion_timing
-                total_s = (
-                    capture_rgb_s
-                    + detector_s
-                    + visualization_s
-                    + motion_timing["drone_execution_s"]
-                )
-                timing_fields = {
-                    "capture": capture_rgb_s,
-                    "detector": {
-                        "total": detector_s + visualization_s,
-                        "infer": detector_inference_s,
-                        "vis": visualization_s,
-                    },
-                }
-                timing_fields["execution"] = (
-                    motion_timing["drone_execution_s"]
-                )
-                self._log_timing(
-                    total_s,
-                    command_id=self._last_motion_command_id,
-                    **timing_fields,
-                )
+        self._log(
+            f"[SEARCH-PIPELINE] Completed views={len(pending_views)} "
+            f"drain_s={time.perf_counter() - drain_started:.4f} "
+            f"wall_s={time.perf_counter() - search_started:.4f}"
+        )
 
         if not self.search_candidates:
             self._log(
@@ -1068,18 +1050,159 @@ class TJKAgent:
             )
             return False
 
-        selected, similar_area_candidates = (
-            self._choose_search_candidate()
+        self.ranked_search_candidates = self._rank_view_candidates(
+            self.search_candidates,
+            context="SEARCH",
         )
+        if not self.ranked_search_candidates:
+            self._log(
+                "[SEARCH] Detector candidates exist, but none passed the "
+                "best-view safety filters; return to the waypoint."
+            )
+            return False
+        selected = self.ranked_search_candidates[0]
         self._log(
             f"[SEARCH] Completed all height levels; queued="
             f"{len(self.search_candidates)} selected_candidate="
             f"{selected['candidate_idx']} "
+            f"selected_view={selected['view_idx']} "
             f"box_area={selected['box_area_ratio']:.3%} "
             f"confidence={selected['confidence']:.3f} "
-            f"similar_area_candidates={len(similar_area_candidates)}."
+            f"center_distance={selected['center_distance']:.3f} "
+            f"ranked_views={len(self.ranked_search_candidates)}."
         )
         return True
+
+    @staticmethod
+    def _raise_search_worker_errors(pending_views):
+        for view_record in pending_views:
+            future = view_record["future"]
+            if not future.done() or future.cancelled():
+                continue
+            error = future.exception()
+            if error is not None:
+                raise TaskFailure(
+                    "search detector worker failed for "
+                    f"view={view_record['view_idx']}: {error}"
+                ) from error
+
+    def _detect_search_view(self, frame_rgb, view_idx, submitted_at):
+        worker_started = time.perf_counter()
+        detection_started = time.perf_counter()
+        all_detections = self.detect(
+            frame_rgb,
+            vis_name=f"search_view_{view_idx:02d}",
+        )
+        detector_s = time.perf_counter() - detection_started
+        detector_inference_s = float(
+            getattr(self.detector, "last_timing", {}).get(
+                "inference_s",
+                detector_s,
+            )
+        )
+        return {
+            "all_detections": all_detections,
+            "detector_s": detector_s,
+            "detector_inference_s": detector_inference_s,
+            "queue_wait_s": worker_started - submitted_at,
+        }
+
+    def _consume_search_view(self, view_record, detection_result):
+        view_idx = view_record["view_idx"]
+        cur_frame = view_record["frame"]
+        all_detections = detection_result["all_detections"]
+        detections = all_detections[:self.max_candidates_per_frame]
+        candidate_boxes = []
+        candidate_box_labels = []
+
+        if len(all_detections) > len(detections):
+            self._log(
+                f"[SEARCH] View={view_idx} detections={len(all_detections)} "
+                f"processing={len(detections)}."
+            )
+
+        image_height, image_width = cur_frame.shape[:2]
+        image_area = float(image_height * image_width)
+        for detection_rank, detection in enumerate(detections):
+            candidate_idx = (
+                view_idx * self.max_candidates_per_frame + detection_rank
+            )
+            target_box = np.asarray(
+                detection["box"],
+                dtype=np.float32,
+            ).reshape(-1)
+            if target_box.size != 4:
+                raise ValueError(
+                    "Detector box must contain four xyxy values, "
+                    f"got shape={target_box.shape}"
+                )
+            confidence = float(detection["confidence"])
+            label = str(detection["label"])
+            box_width = max(0.0, float(target_box[2] - target_box[0]))
+            box_height = max(0.0, float(target_box[3] - target_box[1]))
+            box_area_px = box_width * box_height
+            if box_area_px <= 0.0:
+                self._log(
+                    f"[SEARCH] Skip candidate={candidate_idx}: "
+                    "detector box has zero area."
+                )
+                continue
+            box_area_ratio = box_area_px / image_area
+            candidate_boxes.append(target_box)
+            candidate_box_labels.append(
+                f"id: {candidate_idx}, conf: {confidence:.2f}"
+            )
+            self.search_candidates.append(
+                {
+                    "candidate_idx": candidate_idx,
+                    "view_idx": view_idx,
+                    "detection_rank": detection_rank,
+                    "height_offset_cm": view_record["height_offset_cm"],
+                    "heading_deg": (
+                        view_record["rotation_idx"]
+                        * self.search_rotation_step_deg
+                    ),
+                    "pose": view_record["pose"].copy(),
+                    "box": target_box.copy(),
+                    "box_area_px": box_area_px,
+                    "box_area_ratio": box_area_ratio,
+                    "confidence": confidence,
+                    "label": label,
+                    "image_width": image_width,
+                    "image_height": image_height,
+                }
+            )
+
+        visualization_started = time.perf_counter()
+        show_fig(
+            cur_frame,
+            f"{self.vis_dir}/search_view_{view_idx:02d}.png",
+            box_coords=(
+                np.asarray(candidate_boxes) if candidate_boxes else None
+            ),
+            box_labels=(candidate_box_labels if candidate_box_labels else None),
+        )
+        visualization_s = time.perf_counter() - visualization_started
+        motion_timing = view_record["motion_timing"]
+        detector_s = detection_result["detector_s"]
+        total_s = (
+            view_record["capture_s"]
+            + detector_s
+            + visualization_s
+            + motion_timing["drone_execution_s"]
+        )
+        self._log_timing(
+            total_s,
+            command_id=view_record["command_id"],
+            capture=view_record["capture_s"],
+            detector={
+                "total": detector_s + visualization_s,
+                "infer": detection_result["detector_inference_s"],
+                "vis": visualization_s,
+                "queue_wait": detection_result["queue_wait_s"],
+            },
+            execution=motion_timing["drone_execution_s"],
+        )
 
     def _search_height_targets(self):
         if self.waypoint_pose is None:
@@ -1108,22 +1231,53 @@ class TJKAgent:
         return targets
 
     def select(self):
-        """Select by box area, return to its pose, and initialize SAM tracking."""
-        if not self.search_candidates:
-            self._log("[SELECT] Candidate queue is empty.")
+        """Try ranked safe views until one can initialize SAM tracking."""
+        if not self.ranked_search_candidates:
+            self._log("[SELECT] Ranked candidate queue is empty.")
             return False
 
-        selected, similar_area_candidates = (
-            self._choose_search_candidate()
+        attempt_candidates = self.ranked_search_candidates[
+            : self.select_max_view_attempts
+        ]
+        total_attempts = len(attempt_candidates)
+        for attempt_idx, selected in enumerate(
+            attempt_candidates,
+            start=1,
+        ):
+            if self._attempt_select_candidate(
+                selected,
+                attempt_idx,
+                total_attempts,
+            ):
+                return True
+            self._log(
+                f"[SELECT] Attempt {attempt_idx}/{total_attempts} "
+                f"view={selected['view_idx']} failed re-detection; "
+                "try the next ranked view."
+            )
+
+        self._log(
+            f"[SELECT] All {total_attempts} ranked view attempts failed."
         )
+        return False
+
+    def _attempt_select_candidate(
+        self,
+        selected,
+        attempt_idx,
+        total_attempts,
+    ):
+        """Return to one ranked view and initialize tracking if re-detected."""
         self.selected_candidate = selected
         selected_pose = selected["pose"]
         self._log(
-            f"[SELECT] Selected candidate={selected['candidate_idx']} "
+            f"[SELECT] Attempt {attempt_idx}/{total_attempts} "
+            f"candidate={selected['candidate_idx']} "
             f"view={selected['view_idx']} "
             f"box_area={selected['box_area_ratio']:.3%} "
             f"confidence={selected['confidence']:.3f} "
-            f"similar_area_candidates={len(similar_area_candidates)} "
+            f"center_distance={selected['center_distance']:.3f} "
+            f"edge_margin={selected['edge_margin_ratio']:.3f} "
             f"pose=(x={selected_pose['x']:.2f}cm, "
             f"y={selected_pose['y']:.2f}cm, z={selected_pose['z']:.2f}cm, "
             f"yaw={selected_pose['yaw']:.2f}deg)"
@@ -1156,11 +1310,14 @@ class TJKAgent:
         capture_started = time.perf_counter()
         cur_frame = self._capture_for_task(
             include_depth=False,
-            context="select RGB capture",
+            context=f"select attempt={attempt_idx} RGB capture",
         )
         capture_s = time.perf_counter() - capture_started
         detector_started = time.perf_counter()
-        all_detections = self.detect(cur_frame)
+        all_detections = self.detect(
+            cur_frame,
+            vis_name=f"select_attempt_{attempt_idx:02d}",
+        )
         detector_s = time.perf_counter() - detector_started
         detector_inference_s = float(
             getattr(self.detector, "last_timing", {}).get(
@@ -1203,25 +1360,33 @@ class TJKAgent:
                     "box_area_ratio": box_area_px / image_area,
                     "confidence": float(detection["confidence"]),
                     "label": str(detection["label"]),
+                    "image_width": image_width,
+                    "image_height": image_height,
+                    "view_idx": selected["view_idx"],
                 }
             )
 
-        best_view_path = os.path.join(
-            self.vis_dir,
-            "best_view_obj.png",
-        )
-        redetected, redetected_similar = (
-            self._choose_candidate_by_area(redetected_candidates)
+        redetected_ranked = self._rank_view_candidates(
+            redetected_candidates,
+            context=(
+                f"REDETECT attempt={attempt_idx} "
+                f"view={selected['view_idx']}"
+            ),
         )
         visualization_started = time.perf_counter()
-        if redetected is None:
-            show_fig(cur_frame, best_view_path)
+        if not redetected_ranked:
+            attempt_view_path = os.path.join(
+                self.vis_dir,
+                f"best_view_attempt_{attempt_idx:02d}.png",
+            )
+            show_fig(cur_frame, attempt_view_path)
             visualization_s = (
                 time.perf_counter() - visualization_started
             )
             self._log(
-                "[SELECT] Re-detection returned no valid candidates; "
-                f"image={best_view_path}"
+                f"[SELECT] Attempt {attempt_idx}/{total_attempts} "
+                "re-detection returned no edge-safe candidates; "
+                f"image={attempt_view_path}"
             )
             self._log_timing(
                 capture_s + detector_s + visualization_s,
@@ -1235,6 +1400,11 @@ class TJKAgent:
             )
             return False
 
+        redetected = redetected_ranked[0]
+        best_view_path = os.path.join(
+            self.vis_dir,
+            "best_view_obj.png",
+        )
         show_fig(
             cur_frame,
             best_view_path,
@@ -1253,6 +1423,12 @@ class TJKAgent:
             "confidence": redetected["confidence"],
             "label": redetected["label"],
             "redetection_rank": redetected["detection_rank"],
+            "image_width": redetected["image_width"],
+            "image_height": redetected["image_height"],
+            "center_x": redetected["center_x"],
+            "center_y": redetected["center_y"],
+            "center_distance": redetected["center_distance"],
+            "edge_margin_ratio": redetected["edge_margin_ratio"],
         }
         self.selected_candidate = selected
         self._log(
@@ -1261,7 +1437,8 @@ class TJKAgent:
             f"{redetected['detection_rank']} "
             f"box_area={redetected['box_area_ratio']:.3%} "
             f"confidence={redetected['confidence']:.3f} "
-            f"similar_area_candidates={len(redetected_similar)} "
+            f"center_distance={redetected['center_distance']:.3f} "
+            f"edge_margin={redetected['edge_margin_ratio']:.3f} "
             f"image={best_view_path}"
         )
 
@@ -1516,36 +1693,246 @@ class TJKAgent:
         )
         return final_pose
 
-    def detect(self, image_rgb):
+    def detect(self, image_rgb, vis_name=None):
         """Run the selected backend through the common detector interface."""
-        return self.detector.detect(image_rgb)
+        if vis_name is not None:
+            set_next_vis_name = getattr(
+                self.detector,
+                "set_next_vis_name",
+                None,
+            )
+            if callable(set_next_vis_name):
+                set_next_vis_name(vis_name)
+        detections = self.detector.detect(image_rgb)
+        composite_path = getattr(
+            self.detector,
+            "last_composite_path",
+            None,
+        )
+        if composite_path:
+            self._log(f"[SAM3-INPUT] saved={composite_path}")
+        return detections
 
-    def _choose_search_candidate(self):
-        return self._choose_candidate_by_area(self.search_candidates)
+    @staticmethod
+    def _candidate_number(candidate):
+        return int(
+            candidate.get(
+                "candidate_idx",
+                candidate.get("detection_rank", -1),
+            )
+        )
 
-    def _choose_candidate_by_area(self, candidates):
+    @staticmethod
+    def _box_iou(first_box, second_box):
+        first = np.asarray(first_box, dtype=np.float32).reshape(4)
+        second = np.asarray(second_box, dtype=np.float32).reshape(4)
+        ix1 = max(float(first[0]), float(second[0]))
+        iy1 = max(float(first[1]), float(second[1]))
+        ix2 = min(float(first[2]), float(second[2]))
+        iy2 = min(float(first[3]), float(second[3]))
+        intersection = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        first_area = max(0.0, float(first[2] - first[0])) * max(
+            0.0,
+            float(first[3] - first[1]),
+        )
+        second_area = max(0.0, float(second[2] - second[0])) * max(
+            0.0,
+            float(second[3] - second[1]),
+        )
+        union = first_area + second_area - intersection
+        return 0.0 if union <= 0.0 else intersection / union
+
+    @staticmethod
+    def _enrich_candidate_geometry(candidate):
+        enriched = dict(candidate)
+        box = np.asarray(enriched["box"], dtype=np.float32).reshape(4)
+        image_width = float(enriched["image_width"])
+        image_height = float(enriched["image_height"])
+        center_x = float((box[0] + box[2]) / 2.0)
+        center_y = float((box[1] + box[3]) / 2.0)
+        center_distance = float(
+            np.hypot(
+                (center_x - image_width / 2.0) / (image_width / 2.0),
+                (center_y - image_height / 2.0) / (image_height / 2.0),
+            )
+        )
+        edge_margin_ratio = float(
+            min(
+                float(box[0]) / image_width,
+                float(box[1]) / image_height,
+                (image_width - float(box[2])) / image_width,
+                (image_height - float(box[3])) / image_height,
+            )
+        )
+        enriched.update(
+            {
+                "center_x": center_x,
+                "center_y": center_y,
+                "center_distance": center_distance,
+                "edge_margin_ratio": edge_margin_ratio,
+            }
+        )
+        return enriched
+
+    def _deduplicate_view_candidates(self, candidates, context):
+        grouped = {}
+        for candidate in candidates:
+            grouped.setdefault(int(candidate["view_idx"]), []).append(
+                candidate
+            )
+
+        deduplicated = []
+        for view_idx in sorted(grouped):
+            kept = []
+            ordered = sorted(
+                grouped[view_idx],
+                key=lambda candidate: (
+                    -float(candidate["confidence"]),
+                    -float(candidate["box_area_ratio"]),
+                    self._candidate_number(candidate),
+                ),
+            )
+            for candidate in ordered:
+                duplicate = None
+                duplicate_iou = 0.0
+                for retained in kept:
+                    iou = self._box_iou(
+                        candidate["box"],
+                        retained["box"],
+                    )
+                    if iou >= self.select_dedup_iou_threshold:
+                        duplicate = retained
+                        duplicate_iou = iou
+                        break
+                if duplicate is None:
+                    kept.append(candidate)
+                    continue
+                self._log(
+                    f"[SELECT-FILTER][DEDUP] context={context} "
+                    f"view={view_idx} drop_candidate="
+                    f"{self._candidate_number(candidate)} "
+                    f"keep_candidate={self._candidate_number(duplicate)} "
+                    f"iou={duplicate_iou:.3f} "
+                    f"drop_label={candidate['label']!r} "
+                    f"keep_label={duplicate['label']!r}"
+                )
+            deduplicated.extend(kept)
+        return deduplicated
+
+    def _filter_edge_safe_candidates(self, candidates, context):
+        safe_candidates = []
+        for candidate in candidates:
+            margin = float(candidate["edge_margin_ratio"])
+            if margin < self.select_min_edge_margin_ratio:
+                self._log(
+                    f"[SELECT-FILTER][EDGE] context={context} "
+                    f"view={candidate['view_idx']} candidate="
+                    f"{self._candidate_number(candidate)} "
+                    f"margin={margin:.3f} threshold="
+                    f"{self.select_min_edge_margin_ratio:.3f}"
+                )
+                continue
+            safe_candidates.append(candidate)
+        return safe_candidates
+
+    def _choose_one_candidate_per_view(self, candidates, context):
+        selected_by_view = {}
+        for candidate in candidates:
+            view_idx = int(candidate["view_idx"])
+            current = selected_by_view.get(view_idx)
+            if current is None or (
+                float(candidate["box_area_ratio"]),
+                float(candidate["confidence"]),
+                -float(candidate["center_distance"]),
+            ) > (
+                float(current["box_area_ratio"]),
+                float(current["confidence"]),
+                -float(current["center_distance"]),
+            ):
+                selected_by_view[view_idx] = candidate
+
+        for candidate in candidates:
+            retained = selected_by_view[int(candidate["view_idx"])]
+            if candidate is retained:
+                continue
+            self._log(
+                f"[SELECT-FILTER][VIEW] context={context} "
+                f"view={candidate['view_idx']} drop_candidate="
+                f"{self._candidate_number(candidate)} "
+                f"keep_candidate={self._candidate_number(retained)}"
+            )
+        return list(selected_by_view.values())
+
+    def _log_candidate_ranking(self, stage, context, candidates):
+        for rank, candidate in enumerate(candidates, start=1):
+            self._log(
+                f"[SELECT-RANK][{stage}] context={context} rank={rank} "
+                f"view={candidate['view_idx']} candidate="
+                f"{self._candidate_number(candidate)} "
+                f"label={candidate['label']!r} "
+                f"area={candidate['box_area_ratio']:.3%} "
+                f"confidence={candidate['confidence']:.3f} "
+                f"center=({candidate['center_x']:.1f},"
+                f"{candidate['center_y']:.1f}) "
+                f"center_distance={candidate['center_distance']:.3f} "
+                f"edge_margin={candidate['edge_margin_ratio']:.3f}"
+            )
+
+    def _rank_view_candidates(self, candidates, context):
         if not candidates:
-            return None, []
-        largest_area_ratio = max(
-            candidate["box_area_ratio"]
+            return []
+        enriched = [
+            self._enrich_candidate_geometry(candidate)
             for candidate in candidates
-        )
-        similar_area_floor = (
-            largest_area_ratio * self.select_box_area_ratio
-        )
-        similar_area_candidates = [
-            candidate
-            for candidate in candidates
-            if candidate["box_area_ratio"] >= similar_area_floor
         ]
-        selected = max(
-            similar_area_candidates,
+        deduplicated = self._deduplicate_view_candidates(
+            enriched,
+            context,
+        )
+        edge_safe = self._filter_edge_safe_candidates(
+            deduplicated,
+            context,
+        )
+        unique_views = self._choose_one_candidate_per_view(
+            edge_safe,
+            context,
+        )
+
+        area_ranked = sorted(
+            unique_views,
             key=lambda candidate: (
-                candidate["confidence"],
-                candidate["box_area_ratio"],
+                -float(candidate["box_area_ratio"]),
+                -float(candidate["confidence"]),
+                int(candidate["view_idx"]),
+            ),
+        )[: self.select_area_top_k]
+        self._log_candidate_ranking("AREA", context, area_ranked)
+
+        confidence_ranked = sorted(
+            area_ranked,
+            key=lambda candidate: (
+                -float(candidate["confidence"]),
+                -float(candidate["box_area_ratio"]),
+                int(candidate["view_idx"]),
+            ),
+        )[: self.select_confidence_top_k]
+        self._log_candidate_ranking(
+            "CONFIDENCE",
+            context,
+            confidence_ranked,
+        )
+
+        center_ranked = sorted(
+            confidence_ranked,
+            key=lambda candidate: (
+                float(candidate["center_distance"]),
+                -float(candidate["confidence"]),
+                -float(candidate["box_area_ratio"]),
+                int(candidate["view_idx"]),
             ),
         )
-        return selected, similar_area_candidates
+        self._log_candidate_ranking("CENTER", context, center_ranked)
+        return center_ranked
 
     def exec_rotate_action_deg(
         self,
@@ -2093,6 +2480,14 @@ _DETECTOR_BACKENDS = {
             "text_threshold",
         },
     },
+    "sam3": {
+        "module": "third_party.sam3.detector",
+        "detector_class": "Sam3Detector",
+        "config_class": "Sam3DetectorConfig",
+        "config_keys": {
+            "confidence_threshold",
+        },
+    },
 }
 
 
@@ -2157,7 +2552,7 @@ def build_tracker(
     config: dict,
     vis_dir: str,
     save_vis: bool = True,
-    image_height: int = 480,
+    image_height: int = 360,
     image_width: int = 640,
 ):
     try:
@@ -2238,9 +2633,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "YAML path relative to src/agent/config, such as owl/v14.yaml; "
-            "absolute paths are also supported. Defaults to owl/v14.yaml "
-            "for OWL and base/v14.yaml for other robots"
+            "YAML path relative to src/agent/config, such as owl/v17.yaml; "
+            "absolute paths are also supported. Defaults to owl/v17.yaml "
+            "for the OWL v17 agent"
         ),
     )
     parser.add_argument(
@@ -2252,15 +2647,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "automatically (default: repository logs/test)"
         ),
     )
-    parser.add_argument(
-        "--obj",
+    prompt_group = parser.add_mutually_exclusive_group(required=True)
+    prompt_group.add_argument(
+        "--text",
         type=str,
-        default="white light bulb",
-        help="Object prompt used by the selected detector",
+        help="Text prompt used by YOLO, GroundingDINO, or SAM3",
+    )
+    prompt_group.add_argument(
+        "--img",
+        type=str,
+        help="Reference image used as a SAM3 visual exemplar",
+    )
+    parser.add_argument(
+        "--box",
+        type=float,
+        nargs=4,
+        metavar=("X1", "Y1", "X2", "Y2"),
+        help="Required reference-image box in xyxy pixel coordinates",
     )
     parser.add_argument(
         "--det",
-        choices=("yolo", "grounding_dino"),
+        choices=("yolo", "grounding_dino", "sam3"),
         default="yolo",
         help="Detector backend loaded at runtime (default: yolo)",
     )
@@ -2274,11 +2681,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--client",
         "--robot",
         dest="client",
-        choices=("tello", "ue", "owl"),
-        default="ue",
+        choices=("owl",),
+        default="owl",
         help=(
-            "Robot to use: tello, ue, or owl; --robot is an alias for "
-            "--client (default: ue)"
+            "Robot to use; v17 is configured for OWL (default: owl)"
         ),
     )
     parser.add_argument(
@@ -2304,8 +2710,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def _resolve_config_path(config_path: str | None, client_name: str) -> Path:
     config_root = Path(__file__).resolve().parents[1] / "config"
     if config_path is None:
-        config_profile = "owl" if client_name == "owl" else "base"
-        return (config_root / config_profile / "v14.yaml").resolve()
+        return (config_root / "owl" / "v17.yaml").resolve()
 
     requested_path = Path(config_path).expanduser()
     if requested_path.is_absolute():
@@ -2324,8 +2729,58 @@ def _land_after_task(client: BaseClient, logger: logging.Logger) -> dict:
     return result
 
 
+def _build_detector_prompt(args) -> str | dict:
+    if args.text is not None:
+        text = args.text.strip()
+        if not text:
+            raise ValueError("--text must not be empty")
+        if args.box is not None:
+            raise ValueError("--box can only be used together with --img")
+        return text
+
+    if args.det != "sam3":
+        raise ValueError(
+            f"detector {args.det!r} only supports --text; --img requires --det sam3"
+        )
+    if args.box is None:
+        raise ValueError("--box X1 Y1 X2 Y2 is required with --img")
+    image_path = Path(args.img).expanduser().resolve()
+    if not image_path.is_file():
+        raise ValueError(f"reference image not found: {image_path}")
+    x1, y1, x2, y2 = (float(value) for value in args.box)
+    if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+        raise ValueError("--box values must be finite")
+    if x1 < 0.0 or y1 < 0.0 or x2 <= x1 or y2 <= y1:
+        raise ValueError(
+            "--box must satisfy 0 <= X1 < X2 and 0 <= Y1 < Y2"
+        )
+    try:
+        with Image.open(image_path) as reference_image:
+            image_width, image_height = reference_image.size
+            reference_image.verify()
+    except Exception as exc:
+        raise ValueError(
+            f"failed to read reference image: {image_path}: {exc}"
+        ) from exc
+    if x2 > image_width or y2 > image_height:
+        raise ValueError(
+            f"--box {(x1, y1, x2, y2)} exceeds reference image "
+            f"size {(image_width, image_height)}"
+        )
+    return {
+        "type": "visual",
+        "image_path": str(image_path),
+        "box_xyxy": (x1, y1, x2, y2),
+    }
+
+
 def main():
-    args = _build_arg_parser().parse_args()
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+    try:
+        detector_prompt = _build_detector_prompt(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     args.config = str(_resolve_config_path(args.config, args.client))
     # Validate the required config before creating logs, clients, or models.
     config = _load_config(args.config)
@@ -2338,7 +2793,7 @@ def main():
     logger.info(
         f"[RUN] client={args.client} detector={args.det} "
         f"tracker={args.trk} "
-        f"object={args.obj!r} "
+        f"prompt={detector_prompt!r} "
         f"depth_source={'ue_native' if args.client == 'ue' else 'client_da3'} "
         f"config={Path(args.config).expanduser().resolve()} "
         f"exp_dir={exp_dir} vis={vis_dir} log={log_path}"
@@ -2368,7 +2823,7 @@ def main():
     )
     try:
         tjkAgent.connect()
-        mission_result = tjkAgent.run_mission(args.obj)
+        mission_result = tjkAgent.run_mission(detector_prompt)
         logger.info(
             f"[MISSION-RESULT] success={mission_result['success']} "
             f"returned_home={mission_result['returned_home']} "

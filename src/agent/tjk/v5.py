@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.join(GROUNDING_SAM_ROOT, "grounding_dino"))
 
 import groundingdino.datasets.transforms as T
 from groundingdino.util.inference import load_model, predict
-from third_party.sam2_stream import Sam2VideoPredictor, SAM2Config
+from third_party.sam2.stream import Sam2VideoPredictor, SAM2Config
 from robot_client.base import BaseClient
 from utils import show_fig
 

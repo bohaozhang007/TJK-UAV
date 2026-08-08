@@ -24,7 +24,7 @@ if "%USE_DA3%"=="1" (
     curl.exe --noproxy "*" -fsS http://127.0.0.1:8770/health >nul 2>nul
     if errorlevel 1 (
         echo [START] Starting DA3 service...
-        start "TJK-UAV DA3" /MIN "%CONDA_EXE%" run --no-capture-output -n gsam2_vggt python "%SCRIPT_DIR%src\third_party\da3_depth_server.py"
+        start "TJK-UAV DA3" /MIN "%CONDA_EXE%" run --no-capture-output -n gsam2_vggt python "%SCRIPT_DIR%src\third_party\da3\server.py"
     )
 
     echo [START] Waiting for DA3 service...
@@ -56,6 +56,6 @@ if "%USE_SAM3%"=="1" (
 )
 
 :sam3_ready
-echo [START] Starting Agent v16...
-"%CONDA_EXE%" run --no-capture-output -n yolo python "%SCRIPT_DIR%src\agent\tjk\v16.py" !AGENT_ARGS!
+echo [START] Starting Agent v17...
+"%CONDA_EXE%" run --no-capture-output -n yolo python "%SCRIPT_DIR%src\agent\tjk\v17.py" !AGENT_ARGS!
 exit /b %ERRORLEVEL%

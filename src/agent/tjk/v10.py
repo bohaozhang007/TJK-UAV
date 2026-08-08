@@ -22,7 +22,7 @@ SRC_ROOT = os.path.dirname(
 )
 sys.path.insert(0, SRC_ROOT)
 
-from third_party.sam2_stream import Sam2VideoPredictor, SAM2Config
+from third_party.sam2.stream import Sam2VideoPredictor, SAM2Config
 from robot_client.base import BaseClient
 from utils import show_fig
 
@@ -1397,7 +1397,7 @@ def build_client(
 
 _DETECTOR_BACKENDS = {
     "yolo": {
-        "module": "third_party.yolo_world_x_640",
+        "module": "third_party.yolo_world.detector",
         "detector_class": "YOLOWorldX640Detector",
         "config_class": "YOLOWorldX640Config",
         "config_keys": {
@@ -1408,7 +1408,7 @@ _DETECTOR_BACKENDS = {
         },
     },
     "grounding_dino": {
-        "module": "third_party.grounding_dino_detector",
+        "module": "third_party.grounding_dino.detector",
         "detector_class": "GroundingDINODetector",
         "config_class": "GroundingDINOConfig",
         "config_keys": {
