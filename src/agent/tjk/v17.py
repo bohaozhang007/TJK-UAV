@@ -1466,9 +1466,7 @@ class TJKAgent:
             cur_frame,
             box=redetected["box"],
         )
-        track_init_id, track_init_image = self._track_frame_reference(
-            track_init_frame_idx
-        )
+        track_init_id = self._track_frame_id(track_init_frame_idx)
         tracker_fields = self._tracker_timing_fields(
             self.tracker,
             time.perf_counter() - tracker_started,
@@ -1481,11 +1479,8 @@ class TJKAgent:
         decision_s = time.perf_counter() - decision_started
         self.exec_rotate_action_deg(
             angle_to_rotate,
-            context=(
-                f"track_init track_id={track_init_id} "
-                f"image={track_init_image} "
-                f"candidate={selected['candidate_idx']}"
-            ),
+            context=f"track_init candidate={selected['candidate_idx']}",
+            track_id=track_init_id,
             log_timing=False,
         )
         motion_timing = self._last_motion_timing
@@ -1529,9 +1524,7 @@ class TJKAgent:
             track_frame_idx = self.tracker.frame_idx
             tracker_started = time.perf_counter()
             bbox, mask = self.tracker.track_with_mask(frame_rgb)
-            track_id, track_image = self._track_frame_reference(
-                track_frame_idx
-            )
+            track_id = self._track_frame_id(track_frame_idx)
             tracker_fields = self._tracker_timing_fields(
                 self.tracker,
                 time.perf_counter() - tracker_started,
@@ -1565,10 +1558,8 @@ class TJKAgent:
                 decision_s = time.perf_counter() - decision_started
                 self.exec_rotate_action_deg(
                     angle_to_rotate,
-                    context=(
-                        f"track track_id={track_id} image={track_image} "
-                        f"iteration={iterations} yaw_only"
-                    ),
+                    context=f"track iteration={iterations} yaw_only",
+                    track_id=track_id,
                     log_timing=False,
                 )
                 self._log_track_iteration_timing(
@@ -1636,10 +1627,8 @@ class TJKAgent:
                     0.0,
                     dz_cm,
                     dyaw_deg,
-                    context=(
-                        f"track track_id={track_id} image={track_image} "
-                        f"iteration={iterations}"
-                    ),
+                    context=f"track iteration={iterations}",
+                    track_id=track_id,
                     log_timing=False,
                 )
                 self._log_track_iteration_timing(
@@ -1669,14 +1658,13 @@ class TJKAgent:
 
         return success
 
-    def _track_frame_reference(self, frame_idx):
-        """Return the identifier and saved PNG name for one SAM2 frame."""
+    def _track_frame_id(self, frame_idx):
+        """Return the identifier of one saved SAM2 tracking frame."""
         prefix = str(getattr(self.tracker, "track_vis_prefix", "track"))
         index_width = int(
             getattr(self.tracker, "track_vis_index_width", 2)
         )
-        track_id = f"{prefix}_{int(frame_idx):0{index_width}d}"
-        return track_id, f"{track_id}.png"
+        return f"{prefix}_{int(frame_idx):0{index_width}d}"
 
     def scan(self):
         """Follow a small local circle and capture one RGB image at each point."""
@@ -1982,6 +1970,7 @@ class TJKAgent:
         angle_to_rotate,
         context="",
         log_timing=True,
+        track_id=None,
     ):
         dyaw = float(angle_to_rotate)
         return self._execute_motion(
@@ -1992,6 +1981,7 @@ class TJKAgent:
             dyaw,
             lambda: self.client.move_relative(dx=0.0, dy=0.0, dz=0.0, dyaw=dyaw),
             context=context,
+            track_id=track_id,
             log_timing=log_timing,
         )
 
@@ -2003,6 +1993,7 @@ class TJKAgent:
         dyaw_deg,
         context="",
         log_timing=True,
+        track_id=None,
     ):
         """Send XYZ translation and yaw through one move_relative call."""
         return self._execute_motion(
@@ -2018,6 +2009,7 @@ class TJKAgent:
                 dyaw=dyaw_deg,
             ),
             context=context,
+            track_id=track_id,
             log_timing=log_timing,
         )
 
@@ -2039,6 +2031,7 @@ class TJKAgent:
         operation,
         context="",
         log_timing=True,
+        track_id=None,
     ):
         self._command_idx += 1
         command_idx = self._command_idx
@@ -2048,9 +2041,12 @@ class TJKAgent:
         last_error = self._format_motion_error(
             getattr(self, "last_motion_error", None)
         )
-        context_text = f" context={context}" if context else ""
+        track_text = f" track_id={track_id}" if track_id else ""
+        context_text = (
+            f" context={context}" if context and track_id is None else ""
+        )
         self._log(
-            f"[COMMAND] id={command_idx} action={action.value} "
+            f"[COMMAND] id={command_idx}{track_text} action={action.value} "
             f"command={command} "
             f"pose=(x={float(pose['x']):.2f}cm, y={float(pose['y']):.2f}cm, "
             f"z={float(pose['z']):.2f}cm, yaw={float(pose['yaw']):.2f}deg) "
