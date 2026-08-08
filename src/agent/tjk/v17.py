@@ -2038,6 +2038,11 @@ class TJKAgent:
             self._last_motion_timing = {
                 "drone_execution_s": drone_execution_s,
             }
+            self._log(
+                f"[MOTION-FAILURE] command_id={command_idx} "
+                f"action={action.value} context={context!r} "
+                f"execution_s={drone_execution_s:.4f} error={exc}"
+            )
             if log_timing:
                 self._log_timing(
                     drone_execution_s,
@@ -2847,7 +2852,8 @@ def main():
             f"returned_home={mission_result['returned_home']} "
             f"waypoints={mission_result['waypoints']}; request landing."
         )
-    except BaseException:
+    except BaseException as exc:
+        logger.exception(f"[FATAL] Agent mission failed: {exc}")
         tjkAgent._set_mission_state(MissionState.EMERGENCY_LANDING)
         try:
             _land_after_task(client, logger)

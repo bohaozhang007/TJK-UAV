@@ -30,8 +30,8 @@ class OwlController:
     OUTPUT_LONG_EDGE = 640
     JPEG_QUALITY = 85
     POSITION_TOLERANCE_CM = 15.0
-    LINEAR_SPEED_TOLERANCE_CM_S = 10.0
-    POSITION_STABLE_SAMPLES = 5
+    LINEAR_SPEED_TOLERANCE_CM_S = 20.0
+    POSITION_STABLE_SAMPLES = 3
     POSITION_POLL_HZ = 10.0
     YAW_TOLERANCE_DEG = 5.0
     YAW_PUBLISH_HZ = 20.0
@@ -549,6 +549,15 @@ class OwlController:
             else:
                 stable_samples = 0
             time.sleep(period_s)
+        unmet_conditions = []
+        if require_position and position_error_cm > self._position_tolerance_cm:
+            unmet_conditions.append("position_error")
+        if linear_speed_cm_s > self._linear_speed_tolerance_cm_s:
+            unmet_conditions.append("linear_speed")
+        if yaw_error_deg > self._yaw_tolerance_deg:
+            unmet_conditions.append("yaw_error")
+        if not unmet_conditions:
+            unmet_conditions.append("consecutive_stable_samples")
         raise RuntimeError(
             "pose move timeout: "
             f"target=({target_x_m * 100.0:.1f}, "
@@ -559,7 +568,14 @@ class OwlController:
             f"{float(last_pose['z_m']) * 100.0:.1f})cm "
             f"position_error={position_error_cm:.1f}cm "
             f"yaw_error={yaw_error_deg:.1f}deg "
-            f"linear_speed={linear_speed_cm_s:.1f}cm/s"
+            f"linear_speed={linear_speed_cm_s:.1f}cm/s "
+            f"stable_samples={stable_samples}/"
+            f"{self._position_stable_samples} "
+            f"unmet_conditions={','.join(unmet_conditions)} "
+            f"thresholds=(position<={self._position_tolerance_cm:.1f}cm, "
+            f"yaw<={self._yaw_tolerance_deg:.1f}deg, "
+            f"linear_speed<="
+            f"{self._linear_speed_tolerance_cm_s:.1f}cm/s)"
         )
 
     def _activate_yaw_control(
