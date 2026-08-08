@@ -1318,6 +1318,7 @@ class TJKAgent:
             cur_frame,
             vis_name=f"select_attempt_{attempt_idx:02d}",
         )
+        detector_result_count = len(all_detections)
         detector_s = time.perf_counter() - detector_started
         detector_inference_s = float(
             getattr(self.detector, "last_timing", {}).get(
@@ -1328,6 +1329,7 @@ class TJKAgent:
         detections = all_detections[
             :self.max_candidates_per_frame
         ]
+        considered_detection_count = len(detections)
         image_height, image_width = cur_frame.shape[:2]
         image_area = float(image_height * image_width)
         redetected_candidates = []
@@ -1351,7 +1353,10 @@ class TJKAgent:
             )
             box_area_px = box_width * box_height
             if box_area_px <= 0.0:
-                continue
+                raise ValueError(
+                    "Detector returned a non-positive-area xyxy box: "
+                    f"{target_box.tolist()}"
+                )
             redetected_candidates.append(
                 {
                     "detection_rank": detection_rank,
@@ -1375,6 +1380,13 @@ class TJKAgent:
         )
         visualization_started = time.perf_counter()
         if not redetected_ranked:
+            if detector_result_count == 0:
+                failure_reason = "no_detections"
+            else:
+                # Deduplication and one-per-view selection always retain at
+                # least one candidate. An empty ranking with valid boxes thus
+                # means every remaining box failed the edge-margin check.
+                failure_reason = "all_valid_boxes_rejected_by_edge_filter"
             attempt_view_path = os.path.join(
                 self.vis_dir,
                 f"best_view_attempt_{attempt_idx:02d}.png",
@@ -1384,8 +1396,13 @@ class TJKAgent:
                 time.perf_counter() - visualization_started
             )
             self._log(
-                f"[SELECT] Attempt {attempt_idx}/{total_attempts} "
-                "re-detection returned no edge-safe candidates; "
+                f"[SELECT-REDETECT] Attempt {attempt_idx}/{total_attempts} "
+                f"failed reason={failure_reason} "
+                f"detector_results={detector_result_count} "
+                f"considered={considered_detection_count} "
+                f"valid_boxes={len(redetected_candidates)} "
+                f"edge_margin_threshold="
+                f"{self.select_min_edge_margin_ratio:.3f} "
                 f"image={attempt_view_path}"
             )
             self._log_timing(

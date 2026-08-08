@@ -29,8 +29,9 @@ class OwlController:
     DRONE_ID = 0
     OUTPUT_LONG_EDGE = 640
     JPEG_QUALITY = 85
-    POSITION_TOLERANCE_CM = 40.0
-    POSITION_STABLE_SAMPLES = 3
+    POSITION_TOLERANCE_CM = 15.0
+    LINEAR_SPEED_TOLERANCE_CM_S = 10.0
+    POSITION_STABLE_SAMPLES = 5
     POSITION_POLL_HZ = 10.0
     YAW_TOLERANCE_DEG = 5.0
     YAW_PUBLISH_HZ = 20.0
@@ -48,6 +49,7 @@ class OwlController:
         hardware: Optional[OwlHardware] = None,
         *,
         position_tolerance_cm: float = POSITION_TOLERANCE_CM,
+        linear_speed_tolerance_cm_s: float = LINEAR_SPEED_TOLERANCE_CM_S,
         position_stable_samples: int = POSITION_STABLE_SAMPLES,
         position_poll_hz: float = POSITION_POLL_HZ,
         yaw_tolerance_deg: float = YAW_TOLERANCE_DEG,
@@ -75,6 +77,10 @@ class OwlController:
         self._image_dir = Path(image_dir or "captures").expanduser().resolve()
         self._image_dir.mkdir(parents=True, exist_ok=True)
         self._position_tolerance_cm = max(1.0, float(position_tolerance_cm))
+        self._linear_speed_tolerance_cm_s = max(
+            0.0,
+            float(linear_speed_tolerance_cm_s),
+        )
         self._position_stable_samples = max(1, int(position_stable_samples))
         self._position_poll_hz = max(1.0, float(position_poll_hz))
         self._yaw_tolerance_deg = max(0.1, float(yaw_tolerance_deg))
@@ -503,6 +509,7 @@ class OwlController:
         last_pose = self._hardware.get_pose_ros()
         position_error_cm = 0.0
         yaw_error_deg = 0.0
+        linear_speed_cm_s = 0.0
         while time.monotonic() < deadline:
             self._require_control_ready()
             self._raise_if_yaw_control_failed()
@@ -519,11 +526,23 @@ class OwlController:
                     )
                 )
             )
+            linear_speed_cm_s = 100.0 * math.sqrt(
+                float(last_pose["vx_m_s"]) ** 2
+                + float(last_pose["vy_m_s"]) ** 2
+                + float(last_pose["vz_m_s"]) ** 2
+            )
             position_ok = (
                 not require_position
                 or position_error_cm <= self._position_tolerance_cm
             )
-            if position_ok and yaw_error_deg <= self._yaw_tolerance_deg:
+            speed_ok = (
+                linear_speed_cm_s <= self._linear_speed_tolerance_cm_s
+            )
+            if (
+                position_ok
+                and speed_ok
+                and yaw_error_deg <= self._yaw_tolerance_deg
+            ):
                 stable_samples += 1
                 if stable_samples >= self._position_stable_samples:
                     return last_pose
@@ -539,7 +558,8 @@ class OwlController:
             f"{float(last_pose['y_m']) * 100.0:.1f}, "
             f"{float(last_pose['z_m']) * 100.0:.1f})cm "
             f"position_error={position_error_cm:.1f}cm "
-            f"yaw_error={yaw_error_deg:.1f}deg"
+            f"yaw_error={yaw_error_deg:.1f}deg "
+            f"linear_speed={linear_speed_cm_s:.1f}cm/s"
         )
 
     def _activate_yaw_control(
