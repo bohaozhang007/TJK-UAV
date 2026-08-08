@@ -2682,10 +2682,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--box",
-        type=float,
-        nargs=4,
-        metavar=("X1", "Y1", "X2", "Y2"),
-        help="Required reference-image box in xyxy pixel coordinates",
+        type=str,
+        metavar="BOX_TXT",
+        help=(
+            "Path to a text file containing exactly four space-separated "
+            "xyxy pixel coordinates; required with --img"
+        ),
     )
     parser.add_argument(
         "--det",
@@ -2766,16 +2768,34 @@ def _build_detector_prompt(args) -> str | dict:
             f"detector {args.det!r} only supports --text; --img requires --det sam3"
         )
     if args.box is None:
-        raise ValueError("--box X1 Y1 X2 Y2 is required with --img")
+        raise ValueError("--box BOX_TXT is required with --img")
     image_path = Path(args.img).expanduser().resolve()
     if not image_path.is_file():
         raise ValueError(f"reference image not found: {image_path}")
-    x1, y1, x2, y2 = (float(value) for value in args.box)
+    box_path = Path(args.box).expanduser().resolve()
+    if not box_path.is_file():
+        raise ValueError(f"reference box file not found: {box_path}")
+    try:
+        box_values = box_path.read_text(encoding="utf-8").split()
+    except OSError as exc:
+        raise ValueError(f"failed to read reference box file: {box_path}") from exc
+    if len(box_values) != 4:
+        raise ValueError(
+            f"reference box file must contain exactly four space-separated "
+            f"xyxy values, got {len(box_values)}: {box_path}"
+        )
+    try:
+        x1, y1, x2, y2 = (float(value) for value in box_values)
+    except ValueError as exc:
+        raise ValueError(
+            f"reference box file contains a non-numeric value: {box_path}"
+        ) from exc
     if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
-        raise ValueError("--box values must be finite")
+        raise ValueError(f"reference box values must be finite: {box_path}")
     if x1 < 0.0 or y1 < 0.0 or x2 <= x1 or y2 <= y1:
         raise ValueError(
-            "--box must satisfy 0 <= X1 < X2 and 0 <= Y1 < Y2"
+            f"reference box must satisfy 0 <= X1 < X2 and "
+            f"0 <= Y1 < Y2: {box_path}"
         )
     try:
         with Image.open(image_path) as reference_image:
@@ -2787,12 +2807,13 @@ def _build_detector_prompt(args) -> str | dict:
         ) from exc
     if x2 > image_width or y2 > image_height:
         raise ValueError(
-            f"--box {(x1, y1, x2, y2)} exceeds reference image "
-            f"size {(image_width, image_height)}"
+            f"reference box {(x1, y1, x2, y2)} from {box_path} exceeds "
+            f"reference image size {(image_width, image_height)}"
         )
     return {
         "type": "visual",
         "image_path": str(image_path),
+        "box_path": str(box_path),
         "box_xyxy": (x1, y1, x2, y2),
     }
 
