@@ -40,8 +40,9 @@ class UEClient(BaseClient):
         if not self.use_hybrid_control:
             return super().move_relative(dx=dx, dy=dy, dz=dz, dyaw=dyaw)
 
-        x, y, z = (int(round(value)) for value in (dx, dy, dz))
-        yaw = int(round(dyaw))
+        command = self.quantize_motion(dx, dy, dz, dyaw)
+        x, y, z = command["x"], command["y"], command["z"]
+        yaw = command["yaw"]
         if not any((x, y, z, yaw)):
             return {
                 "ok": True,

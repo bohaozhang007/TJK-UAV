@@ -47,6 +47,8 @@ class RobotController(VelocityController, Protocol):
 
     def get_pose(self) -> dict[str, Any]: ...
 
+    def get_motion_tolerances(self) -> dict[str, Any]: ...
+
     def close(self) -> dict[str, Any]: ...
 
 
@@ -256,7 +258,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.keyboard_op is not None
                 and self.keyboard_op.is_active()
                 and path
-                not in {"/health", "/get_pose", "/get_rgb_meta", "/get_depth_meta"}
+                not in {
+                    "/health",
+                    "/get_pose",
+                    "/get_rgb_meta",
+                    "/get_depth_meta",
+                    "/motion_tolerances",
+                }
             ):
                 self._json_response(
                     409,
@@ -292,6 +300,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 result = self.controller.rotate(**params)
             elif path == "/get_pose":
                 result = self.controller.get_pose()
+            elif path == "/motion_tolerances":
+                result = {
+                    "ok": True,
+                    "motion_tolerances": self.controller.get_motion_tolerances(),
+                }
             elif path == "/land":
                 result = self.controller.land()
             elif path == "/close":
@@ -491,8 +504,8 @@ def main():
     print(
         "Endpoints: /init /takeoff /get_rgb_meta /get_rgb_byte "
         "/get_depth_meta /get_depth_np /velocity /move_relative_xyz "
-        "/move_relative_xyz_yaw /rotate /get_pose /land /close /health "
-        "/video_feed /preview"
+        "/move_relative_xyz_yaw /rotate /get_pose /motion_tolerances "
+        "/land /close /health /video_feed /preview"
     )
 
     try:

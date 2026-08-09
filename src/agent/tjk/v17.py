@@ -151,6 +151,9 @@ class TJKAgent:
     ):
         self.client = client
         self.logger = logger
+        self.position_tolerance_cm = None
+        self.yaw_tolerance_deg = None
+        self.motion_tolerance_source = None
         self._command_idx = 0
         self.last_motion_error = None
         self._last_motion_timing = {}
@@ -207,8 +210,8 @@ class TJKAgent:
         self.max_fb_step_cm = _config_number(
             motion_config, "max_fb_step_cm", minimum=1e-6
         )
-        self.min_reliable_fb_step_cm = _config_number(
-            motion_config, "min_reliable_fb_step_cm", minimum=0.0
+        self.fb_stop_step_cm = _config_number(
+            motion_config, "fb_stop_step_cm", minimum=0.0
         )
         self.backward_ratio = _config_number(
             motion_config,
@@ -224,10 +227,6 @@ class TJKAgent:
         self.max_z_step_cm = _config_number(
             motion_config, "max_z_step_cm", minimum=1e-6
         )
-        self.min_reliable_z_step_cm = _config_number(
-            motion_config, "min_reliable_z_step_cm", minimum=0.0
-        )
-
         # Yaw action.
         self.rotate_deg_per_pixel = _config_number(
             motion_config, "rotate_deg_per_pixel", minimum=1e-6
@@ -235,21 +234,9 @@ class TJKAgent:
         self.max_rotate_deg = _config_number(
             motion_config, "max_rotate_deg", minimum=1e-6
         )
-        self.min_reliable_rotate_deg = _config_number(
-            motion_config, "min_reliable_rotate_deg", minimum=0.0
-        )
-
-        if self.min_reliable_fb_step_cm > self.max_fb_step_cm:
+        if self.fb_stop_step_cm > self.max_fb_step_cm:
             raise ValueError(
-                "motion.min_reliable_fb_step_cm cannot exceed max_fb_step_cm"
-            )
-        if self.min_reliable_z_step_cm > self.max_z_step_cm:
-            raise ValueError(
-                "motion.min_reliable_z_step_cm cannot exceed max_z_step_cm"
-            )
-        if self.min_reliable_rotate_deg > self.max_rotate_deg:
-            raise ValueError(
-                "motion.min_reliable_rotate_deg cannot exceed max_rotate_deg"
+                "motion.fb_stop_step_cm cannot exceed max_fb_step_cm"
             )
 
         self.search_rotation_step_deg = _config_number(
@@ -341,7 +328,7 @@ class TJKAgent:
         self.yaw_only_threshold_deg = _config_number(
             track_config,
             "yaw_only_threshold_deg",
-            minimum=self.min_reliable_rotate_deg,
+            minimum=0.0,
             maximum=self.max_rotate_deg,
         )
 
@@ -429,6 +416,12 @@ class TJKAgent:
     def connect(self):
         self._set_mission_state(MissionState.INITIALIZING)
         self._call_flight_operation("start", self.client.start)
+        self._configure_motion_tolerances(
+            self._call_flight_operation(
+                "motion tolerances",
+                self.client.get_motion_tolerances,
+            )
+        )
         frame = self._capture_for_task(
             include_depth=False,
             context="connect RGB readiness",
@@ -463,6 +456,49 @@ class TJKAgent:
         self._log(
             "[MISSION] Takeoff hover pose is mission origin "
             "(x=0.00cm, y=0.00cm, z=0.00cm, yaw=0.00deg)."
+        )
+
+    def _configure_motion_tolerances(self, tolerances):
+        if not isinstance(tolerances, dict):
+            raise FlightSafetyError(
+                "motion tolerances response must be a mapping"
+            )
+        try:
+            position_tolerance_cm = float(
+                tolerances["position_tolerance_cm"]
+            )
+            yaw_tolerance_deg = float(tolerances["yaw_tolerance_deg"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FlightSafetyError(
+                "motion tolerances response is missing valid position/yaw values"
+            ) from exc
+        if (
+            not math.isfinite(position_tolerance_cm)
+            or position_tolerance_cm < 0.0
+            or not math.isfinite(yaw_tolerance_deg)
+            or yaw_tolerance_deg < 0.0
+        ):
+            raise FlightSafetyError(
+                "motion tolerances must be finite and non-negative"
+            )
+        if self.yaw_only_threshold_deg < yaw_tolerance_deg:
+            raise FlightSafetyError(
+                "track.yaw_only_threshold_deg="
+                f"{self.yaw_only_threshold_deg:.2f}deg must be >= Robot "
+                f"Server yaw_tolerance_deg={yaw_tolerance_deg:.2f}deg"
+            )
+
+        self.position_tolerance_cm = position_tolerance_cm
+        self.yaw_tolerance_deg = yaw_tolerance_deg
+        self.motion_tolerance_source = str(
+            tolerances.get("source", "unknown")
+        )
+        self._log(
+            "[MOTION-TOLERANCE] "
+            f"position={position_tolerance_cm:.2f}cm "
+            f"yaw={yaw_tolerance_deg:.2f}deg "
+            f"metric={tolerances.get('position_error_metric')!r} "
+            f"source={self.motion_tolerance_source!r}"
         )
 
     def run_mission(self, detector_prompt):
@@ -1551,10 +1587,13 @@ class TJKAgent:
             }
 
             angle_to_rotate = self.prepare_rotate_action_deg(horizontal_offset)
+            quantized_yaw = self.client.quantize_motion(
+                dyaw=angle_to_rotate
+            )["yaw"]
 
             # Large yaw errors are corrected without translation. Once yaw is
             # approximately aligned, all remaining axes share one command.
-            if abs(angle_to_rotate) > self.yaw_only_threshold_deg:
+            if abs(quantized_yaw) > self.yaw_only_threshold_deg:
                 decision_s = time.perf_counter() - decision_started
                 self.exec_rotate_action_deg(
                     angle_to_rotate,
@@ -1570,11 +1609,7 @@ class TJKAgent:
                     self._last_motion_timing,
                 )
                 continue
-            if abs(angle_to_rotate) > self.min_reliable_rotate_deg:
-                dyaw_deg = angle_to_rotate
-            else:
-                dyaw_deg = 0.0
-                print(f"[STALL] angle is {angle_to_rotate} and Stalled.")
+            dyaw_deg = angle_to_rotate
 
             dz_cm = self.prepare_z_action_cm(vertical_offset)
             if dz_cm < 0.0:
@@ -1588,12 +1623,8 @@ class TJKAgent:
                 else:
                     dz_cm = max(dz_cm, self.safe_z_cm - cur_z_cm)
 
-            if abs(dz_cm) <= self.min_reliable_z_step_cm:
-                print(f"[STALL] dz_cm is {dz_cm} and Stalled.")
-                dz_cm = 0.0
-
             dx_cm = self.prepare_fb_action_cm(box_ratio)
-            if abs(dx_cm) <= self.min_reliable_fb_step_cm:
+            if abs(dx_cm) <= self.fb_stop_step_cm:
                 print(f"[STALL] dx is {dx_cm} cm and Stalled.")
                 dx_cm = 0.0
             elif dx_cm > 0.0:
@@ -1611,14 +1642,25 @@ class TJKAgent:
                     f"available={available_dx_cm:.2f} cm, "
                     f"forward={dx_cm:.2f} cm."
                 )
-                if dx_cm <= self.min_reliable_fb_step_cm:
+                if dx_cm <= self.fb_stop_step_cm:
                     print(
                         f"[STALL] Depth-limited forward step {dx_cm:.2f} cm "
                         f"is not executable (minimum "
-                        f"{self.min_reliable_fb_step_cm:.2f} cm); stop at the safe "
+                        f"{self.fb_stop_step_cm:.2f} cm); stop at the safe "
                         "distance."
                     )
                     dx_cm = 0.0
+
+            dx_cm, _dy_cm, dz_cm, dyaw_deg = (
+                self._filter_motion_by_server_tolerance(
+                    dx_cm,
+                    0.0,
+                    dz_cm,
+                    dyaw_deg,
+                    context=f"track iteration={iterations}",
+                    track_id=track_id,
+                )
+            )
 
             if any(value != 0.0 for value in (dx_cm, dz_cm, dyaw_deg)):
                 decision_s = time.perf_counter() - decision_started
@@ -1972,7 +2014,22 @@ class TJKAgent:
         log_timing=True,
         track_id=None,
     ):
-        dyaw = float(angle_to_rotate)
+        _dx, _dy, _dz, dyaw = self._filter_motion_by_server_tolerance(
+            0.0,
+            0.0,
+            0.0,
+            float(angle_to_rotate),
+            context=context,
+            track_id=track_id,
+        )
+        if dyaw == 0.0:
+            return self._motion_skipped_result(
+                AgentAction.ROTATE,
+                0.0,
+                0.0,
+                0.0,
+                dyaw,
+            )
         return self._execute_motion(
             AgentAction.ROTATE,
             0.0,
@@ -1996,6 +2053,24 @@ class TJKAgent:
         track_id=None,
     ):
         """Send XYZ translation and yaw through one move_relative call."""
+        dx_cm, dy_cm, dz_cm, dyaw_deg = (
+            self._filter_motion_by_server_tolerance(
+                dx_cm,
+                dy_cm,
+                dz_cm,
+                dyaw_deg,
+                context=context,
+                track_id=track_id,
+            )
+        )
+        if not any((dx_cm, dy_cm, dz_cm, dyaw_deg)):
+            return self._motion_skipped_result(
+                AgentAction.XYZ_YAW_HYBRID,
+                dx_cm,
+                dy_cm,
+                dz_cm,
+                dyaw_deg,
+            )
         return self._execute_motion(
             AgentAction.XYZ_YAW_HYBRID,
             dx_cm,
@@ -2012,6 +2087,94 @@ class TJKAgent:
             track_id=track_id,
             log_timing=log_timing,
         )
+
+    def _filter_motion_by_server_tolerance(
+        self,
+        dx_cm,
+        dy_cm,
+        dz_cm,
+        dyaw_deg,
+        *,
+        context="",
+        track_id=None,
+    ):
+        if self.position_tolerance_cm is None or self.yaw_tolerance_deg is None:
+            raise FlightSafetyError(
+                "Robot Server motion tolerances are unavailable"
+            )
+
+        raw = tuple(float(value) for value in (dx_cm, dy_cm, dz_cm, dyaw_deg))
+        command = self.client.quantize_motion(*raw)
+        dx_cm = float(command["x"])
+        dy_cm = float(command["y"])
+        dz_cm = float(command["z"])
+        dyaw_deg = float(command["yaw"])
+        subject = (
+            f" track_id={track_id}"
+            if track_id is not None
+            else (f" context={context!r}" if context else "")
+        )
+
+        raw_translation_requested = any(value != 0.0 for value in raw[:3])
+        translation_requested = any(
+            value != 0.0 for value in (dx_cm, dy_cm, dz_cm)
+        )
+        if raw_translation_requested and not translation_requested:
+            self._log(
+                f"[MOTION-FILTER]{subject} xyz rounded to zero by Client "
+                "integer command precision"
+            )
+        elif translation_requested:
+            translation_norm_cm = math.sqrt(
+                dx_cm * dx_cm + dy_cm * dy_cm + dz_cm * dz_cm
+            )
+            if translation_norm_cm <= self.position_tolerance_cm:
+                self._log(
+                    f"[MOTION-FILTER]{subject} "
+                    f"translation_norm={translation_norm_cm:.2f}cm <= "
+                    f"position_tolerance={self.position_tolerance_cm:.2f}cm; "
+                    "xyz skipped"
+                )
+                dx_cm = dy_cm = dz_cm = 0.0
+
+        raw_yaw_requested = raw[3] != 0.0
+        if raw_yaw_requested and dyaw_deg == 0.0:
+            self._log(
+                f"[MOTION-FILTER]{subject} yaw rounded to zero by Client "
+                "integer command precision"
+            )
+        elif dyaw_deg != 0.0 and abs(dyaw_deg) <= self.yaw_tolerance_deg:
+            self._log(
+                f"[MOTION-FILTER]{subject} abs_yaw={abs(dyaw_deg):.2f}deg "
+                f"<= yaw_tolerance={self.yaw_tolerance_deg:.2f}deg; "
+                "yaw skipped"
+            )
+            dyaw_deg = 0.0
+
+        return dx_cm, dy_cm, dz_cm, dyaw_deg
+
+    def _motion_skipped_result(
+        self,
+        action,
+        dx_cm,
+        dy_cm,
+        dz_cm,
+        dyaw_deg,
+    ):
+        self._last_motion_command_id = None
+        self._last_motion_timing = {"drone_execution_s": 0.0}
+        return {
+            "ok": True,
+            "skipped": True,
+            "message": "motion skipped by Robot Server tolerances",
+            "action": action.value,
+            "command": {
+                "x": dx_cm,
+                "y": dy_cm,
+                "z": dz_cm,
+                "yaw": dyaw_deg,
+            },
+        }
 
     def _move_to_pose_hybrid(self, target_pose, context, log_timing=True):
         delta = self._relative_pose_delta(target_pose)
@@ -2113,7 +2276,7 @@ class TJKAgent:
 
     def prepare_fb_action_cm(self, box_ratio):
         target = self.target_stop_ratio
-        deadband = self.min_reliable_fb_step_cm / self.max_fb_step_cm * target
+        deadband = self.fb_stop_step_cm / self.max_fb_step_cm * target
 
         if box_ratio > target + deadband:
             step_cm = self.get_backward_step_cm()
