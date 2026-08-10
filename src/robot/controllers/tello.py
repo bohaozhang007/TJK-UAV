@@ -15,6 +15,8 @@ class TelloController:
 
     DEFAULT_TAKEOFF_HEIGHT_CM = 100.0
     MOVE_SPEED = TELLO_MOVE_SPEED
+    POSITION_TOLERANCE_CM = 20.0
+    YAW_TOLERANCE_DEG = 1.0
 
     def __init__(self, image_dir: str | Path | None = None) -> None:
         self._lock = threading.RLock()
@@ -208,6 +210,15 @@ class TelloController:
                     "yaw": "Tello attitude telemetry",
                 },
             }
+
+    def get_motion_tolerances(self) -> dict[str, Any]:
+        """Return conservative filters for Tello's integer SDK commands."""
+        return {
+            "position_tolerance_cm": self.POSITION_TOLERANCE_CM,
+            "yaw_tolerance_deg": self.YAW_TOLERANCE_DEG,
+            "position_error_metric": "euclidean_3d",
+            "source": "sdk_minimum_command",
+        }
 
     def land(self) -> dict[str, Any]:
         with self._lock:

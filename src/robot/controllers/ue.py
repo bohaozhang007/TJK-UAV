@@ -300,6 +300,18 @@ class UEController:
             },
         }
 
+    def get_motion_tolerances(self) -> dict[str, Any]:
+        """Return a conservative 3D bound for UE pose completion."""
+        return {
+            "position_tolerance_cm": math.hypot(
+                self.POSITION_TOLERANCE_CM,
+                self.VERTICAL_TOLERANCE_CM,
+            ),
+            "yaw_tolerance_deg": self.YAW_TOLERANCE_DEG,
+            "position_error_metric": "euclidean_3d",
+            "source": "pose_completion_enclosing_bound",
+        }
+
     def land(self) -> dict[str, Any]:
         with self._operation_lock:
             if not self._sim.connected:

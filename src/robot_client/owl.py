@@ -233,8 +233,9 @@ class OwlClient(BaseClient):
         dz: float = 0.0,
         dyaw: float = 0.0,
     ) -> JsonObject:
-        x, y, z = (int(round(value)) for value in (dx, dy, dz))
-        yaw = int(round(dyaw))
+        command = self.quantize_motion(dx, dy, dz, dyaw)
+        x, y, z = command["x"], command["y"], command["z"]
+        yaw = command["yaw"]
         if not any((x, y, z, yaw)):
             return {
                 "ok": True,

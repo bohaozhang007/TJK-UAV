@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -36,6 +37,7 @@ class BaseClient:
         self._opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({})
         )
+        self._motion_tolerances: Optional[JsonObject] = None
 
     def _request(
         self,
@@ -109,6 +111,65 @@ class BaseClient:
             timeout_s=min(self.timeout_s, 2.0),
         )
 
+    def get_motion_tolerances(self, *, refresh: bool = False) -> JsonObject:
+        """Return and cache the Robot Server's motion-completion contract."""
+        if self._motion_tolerances is not None and not refresh:
+            return dict(self._motion_tolerances)
+
+        result = self._require_ok(
+            self._request_json(
+                "GET",
+                "/motion_tolerances",
+                timeout_s=min(self.timeout_s, 2.0),
+            ),
+            "motion_tolerances",
+        )
+        tolerances = result.get("motion_tolerances")
+        if not isinstance(tolerances, dict):
+            raise RuntimeError(
+                "motion_tolerances failed: response does not contain a mapping"
+            )
+
+        parsed = {}
+        for key in ("position_tolerance_cm", "yaw_tolerance_deg"):
+            value = tolerances.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise RuntimeError(
+                    f"motion_tolerances failed: {key} must be numeric"
+                )
+            value = float(value)
+            if not math.isfinite(value) or value < 0.0:
+                raise RuntimeError(
+                    f"motion_tolerances failed: {key} must be finite and >= 0"
+                )
+            parsed[key] = value
+
+        metric = tolerances.get("position_error_metric")
+        if metric != "euclidean_3d":
+            raise RuntimeError(
+                "motion_tolerances failed: position_error_metric must be "
+                f"'euclidean_3d', got {metric!r}"
+            )
+        parsed["position_error_metric"] = metric
+        parsed["source"] = str(tolerances.get("source", "unknown"))
+        self._motion_tolerances = parsed
+        return dict(parsed)
+
+    @staticmethod
+    def quantize_motion(
+        dx: float = 0.0,
+        dy: float = 0.0,
+        dz: float = 0.0,
+        dyaw: float = 0.0,
+    ) -> JsonObject:
+        """Return the integer centimetres/degrees sent by current clients."""
+        return {
+            "x": int(round(dx)),
+            "y": int(round(dy)),
+            "z": int(round(dz)),
+            "yaw": int(round(dyaw)),
+        }
+
     def _health_state(self) -> JsonObject:
         result = self._require_ok(self.health(), "health")
         health = result.get("health")
@@ -132,6 +193,7 @@ class BaseClient:
         """Initialize and take off only when the current health requires it."""
         init_result = None
         takeoff_result = None
+        motion_tolerances = self.get_motion_tolerances(refresh=True)
 
         health_state = self._health_state()
         if health_state.get("initialized") is not True:
@@ -154,6 +216,7 @@ class BaseClient:
             "ok": True,
             "init": init_result,
             "health": health_state,
+            "motion_tolerances": motion_tolerances,
             "takeoff": takeoff_result,
         }
 
@@ -272,8 +335,9 @@ class BaseClient:
         dyaw: float = 0.0,
     ) -> JsonObject:
         """Combine relative XYZ translation and yaw rotation."""
-        x, y, z = (int(round(value)) for value in (dx, dy, dz))
-        angle_deg = int(round(dyaw))
+        command = self.quantize_motion(dx, dy, dz, dyaw)
+        x, y, z = command["x"], command["y"], command["z"]
+        angle_deg = command["yaw"]
 
         translation = None
         rotation = None

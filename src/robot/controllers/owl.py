@@ -370,6 +370,15 @@ class OwlController:
             },
         }
 
+    def get_motion_tolerances(self) -> Dict[str, Any]:
+        """Return the exact pose-completion thresholds used by this controller."""
+        return {
+            "position_tolerance_cm": self._position_tolerance_cm,
+            "yaw_tolerance_deg": self._yaw_tolerance_deg,
+            "position_error_metric": "euclidean_3d",
+            "source": "pose_completion",
+        }
+
     def land(self) -> Dict[str, Any]:
         with self._operation_lock:
             self._deactivate_yaw_control()
