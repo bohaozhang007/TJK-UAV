@@ -1,0 +1,28 @@
+control_hz: 30.0
+status_hz: 5.0
+
+odom_topic: /Odometry
+goal_topic: /cxr_goal
+planner_goal_topic: /move_base_simple/goal
+position_cmd_topic: /position_cmd
+setpoint_topic: /mavros/setpoint_raw/local
+mandatory_stop_topic: /mandatory_stop_to_planner
+
+takeoff_alt_m: 1.0
+max_takeoff_vel_m_s: 0.8
+max_yaw_rate_deg_s: 60.0
+
+# Relative to the ground height captured by the I7 navigation node.
+min_height_m: 0.5
+max_height_m: 3.0
+
+goal_reached_distance_m: 0.10
+goal_yaw_tolerance_deg: 5.0
+stable_speed_m_s: 0.20
+stable_samples: 5
+
+takeoff_timeout_s: 120.0
+landing_timeout_s: 90.0
+odom_max_age_s: 1.0
+state_max_age_s: 2.0
+position_cmd_max_age_s: 0.5

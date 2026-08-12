@@ -1,0 +1,33 @@
+<launch>
+  <arg name="odom_topic" default="/Odometry"/>
+  <arg name="cloud_topic" default="/cloud_registered"/>
+  <arg name="map_size_x" default="5.0"/>
+  <arg name="map_size_y" default="5.0"/>
+  <arg name="map_size_z" default="5.0"/>
+  <arg name="max_vel" default="1.5"/>
+
+  <!-- flight_type=1 accepts interactive goals; no waypoint YAML is loaded. -->
+  <include file="$(find ego_planner)/launch/include/run_in_sim.xml">
+    <arg name="drone_id" value="0"/>
+    <arg name="use_real" value="true"/>
+    <arg name="pre_plan" value="true"/>
+    <arg name="init_x" value="0.0"/>
+    <arg name="init_y" value="0.0"/>
+    <arg name="init_z" value="1.0"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/>
+    <arg name="map_size_y" value="$(arg map_size_y)"/>
+    <arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="odom_topic" value="$(arg odom_topic)"/>
+    <arg name="cloud_topic" value="$(arg cloud_topic)"/>
+    <arg name="max_vel" value="$(arg max_vel)"/>
+    <arg name="flight_type" value="1"/>
+  </include>
+
+  <!-- Override the upstream 2 m ceiling without editing EGO's source files. -->
+  <param name="/drone_0_ego_planner_node/grid_map/virtual_ceil"
+         type="double" value="3.3"/>
+
+  <node pkg="i7_nav" type="i7_nav_node.py" name="i7_nav" output="screen">
+    <rosparam command="load" file="$(find i7_nav)/config/i7_nav.yaml"/>
+  </node>
+</launch>

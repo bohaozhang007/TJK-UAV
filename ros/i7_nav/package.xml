@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>i7_nav</name>
+  <version>0.1.0</version>
+  <description>Interactive EGO Planner and MAVROS bridge for the I7 UAV.</description>
+
+  <maintainer email="devnull@example.com">TJK-UAV developers</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>ego_planner</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>mavros_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>quadrotor_msgs</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+</package>

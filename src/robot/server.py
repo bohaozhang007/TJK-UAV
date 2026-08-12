@@ -353,7 +353,7 @@ def run_console(
         "Headless console ready. Commands: "
         "init | takeoff | k | get_rgb_meta | get_depth_meta | get_pose | "
         "move_rel_xyz X Y Z | move_rel_xyz_yaw X Y Z YAW | "
-        "rotate YAW | health | land | close | quit"
+        "rotate YAW | health | abort | land | force_land | close | quit"
     )
     while True:
         try:
@@ -373,13 +373,26 @@ def run_console(
                 print("bye")
                 break
             if cmd == "init":
-                res = controller.init()
+                console_init = getattr(controller, "console_init", None)
+                res = (
+                    console_init()
+                    if console_init is not None
+                    else controller.init()
+                )
                 keepalive.start_keepalive() # 激活心跳
                 print(res)
             elif cmd == "takeoff":
                 print(controller.takeoff())
             elif cmd == "k":
                 health = controller.health()
+                if health.get("velocity_control_supported") is False:
+                    print(
+                        {
+                            "ok": False,
+                            "error": "keyboard velocity control is unsupported",
+                        }
+                    )
+                    continue
                 if not health.get("initialized"):
                     print({"ok": False, "error": "call init before keyboard control"})
                     continue
@@ -428,8 +441,22 @@ def run_console(
                 print(controller.rotate(angle_deg=int(parts[1])))
             elif cmd == "health":
                 print({"ok": True, "health": controller.health()})
+            elif cmd == "abort":
+                abort = getattr(controller, "abort", None)
+                if abort is None:
+                    raise NotImplementedError(
+                        "abort is unsupported by this controller"
+                    )
+                print(abort())
             elif cmd == "land":
                 print(controller.land())
+            elif cmd == "force_land":
+                force_land = getattr(controller, "force_land", None)
+                if force_land is None:
+                    raise NotImplementedError(
+                        "force_land is unsupported by this controller"
+                    )
+                print(force_land())
             elif cmd == "close":
                 keepalive.stop_keepalive()
                 print(controller.close())
@@ -452,6 +479,10 @@ def build_controller(robot: str, image_dir: str) -> RobotController:
         from .controllers.owl import OwlController
 
         return OwlController(image_dir=image_dir)
+    if robot == "i7":
+        from .controllers.i7 import I7Controller
+
+        return I7Controller(image_dir=image_dir)
     raise ValueError(f"unsupported robot: {robot}")
 
 
@@ -460,7 +491,7 @@ def build_keep_alive(robot: str, controller: RobotController) -> Keepalive:
         keepalive = KeepaliveThread(controller)
         keepalive.start()
         return keepalive
-    if robot in {"ue", "owl"}:
+    if robot in {"ue", "owl", "i7"}:
         return NullKeepalive()
     raise ValueError(f"unsupported robot: {robot}")
 
@@ -469,7 +500,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Robot Controller")
     parser.add_argument(
         "--robot",
-        choices=("tello", "ue", "owl"),
+        choices=("tello", "ue", "owl", "i7"),
         default="ue",
         help="controller backend to use (default: ue)",
     )
