@@ -5,18 +5,15 @@ from PIL import Image
 
 import sys
 import cv2
+from pathlib import Path
 
 # ===== Add submodule path =====
-subproj_roots = [
-    r'C:\Users\colab999\Desktop\project',
-    r'C:\Users\colab999\Desktop\project\Grounded_SAM_2_main',
-    r'C:\Users\colab999\Desktop\project\sam2',
-]
-for sub_root in subproj_roots:
-    sys.path.insert(0, sub_root)
+WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
+SAM2_ROOT = WORKSPACE_ROOT / "sam2"
+sys.path.insert(0, os.fspath(SAM2_ROOT))
 
 
-from Grounded_SAM_2_main.sam2.build_sam import build_sam2_video_predictor
+from sam2.build_sam import build_sam2_video_predictor
 
 
 def draw_box(img, box, color=(0,255,0), thickness=2):
@@ -74,7 +71,7 @@ def save_visualization(
 
 class Config:
     # Paths
-    SAM2_CKPT = r"C:\Users\colab999\Desktop\project\Grounded_SAM_2_main\checkpoints\sam2.1_hiera_small.pt"
+    SAM2_CKPT = os.fspath(SAM2_ROOT / "checkpoints" / "sam2.1_hiera_small.pt")
     SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_s.yaml"
 
     # Device
@@ -92,7 +89,7 @@ cfg = Config()
 predictor = build_sam2_video_predictor(cfg.SAM2_CONFIG, cfg.SAM2_CKPT, device=cfg.DEVICE)
 
 
-video_dir = r"C:\Users\colab999\Desktop\project\Grounded_SAM_2_main\notebooks\videos\bedroom"
+video_dir = os.fspath(SAM2_ROOT / "notebooks" / "videos" / "bedroom")
 
 # scan all the JPEG frame names in this directory
 frame_names = [

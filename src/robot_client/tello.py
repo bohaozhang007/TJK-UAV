@@ -33,7 +33,7 @@ class TelloClient(BaseClient):
             Path(depth_model_dir)
             if depth_model_dir is not None
             else Path(__file__).resolve().parents[3]
-            / "Depth-Anything-3"
+            / "depth-anything-3"
             / "checkpoints"
             / "DA3NESTED-GIANT-LARGE"
         )

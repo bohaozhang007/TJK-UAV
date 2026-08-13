@@ -65,6 +65,11 @@ SAM3 视觉样例示例：
 .\run_agent.bat --use_da3 --det sam3 --img assets\bottle.jpg --box assets\bottle.txt --robot owl --server-host 192.168.2.20 --config owl\v17_2.yaml
 ```
 
+`run_agent.bat` 默认 `sam2`、`sam3`、`depth-anything-3` 与 `TJK-UAV` 是
+同级目录。Conda 从 `PATH` 中查找；Agent、SAM3 服务和 DA3 服务默认分别
+使用 `sam2`、`sam3` 和独立的 `da3` 环境。如需调整，可分别设置
+`AGENT_ENV`、`SAM3_ENV` 和 `DA3_ENV`。
+
 `--box` 指向一个文本文件，文件中包含四个用空格分隔的 `xyxy` 像素坐标。
 
 切换 Robot 时，需要保证 Robot Server 和 Agent 使用相同后端：

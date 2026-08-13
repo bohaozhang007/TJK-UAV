@@ -18,7 +18,7 @@ import numpy as np
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_DA3_ROOT = PROJECT_ROOT / "Depth-Anything-3"
+DEFAULT_DA3_ROOT = PROJECT_ROOT / "depth-anything-3"
 DEFAULT_MODEL_DIR = (
     DEFAULT_DA3_ROOT
     / "checkpoints"

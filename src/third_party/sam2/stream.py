@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import shutil
+from pathlib import Path
 
 import hydra
 import matplotlib
@@ -13,17 +14,14 @@ from hydra.core.global_hydra import GlobalHydra
 from PIL import Image
 from tqdm import tqdm
 
-subproj_roots = [
-    r'C:\Users\colab999\Desktop\project',
-    r'C:\Users\colab999\Desktop\project\Grounded_SAM_2_main',
-]
-for sub_root in subproj_roots:
-    sys.path.insert(0, sub_root)
+WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
+SAM2_ROOT = WORKSPACE_ROOT / "sam2"
+sys.path.insert(0, os.fspath(SAM2_ROOT))
 
-from Grounded_SAM_2_main.sam2.build_sam import build_one_obj_video_predictor
+from third_party.sam2.one_obj_video_predictor import build_one_obj_video_predictor
 from utils import show_fig
 
-DEFAULT_NAV_RUNS_ROOT = r"C:\Users\colab999\Desktop\project\picoStar\lingbot_gsam_nav_runs"
+DEFAULT_NAV_RUNS_ROOT = WORKSPACE_ROOT / "TJK-UAV" / "logs"
 
 
 def mask2bbox(mask):
@@ -45,9 +43,9 @@ def to_numpy_mask(mask):
 
 class SAM2Config:
     SAM2_CFG = 'sam2.1/sam2.1_hiera_s.yaml'
-    SAM2_CKPT = r"C:\Users\colab999\Desktop\project\Grounded_SAM_2_main\checkpoints\sam2.1_hiera_small.pt"
-    VIDEO_FOLDER = r"C:\Users\colab999\Desktop\project\Grounded_SAM_2_main\notebooks\videos\bedroom"
-    HYDRA_CONFIG = r"C:\Users\colab999\Desktop\project\Grounded_SAM_2_main\sam2\configs"
+    SAM2_CKPT = os.fspath(SAM2_ROOT / "checkpoints" / "sam2.1_hiera_small.pt")
+    VIDEO_FOLDER = os.fspath(SAM2_ROOT / "notebooks" / "videos" / "bedroom")
+    HYDRA_CONFIG = os.fspath(SAM2_ROOT / "sam2" / "configs")
     LOCAL_RANK = 0
     DEVICE = "cuda"
     DTYPE = torch.bfloat16
@@ -56,7 +54,7 @@ class SAM2Config:
     VIDEO_WIDTH = 960
 
     SAVE_VIS = True
-    VIS_DIR = os.path.join(DEFAULT_NAV_RUNS_ROOT, "sam2_stream_standalone")
+    VIS_DIR = os.fspath(DEFAULT_NAV_RUNS_ROOT / "sam2_stream_standalone")
 
 
 class Sam2VideoPredictor:

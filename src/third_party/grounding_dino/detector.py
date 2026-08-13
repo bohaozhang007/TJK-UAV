@@ -14,7 +14,7 @@ from PIL import Image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-GROUNDED_SAM_ROOT = PROJECT_ROOT / "Grounded_SAM_2_main"
+GROUNDED_SAM_ROOT = PROJECT_ROOT / "sam2"
 DEFAULT_MODEL_CONFIG = (
     GROUNDED_SAM_ROOT
     / "grounding_dino"

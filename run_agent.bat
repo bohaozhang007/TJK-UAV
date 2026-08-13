@@ -2,10 +2,24 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
-set "CONDA_EXE=%USERPROFILE%\anaconda3\Scripts\conda.exe"
+set "SAM2_ROOT=%SCRIPT_DIR%..\sam2"
+set "SAM3_ROOT=%SCRIPT_DIR%..\sam3"
+set "DA3_ROOT=%SCRIPT_DIR%..\depth-anything-3"
+if not defined DA3_ENV set "DA3_ENV=da3"
+if not defined SAM3_ENV set "SAM3_ENV=sam3"
+if not defined AGENT_ENV set "AGENT_ENV=sam2"
+set "MPLCONFIGDIR=%SCRIPT_DIR%.cache\matplotlib"
+set "PYTHONPATH=%SAM2_ROOT%;%DA3_ROOT%\src;%SCRIPT_DIR%src;%PYTHONPATH%"
 set "USE_DA3=0"
 set "USE_SAM3=0"
 set "AGENT_ARGS="
+
+where conda.exe >nul 2>nul
+if errorlevel 1 (
+    echo Error: conda.exe was not found on PATH.
+    exit /b 1
+)
+if not exist "%MPLCONFIGDIR%" mkdir "%MPLCONFIGDIR%"
 
 :parse_args
 if "%~1"=="" goto run
@@ -24,7 +38,7 @@ if "%USE_DA3%"=="1" (
     curl.exe --noproxy "*" -fsS http://127.0.0.1:8770/health >nul 2>nul
     if errorlevel 1 (
         echo [START] Starting DA3 service...
-        start "TJK-UAV DA3" /MIN "%CONDA_EXE%" run --no-capture-output -n gsam2_vggt python "%SCRIPT_DIR%src\third_party\da3\server.py"
+        start "TJK-UAV DA3" /MIN conda.exe run --no-capture-output -n "%DA3_ENV%" python "%SCRIPT_DIR%src\third_party\da3\server.py" --da3-root "%DA3_ROOT%" --model-dir "%DA3_ROOT%\checkpoints\DA3NESTED-GIANT-LARGE"
     )
 
     echo [START] Waiting for DA3 service...
@@ -42,7 +56,7 @@ if "%USE_SAM3%"=="1" (
     curl.exe --noproxy "*" -fsS http://127.0.0.1:8780/health >nul 2>nul
     if errorlevel 1 (
         echo [START] Starting SAM3 service...
-        start "TJK-UAV SAM3" /MIN "%CONDA_EXE%" run --no-capture-output -n sam3 python "%SCRIPT_DIR%src\third_party\sam3\server.py"
+        start "TJK-UAV SAM3" /MIN conda.exe run --no-capture-output -n "%SAM3_ENV%" python "%SCRIPT_DIR%src\third_party\sam3\server.py" --sam3-root "%SAM3_ROOT%" --checkpoint "%SAM3_ROOT%\sam3.pt"
     )
 
     echo [START] Waiting for SAM3 service...
@@ -57,5 +71,5 @@ if "%USE_SAM3%"=="1" (
 
 :sam3_ready
 echo [START] Starting Agent v18...
-"%CONDA_EXE%" run --no-capture-output -n yolo python "%SCRIPT_DIR%src\agent\tjk\v18.py" !AGENT_ARGS!
+conda.exe run --no-capture-output -n "%AGENT_ENV%" python "%SCRIPT_DIR%src\agent\tjk\v18.py" !AGENT_ARGS!
 exit /b %ERRORLEVEL%

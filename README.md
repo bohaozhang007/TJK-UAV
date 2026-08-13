@@ -65,6 +65,12 @@ SAM3 visual-exemplar example:
 .\run_agent.bat --use_da3 --det sam3 --img assets\bottle.jpg --box assets\bottle.txt --robot owl --server-host 192.168.2.20 --config owl\v17_2.yaml
 ```
 
+`run_agent.bat` expects `sam2`, `sam3`, `depth-anything-3`, and `TJK-UAV` to
+be sibling directories. Conda is resolved from `PATH`; the default environments
+are `sam2` for the agent, `sam3` for the SAM3 service, and the independent
+`da3` environment for the DA3 service. Override them when needed with
+`AGENT_ENV`, `SAM3_ENV`, and `DA3_ENV`.
+
 `--box` points to a text file containing four space-separated `xyxy` pixel coordinates.
 
 To switch robots, use the same backend on both sides:

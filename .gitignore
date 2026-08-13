@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.log
+/.cache/
 
 # Local-only tests and runtime artifacts.
 /tests/

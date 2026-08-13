@@ -8,6 +8,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, List, Optional, Sequence
 
 import hydra
@@ -19,10 +20,9 @@ from hydra.core.global_hydra import GlobalHydra
 from PIL import Image
 
 
-DEFAULT_SUBPROJ_ROOTS = [
-    r"C:\Users\colab999\Desktop\project",
-    r"C:\Users\colab999\Desktop\project\Grounded_SAM_2_main",
-]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
+SAM2_ROOT = WORKSPACE_ROOT / "sam2"
+DEFAULT_SUBPROJ_ROOTS = [os.fspath(SAM2_ROOT)]
 
 
 def mcp_log(tool: str, msg: str):
@@ -75,9 +75,9 @@ def mask2bbox(mask):
 @dataclass
 class SAM2Config:
     sam2_cfg: str = "sam2.1/sam2.1_hiera_s.yaml"
-    sam2_ckpt: str = r"C:\Users\colab999\Desktop\project\Grounded_SAM_2_main\checkpoints\sam2.1_hiera_small.pt"
-    video_folder: str = r"C:\Users\colab999\Desktop\project\Grounded_SAM_2_main\notebooks\videos\bedroom"
-    hydra_config: str = r"C:\Users\colab999\Desktop\project\Grounded_SAM_2_main\sam2\configs"
+    sam2_ckpt: str = os.fspath(SAM2_ROOT / "checkpoints" / "sam2.1_hiera_small.pt")
+    video_folder: str = os.fspath(SAM2_ROOT / "notebooks" / "videos" / "bedroom")
+    hydra_config: str = os.fspath(SAM2_ROOT / "sam2" / "configs")
     local_rank: int = 0
     device: str = "cuda"
     dtype: str = "bfloat16"
@@ -100,7 +100,9 @@ class Sam2VideoPredictor:
         _add_subproj_roots(cfg.subproj_roots or DEFAULT_SUBPROJ_ROOTS)
 
         # Import after sys.path is prepared, so CLI arguments can override roots.
-        from Grounded_SAM_2_main.sam2.build_sam import build_one_obj_video_predictor
+        from third_party.sam2.one_obj_video_predictor import (
+            build_one_obj_video_predictor,
+        )
         from utils import show_fig
 
         self._show_fig = show_fig
@@ -507,7 +509,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--subproj-root",
         action="append",
         default=None,
-        help="Project root to prepend to sys.path. Can be provided multiple times. Defaults to the original hard-coded project roots.",
+        help="SAM2 project root to prepend to sys.path. Can be provided multiple times. Defaults to the sibling sam2 directory.",
     )
     parser.add_argument("--fastmcp-transport", default="streamable-http", choices=["sse", "streamable-http", "stdio"])
     parser.add_argument("--fastmcp-host", default="127.0.0.1")

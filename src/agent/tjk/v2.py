@@ -15,7 +15,9 @@ SRC_ROOT = os.path.dirname(
 )
 sys.path.insert(0, SRC_ROOT)
 
-GROUNDING_SAM_ROOT = r'C:\Users\colab999\Desktop\project\Grounded_SAM_2_main'
+GROUNDING_SAM_ROOT = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "sam2")
+)
 sys.path.insert(0, os.path.join(GROUNDING_SAM_ROOT, "grounding_dino"))
 
 import groundingdino.datasets.transforms as T
