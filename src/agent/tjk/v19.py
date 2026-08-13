@@ -137,6 +137,8 @@ class TJKAgent:
     MIN_TARGET_WORLD_Z_CM = 50.0
     PURE_ROTATE_FORWARD_CM = 1.0
     ACTION_SLEEP_S = 2.0
+    SAM3_SEARCH_TOP_K = 3
+    SAM3_SEARCH_DEBUG_THRESHOLD = 0.0
 
     def __init__(
         self,
@@ -1129,6 +1131,11 @@ class TJKAgent:
         all_detections = self.detect(
             frame_rgb,
             vis_name=f"search_view_{view_idx:02d}",
+            confidence_threshold=(
+                self.SAM3_SEARCH_DEBUG_THRESHOLD
+                if self.detector_name == "sam3"
+                else None
+            ),
         )
         detector_s = time.perf_counter() - detection_started
         detector_inference_s = float(
@@ -1148,7 +1155,16 @@ class TJKAgent:
         view_idx = view_record["view_idx"]
         cur_frame = view_record["frame"]
         all_detections = detection_result["all_detections"]
-        detections = all_detections[:self.max_candidates_per_frame]
+        candidate_limit = (
+            self.SAM3_SEARCH_TOP_K
+            if self.detector_name == "sam3"
+            else self.max_candidates_per_frame
+        )
+        detections = sorted(
+            all_detections,
+            key=lambda detection: float(detection["confidence"]),
+            reverse=True,
+        )[:candidate_limit]
         candidate_boxes = []
         candidate_box_labels = []
 
@@ -1175,6 +1191,18 @@ class TJKAgent:
                 )
             confidence = float(detection["confidence"])
             label = str(detection["label"])
+            configured_threshold = float(
+                getattr(getattr(self.detector, "cfg", None),
+                        "confidence_threshold", 0.0)
+            )
+            below_config_threshold = confidence < configured_threshold
+            if below_config_threshold:
+                self._log(
+                    f"[SEARCH-DEBUG] Keep below-threshold candidate="
+                    f"{candidate_idx} view={view_idx} rank={detection_rank + 1} "
+                    f"confidence={confidence:.3f} "
+                    f"configured_threshold={configured_threshold:.3f}"
+                )
             box_width = max(0.0, float(target_box[2] - target_box[0]))
             box_height = max(0.0, float(target_box[3] - target_box[1]))
             box_area_px = box_width * box_height
@@ -1187,7 +1215,9 @@ class TJKAgent:
             box_area_ratio = box_area_px / image_area
             candidate_boxes.append(target_box)
             candidate_box_labels.append(
-                f"id: {candidate_idx}, conf: {confidence:.2f}"
+                f"TOP{detection_rank + 1} id={candidate_idx} "
+                f"conf={confidence:.3f}"
+                + (" LOW" if below_config_threshold else "")
             )
             self.search_candidates.append(
                 {
@@ -1204,6 +1234,7 @@ class TJKAgent:
                     "box_area_px": box_area_px,
                     "box_area_ratio": box_area_ratio,
                     "confidence": confidence,
+                    "below_config_threshold": below_config_threshold,
                     "label": label,
                     "image_width": image_width,
                     "image_height": image_height,
@@ -1211,13 +1242,20 @@ class TJKAgent:
             )
 
         visualization_started = time.perf_counter()
+        visualization_path = (
+            f"{self.vis_dir}/search_view_{view_idx:02d}_top3.png"
+        )
         show_fig(
             cur_frame,
-            f"{self.vis_dir}/search_view_{view_idx:02d}.png",
+            visualization_path,
             box_coords=(
                 np.asarray(candidate_boxes) if candidate_boxes else None
             ),
             box_labels=(candidate_box_labels if candidate_box_labels else None),
+        )
+        self._log(
+            f"[SEARCH-VIS] View={view_idx} top_k={len(candidate_boxes)} "
+            f"saved={visualization_path}"
         )
         visualization_s = time.perf_counter() - visualization_started
         motion_timing = view_record["motion_timing"]
@@ -1767,7 +1805,12 @@ class TJKAgent:
         )
         return final_pose
 
-    def detect(self, image_rgb, vis_name=None):
+    def detect(
+        self,
+        image_rgb,
+        vis_name=None,
+        confidence_threshold=None,
+    ):
         """Run the selected backend through the common detector interface."""
         if vis_name is not None:
             set_next_vis_name = getattr(
@@ -1777,7 +1820,13 @@ class TJKAgent:
             )
             if callable(set_next_vis_name):
                 set_next_vis_name(vis_name)
-        detections = self.detector.detect(image_rgb)
+        if confidence_threshold is not None and self.detector_name == "sam3":
+            detections = self.detector.detect(
+                image_rgb,
+                confidence_threshold=confidence_threshold,
+            )
+        else:
+            detections = self.detector.detect(image_rgb)
         composite_path = getattr(
             self.detector,
             "last_composite_path",

@@ -140,6 +140,7 @@ class Sam3Detector:
         self,
         image_rgb: np.ndarray,
         prompt: str | dict[str, Any] | None = None,
+        confidence_threshold: float | None = None,
     ) -> list[dict]:
         total_started = time.perf_counter()
         if prompt is not None:
@@ -156,14 +157,20 @@ class Sam3Detector:
         image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
         target_jpeg = self._encode_bgr(image_bgr)
         save_path = self._next_composite_path()
+        payload = {
+            "target_image": base64.b64encode(target_jpeg).decode("ascii"),
+            "save_composite_path": (
+                str(save_path) if save_path is not None else None
+            ),
+        }
+        if confidence_threshold is not None:
+            threshold = float(confidence_threshold)
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError("confidence_threshold must be in [0, 1]")
+            payload["confidence_threshold"] = threshold
         result = self._post_json(
             "/detect",
-            {
-                "target_image": base64.b64encode(target_jpeg).decode("ascii"),
-                "save_composite_path": (
-                    str(save_path) if save_path is not None else None
-                ),
-            },
+            payload,
         )
         if result.get("ok") is not True:
             raise RuntimeError(f"SAM3 detection failed: {result}")

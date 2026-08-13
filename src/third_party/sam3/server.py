@@ -282,6 +282,7 @@ class Sam3DetectorEngine:
         self,
         target_rgb: np.ndarray,
         save_composite_path: str | None = None,
+        confidence_threshold: float | None = None,
     ) -> dict[str, Any]:
         if self._processor is None or self._torch is None:
             raise RuntimeError("SAM3 model is not loaded")
@@ -325,6 +326,12 @@ class Sam3DetectorEngine:
 
             inference_started = time.perf_counter()
             state = None
+            effective_threshold = self.confidence_threshold
+            if confidence_threshold is not None:
+                effective_threshold = self._validate_threshold(
+                    confidence_threshold
+                )
+                self._processor.set_confidence_threshold(effective_threshold)
             try:
                 with self._torch.inference_mode(), self._torch.autocast(
                     "cuda",
@@ -352,12 +359,17 @@ class Sam3DetectorEngine:
                 )
             finally:
                 del state
+                if effective_threshold != self.confidence_threshold:
+                    self._processor.set_confidence_threshold(
+                        self.confidence_threshold
+                    )
                 if self.device.startswith("cuda"):
                     self._torch.cuda.empty_cache()
             return {
                 "ok": True,
                 "detections": detections,
                 "prompt_mode": self._prompt_mode,
+                "confidence_threshold": effective_threshold,
                 "compose": compose_meta,
                 "timing": {
                     "total_s": time.perf_counter() - total_started,
@@ -540,11 +552,13 @@ class Sam3ApiHandler(BaseHTTPRequestHandler):
                 save_path = payload.get("save_composite_path")
                 if save_path is not None and not isinstance(save_path, str):
                     raise ValueError("save_composite_path must be a string")
+                threshold = payload.get("confidence_threshold")
                 self._json_response(
                     200,
                     self.engine.detect(
                         target_rgb,
                         save_composite_path=save_path,
+                        confidence_threshold=threshold,
                     ),
                 )
                 return
