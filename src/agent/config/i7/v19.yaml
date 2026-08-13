@@ -16,7 +16,7 @@ mission:
     - name: waypoint_1
       x_cm: 0.0
       y_cm: -150.0
-      z_cm: 0.0
+      z_cm: 50.0
       yaw_deg: 0.0
 
     # - name: waypoint_2
@@ -44,7 +44,7 @@ motion:
 
 # Flight safety thresholds.
 safety:
-  safe_z_cm: 50.0
+  safe_z_cm: 20.0
   depth_safe_distance_cm: 120.0
 
 # Search pattern at each waypoint.

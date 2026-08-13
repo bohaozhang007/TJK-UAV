@@ -134,7 +134,7 @@ def _configure_logger(log_path: Path) -> logging.Logger:
     return logger
 
 class TJKAgent:
-    MIN_TARGET_WORLD_Z_CM = 50.0
+    MIN_TARGET_WORLD_Z_CM = 20.0
     PURE_ROTATE_FORWARD_CM = 1.0
     ACTION_SLEEP_S = 2.0
     SAM3_SEARCH_TOP_K = 3
