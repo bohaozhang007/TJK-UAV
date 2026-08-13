@@ -366,6 +366,30 @@ class BaseClient:
             "rotation": rotation,
         }
 
+    def move_rel_xyz_yaw(
+        self,
+        x: float = 0.0,
+        y: float = 0.0,
+        z: float = 0.0,
+        yaw: float = 0.0,
+    ) -> JsonObject:
+        """Send one combined relative XYZ-and-yaw motion command."""
+        command = self.quantize_motion(x, y, z, yaw)
+        if not any(command.values()):
+            return {
+                "ok": True,
+                "message": "move_relative_xyz_yaw skipped",
+                "command": command,
+            }
+        return self._require_ok(
+            self._request_json(
+                "POST",
+                "/move_relative_xyz_yaw",
+                command,
+            ),
+            "move_relative_xyz_yaw",
+        )
+
     def get_pose(self) -> JsonObject:
         """Return x/y/z in centimetres and yaw normalized to [-180, 180)."""
         result = self._require_ok(

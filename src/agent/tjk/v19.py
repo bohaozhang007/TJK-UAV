@@ -1,4 +1,4 @@
-# v18：基于 v17，增加 I7 无人机与 K40T/DA3 链路适配。
+# v19：所有 Agent 运动统一使用 XYZ+Yaw 组合命令，纯旋转补偿前进 1 cm。
 
 from __future__ import annotations
 
@@ -116,7 +116,7 @@ def _timestamped_experiment_dir(exp_name: str, timestamp: str) -> Path:
 
 def _configure_logger(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("tjk_v18")
+    logger = logging.getLogger("tjk_v19")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
@@ -135,6 +135,8 @@ def _configure_logger(log_path: Path) -> logging.Logger:
 
 class TJKAgent:
     MIN_TARGET_WORLD_Z_CM = 50.0
+    PURE_ROTATE_FORWARD_CM = 1.0
+    ACTION_SLEEP_S = 2.0
 
     def __init__(
         self,
@@ -2030,13 +2032,19 @@ class TJKAgent:
                 0.0,
                 dyaw,
             )
+        dx_cm = self.PURE_ROTATE_FORWARD_CM
         return self._execute_motion(
             AgentAction.ROTATE,
-            0.0,
+            dx_cm,
             0.0,
             0.0,
             dyaw,
-            lambda: self.client.move_relative(dx=0.0, dy=0.0, dz=0.0, dyaw=dyaw),
+            lambda: self.client.move_rel_xyz_yaw(
+                x=dx_cm,
+                y=0.0,
+                z=0.0,
+                yaw=dyaw,
+            ),
             context=context,
             track_id=track_id,
             log_timing=log_timing,
@@ -2052,7 +2060,7 @@ class TJKAgent:
         log_timing=True,
         track_id=None,
     ):
-        """Send XYZ translation and yaw through one move_relative call."""
+        """Send XYZ translation and yaw through one combined command."""
         dx_cm, dy_cm, dz_cm, dyaw_deg = (
             self._filter_motion_by_server_tolerance(
                 dx_cm,
@@ -2063,6 +2071,12 @@ class TJKAgent:
                 track_id=track_id,
             )
         )
+        if not any((dx_cm, dy_cm, dz_cm)) and dyaw_deg != 0.0:
+            dx_cm = self.PURE_ROTATE_FORWARD_CM
+            self._log(
+                f"[PURE-ROTATE] context={context!r} "
+                f"using x={dx_cm:.2f}cm with yaw={dyaw_deg:.2f}deg"
+            )
         if not any((dx_cm, dy_cm, dz_cm, dyaw_deg)):
             return self._motion_skipped_result(
                 AgentAction.XYZ_YAW_HYBRID,
@@ -2077,11 +2091,11 @@ class TJKAgent:
             dy_cm,
             dz_cm,
             dyaw_deg,
-            lambda: self.client.move_relative(
-                dx=dx_cm,
-                dy=dy_cm,
-                dz=dz_cm,
-                dyaw=dyaw_deg,
+            lambda: self.client.move_rel_xyz_yaw(
+                x=dx_cm,
+                y=dy_cm,
+                z=dz_cm,
+                yaw=dyaw_deg,
             ),
             context=context,
             track_id=track_id,
@@ -2238,6 +2252,11 @@ class TJKAgent:
                 f"{context or action.value} motion command failed: {exc}"
             ) from exc
         drone_execution_s = time.perf_counter() - execution_started
+        self._log(
+            f"[ACTION-SLEEP] command_id={command_idx} "
+            f"sleep_s={self.ACTION_SLEEP_S:.1f}"
+        )
+        time.sleep(self.ACTION_SLEEP_S)
         end_pose = self._get_pose_for_flight(
             f"{context or action.value} completion pose"
         )
@@ -2844,9 +2863,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "YAML path relative to src/agent/config, such as i7/v18.yaml; "
-            "absolute paths are also supported. Defaults to i7/v18.yaml "
-            "for the I7 v18 agent"
+            "YAML path relative to src/agent/config, such as i7/v19.yaml; "
+            "absolute paths are also supported. Defaults to i7/v19.yaml "
+            "for the I7 v19 agent"
         ),
     )
     parser.add_argument(
@@ -2925,7 +2944,7 @@ def _resolve_config_path(config_path: str | None, client_name: str) -> Path:
     config_root = Path(__file__).resolve().parents[1] / "config"
     if config_path is None:
         if client_name == "i7":
-            return (config_root / "i7" / "v18.yaml").resolve()
+            return (config_root / "i7" / "v19.yaml").resolve()
         return (config_root / "owl" / "v17.yaml").resolve()
 
     requested_path = Path(config_path).expanduser()

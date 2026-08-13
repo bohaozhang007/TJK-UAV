@@ -45,12 +45,12 @@ motion:
 # Flight safety thresholds.
 safety:
   safe_z_cm: 50.0
-  depth_safe_distance_cm: 100.0
+  depth_safe_distance_cm: 120.0
 
 # Search pattern at each waypoint.
 search:
   rotation_step_deg: 30.0
-  height_offset_cm: 50.0
+  height_offset_cm: 100.0
 
 # Generic candidate filtering after detector thresholding and NMS.
 detection:
