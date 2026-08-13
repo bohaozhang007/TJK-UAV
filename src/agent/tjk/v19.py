@@ -313,8 +313,7 @@ class TJKAgent:
         )
 
         # img setting
-        # I7 K40T relay output is 640x360. connect() still replaces these
-        # defaults with the actual frame shape reported by Robot Server.
+        # connect() replaces these fallbacks with the native camera frame size.
         self.img_height = 360
         self.img_width = 640
         self.horizontal_center = self.img_width / 2

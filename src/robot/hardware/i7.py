@@ -469,6 +469,16 @@ class I7Hardware:
             planner_heartbeat_ok and nav_ok and nav.get("planner_ok") is True
         )
         battery_ok = self._fresh(self._battery, now, self.BATTERY_MAX_AGE_S)
+        camera_width = (
+            int(self._rgb["width"])
+            if self._rgb is not None and "width" in self._rgb
+            else None
+        )
+        camera_height = (
+            int(self._rgb["height"])
+            if self._rgb is not None and "height" in self._rgb
+            else None
+        )
         connected = bool(state.get("connected", False))
         goal_link_ok = self._publisher_connected(self._goal_pub)
         initialized = bool(
@@ -536,6 +546,8 @@ class I7Hardware:
             "battery_percentage": battery.get("percentage"),
             "battery_voltage": battery.get("voltage"),
             "camera_source": self.rtsp_url,
+            "camera_width": camera_width,
+            "camera_height": camera_height,
             "camera_error": self._camera_error,
             "missing": missing,
         }

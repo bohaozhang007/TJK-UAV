@@ -23,8 +23,6 @@ class I7Controller:
     public world y and yaw have the opposite sign.
     """
 
-    OUTPUT_WIDTH = 640
-    OUTPUT_HEIGHT = 360
     JPEG_QUALITY = 85
     # Keep Robot completion criteria identical to i7_nav.yaml.
     POSITION_TOLERANCE_CM = 15.0
@@ -98,7 +96,7 @@ class I7Controller:
             }
 
     def get_rgb_meta(self, save: bool = True) -> Dict[str, Any]:
-        frame = self._get_resized_bgr()
+        frame = self._get_native_bgr()
         result: Dict[str, Any] = {
             "ok": True,
             "height": int(frame.shape[0]),
@@ -113,7 +111,7 @@ class I7Controller:
         return result
 
     def get_rgb_byte(self) -> bytes:
-        frame = self._get_resized_bgr()
+        frame = self._get_native_bgr()
         success, encoded = cv2.imencode(
             ".jpg",
             frame,
@@ -329,9 +327,10 @@ class I7Controller:
         health = dict(self._hardware.health())
         health["velocity_control_supported"] = False
         health["image_output"] = {
-            "width": self.OUTPUT_WIDTH,
-            "height": self.OUTPUT_HEIGHT,
+            "width": health.get("camera_width"),
+            "height": health.get("camera_height"),
             "encoding": "jpeg",
+            "resolution_mode": "native",
         }
         return health
 
@@ -425,16 +424,10 @@ class I7Controller:
                 f"armed={health.get('armed')!r}"
             )
 
-    def _get_resized_bgr(self) -> np.ndarray:
+    def _get_native_bgr(self) -> np.ndarray:
+        """Return the RTSP frame without changing its pixel resolution."""
         with self._image_lock:
-            frame = self._hardware.get_bgr()
-            if frame.shape[1] == self.OUTPUT_WIDTH and frame.shape[0] == self.OUTPUT_HEIGHT:
-                return frame
-            return cv2.resize(
-                frame,
-                (self.OUTPUT_WIDTH, self.OUTPUT_HEIGHT),
-                interpolation=cv2.INTER_AREA,
-            )
+            return self._hardware.get_bgr()
 
     @staticmethod
     def _public_pose(pose: Dict[str, Any]) -> Dict[str, float]:

@@ -93,7 +93,7 @@ class Sam3Composite:
 
 
 class Sam3VisualPromptComposer:
-    """Place full target and reference images on a square SAM3 canvas."""
+    """Stack the native-resolution target above the reference image."""
 
     def __init__(self, padding_color: int = 255) -> None:
         padding_color = int(padding_color)
@@ -117,45 +117,16 @@ class Sam3VisualPromptComposer:
             reference_h,
         )
 
-        target_short = min(target_h, target_w)
-        reference_short = min(reference_h, reference_w)
-        scale = float(target_short) / float(reference_short)
-        resized_w = max(1, int(round(reference_w * scale)))
-        resized_h = max(1, int(round(reference_h * scale)))
-        resample = (
-            Image.Resampling.LANCZOS
-            if scale < 1.0
-            else Image.Resampling.BILINEAR
-        )
-        resized_reference = np.asarray(
-            Image.fromarray(reference_rgb).resize(
-                (resized_w, resized_h),
-                resample=resample,
-            ),
-            dtype=np.uint8,
-        )
-
-        vertical_side = max(max(target_w, resized_w), target_h + resized_h)
-        horizontal_side = max(target_w + resized_w, max(target_h, resized_h))
-        if vertical_side <= horizontal_side:
-            layout = "bottom"
-            canvas_side = vertical_side
-            content_y = (canvas_side - target_h - resized_h) // 2
-            target_x = (canvas_side - target_w) // 2
-            target_y = content_y
-            reference_x = (canvas_side - resized_w) // 2
-            reference_y = content_y + target_h
-        else:
-            layout = "right"
-            canvas_side = horizontal_side
-            content_x = (canvas_side - target_w - resized_w) // 2
-            target_x = content_x
-            target_y = (canvas_side - target_h) // 2
-            reference_x = content_x + target_w
-            reference_y = (canvas_side - resized_h) // 2
+        layout = "vertical_native"
+        canvas_width = max(target_w, reference_w)
+        canvas_height = target_h + reference_h
+        target_x = (canvas_width - target_w) // 2
+        target_y = 0
+        reference_x = (canvas_width - reference_w) // 2
+        reference_y = target_h
 
         canvas = np.full(
-            (canvas_side, canvas_side, 3),
+            (canvas_height, canvas_width, 3),
             self.padding_color,
             dtype=np.uint8,
         )
@@ -164,21 +135,19 @@ class Sam3VisualPromptComposer:
             target_x : target_x + target_w,
         ] = target_rgb
         canvas[
-            reference_y : reference_y + resized_h,
-            reference_x : reference_x + resized_w,
-        ] = resized_reference
+            reference_y : reference_y + reference_h,
+            reference_x : reference_x + reference_w,
+        ] = reference_rgb
 
         mapped = reference_box.copy()
-        mapped[[0, 2]] *= float(resized_w) / float(reference_w)
-        mapped[[1, 3]] *= float(resized_h) / float(reference_h)
         mapped[[0, 2]] += float(reference_x)
         mapped[[1, 3]] += float(reference_y)
         x1, y1, x2, y2 = (float(value) for value in mapped)
         prompt_box = (
-            ((x1 + x2) * 0.5) / canvas_side,
-            ((y1 + y2) * 0.5) / canvas_side,
-            (x2 - x1) / canvas_side,
-            (y2 - y1) / canvas_side,
+            ((x1 + x2) * 0.5) / canvas_width,
+            ((y1 + y2) * 0.5) / canvas_height,
+            (x2 - x1) / canvas_width,
+            (y2 - y1) / canvas_height,
         )
         return Sam3Composite(
             image_rgb=canvas,
@@ -192,11 +161,11 @@ class Sam3VisualPromptComposer:
             reference_rect_xyxy=(
                 reference_x,
                 reference_y,
-                reference_x + resized_w,
-                reference_y + resized_h,
+                reference_x + reference_w,
+                reference_y + reference_h,
             ),
             layout=layout,
-            reference_scale=scale,
+            reference_scale=1.0,
         )
 
 
