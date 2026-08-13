@@ -4,7 +4,8 @@
   <arg name="map_size_x" default="5.0"/>
   <arg name="map_size_y" default="5.0"/>
   <arg name="map_size_z" default="5.0"/>
-  <arg name="max_vel" default="1.5"/>
+  <arg name="max_vel" default="0.5"/>
+  <arg name="max_acc" default="1.0"/>
 
   <!-- flight_type=1 accepts interactive goals; no waypoint YAML is loaded. -->
   <include file="$(find ego_planner)/launch/include/run_in_sim.xml">
@@ -20,6 +21,7 @@
     <arg name="odom_topic" value="$(arg odom_topic)"/>
     <arg name="cloud_topic" value="$(arg cloud_topic)"/>
     <arg name="max_vel" value="$(arg max_vel)"/>
+    <arg name="max_acc" value="$(arg max_acc)"/>
     <arg name="flight_type" value="1"/>
   </include>
 
