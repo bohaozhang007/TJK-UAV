@@ -21,8 +21,9 @@ class I7Hardware:
     EXTENDED_STATE_TOPIC = "/mavros/extended_state"
     BATTERY_TOPIC = "/mavros/battery"
     NAV_STATE_TOPIC = "/i7_nav/state"
+    NAV_ACTIVE_GOAL_TOPIC = "/i7_nav/active_goal"
+    PLANNER_HEARTBEAT_TOPIC = "/drone_0_traj_server/heartbeat"
     GOAL_TOPIC = "/cxr_goal"
-    PLANNER_GOAL_TOPIC = "/move_base_simple/goal"
 
     TAKEOFF_SERVICE = "/i7_nav/takeoff"
     LAND_SERVICE = "/i7_nav/land"
@@ -35,6 +36,7 @@ class I7Hardware:
     ODOM_MAX_AGE_S = 1.0
     RGB_MAX_AGE_S = 2.0
     NAV_MAX_AGE_S = 2.0
+    PLANNER_MAX_AGE_S = 2.0
     BATTERY_MAX_AGE_S = 10.0
 
     LANDED_STATE_ON_GROUND = 1
@@ -63,7 +65,8 @@ class I7Hardware:
         self._odom: Optional[Dict[str, Any]] = None
         self._battery: Optional[Dict[str, Any]] = None
         self._nav: Optional[Dict[str, Any]] = None
-        self._planner_goal: Optional[Dict[str, Any]] = None
+        self._active_goal: Optional[Dict[str, Any]] = None
+        self._planner_heartbeat_received_monotonic = 0.0
         self._rgb: Optional[Dict[str, Any]] = None
 
         self._camera_stop = threading.Event()
@@ -107,7 +110,7 @@ class I7Hardware:
             from mavros_msgs.msg import ExtendedState, State
             from nav_msgs.msg import Odometry
             from sensor_msgs.msg import BatteryState
-            from std_msgs.msg import String
+            from std_msgs.msg import Empty, String
             from std_srvs.srv import Trigger
         except ImportError as exc:
             raise RuntimeError(
@@ -143,10 +146,16 @@ class I7Hardware:
                 queue_size=10,
             ),
             rospy.Subscriber(
-                self.PLANNER_GOAL_TOPIC,
+                self.NAV_ACTIVE_GOAL_TOPIC,
                 PoseStamped,
-                self._planner_goal_callback,
+                self._active_goal_callback,
                 queue_size=10,
+            ),
+            rospy.Subscriber(
+                self.PLANNER_HEARTBEAT_TOPIC,
+                Empty,
+                self._planner_heartbeat_callback,
+                queue_size=20,
             ),
         ]
         self._service_clients = {
@@ -258,6 +267,8 @@ class I7Hardware:
         z_m: float,
         yaw_deg_ros: float,
         frame_id: str,
+        *,
+        use_planner: bool = True,
     ) -> None:
         values = (x_m, y_m, z_m, yaw_deg_ros)
         if not all(math.isfinite(float(value)) for value in values):
@@ -273,6 +284,8 @@ class I7Hardware:
             message.pose.position.y = float(y_m)
             message.pose.position.z = float(z_m)
             # /cxr_goal preserves the existing uav_nav convention: yaw degrees in w.
+            # orientation.x is an I7-only marker: 0=EGO, 1=direct yaw at current pose.
+            message.pose.orientation.x = 0.0 if use_planner else 1.0
             message.pose.orientation.w = float(yaw_deg_ros)
             publisher = self._goal_pub
         publisher.publish(message)
@@ -283,6 +296,7 @@ class I7Hardware:
         y_m: float,
         z_m: float,
         *,
+        uses_planner: bool,
         after_monotonic: float,
         timeout_s: float,
         tolerance_m: float = 0.05,
@@ -290,7 +304,7 @@ class I7Hardware:
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             while True:
-                goal = self._planner_goal
+                goal = self._active_goal
                 if self._goal_matches(
                     goal,
                     x_m,
@@ -298,12 +312,14 @@ class I7Hardware:
                     z_m,
                     after_monotonic,
                     tolerance_m,
+                    uses_planner,
                 ):
                     return dict(goal or {})
                 remaining_s = deadline - time.monotonic()
                 if remaining_s <= 0:
                     raise RuntimeError(
-                        f"i7_nav did not acknowledge goal on {self.PLANNER_GOAL_TOPIC}"
+                        "i7_nav did not acknowledge goal on "
+                        f"{self.NAV_ACTIVE_GOAL_TOPIC}"
                     )
                 self._condition.wait(timeout=min(0.1, remaining_s))
 
@@ -343,7 +359,8 @@ class I7Hardware:
             self._odom = None
             self._battery = None
             self._nav = None
-            self._planner_goal = None
+            self._active_goal = None
+            self._planner_heartbeat_received_monotonic = 0.0
             self._rgb = None
         for handle in handles:
             try:
@@ -415,15 +432,21 @@ class I7Hardware:
             self._nav = payload
             self._condition.notify_all()
 
-    def _planner_goal_callback(self, message: Any) -> None:
+    def _active_goal_callback(self, message: Any) -> None:
         with self._condition:
-            self._planner_goal = {
+            self._active_goal = {
                 "x_m": float(message.pose.position.x),
                 "y_m": float(message.pose.position.y),
                 "z_m": float(message.pose.position.z),
                 "frame_id": str(message.header.frame_id),
+                "uses_planner": float(message.pose.orientation.x) <= 0.5,
                 "received_monotonic": time.monotonic(),
             }
+            self._condition.notify_all()
+
+    def _planner_heartbeat_callback(self, _message: Any) -> None:
+        with self._condition:
+            self._planner_heartbeat_received_monotonic = time.monotonic()
             self._condition.notify_all()
 
     def _health_locked(self) -> Dict[str, Any]:
@@ -437,6 +460,14 @@ class I7Hardware:
         odom_ok = self._fresh(self._odom, now, self.ODOM_MAX_AGE_S)
         rgb_ok = self._fresh(self._rgb, now, self.RGB_MAX_AGE_S)
         nav_ok = self._fresh(self._nav, now, self.NAV_MAX_AGE_S)
+        planner_heartbeat_ok = bool(
+            self._planner_heartbeat_received_monotonic > 0.0
+            and now - self._planner_heartbeat_received_monotonic
+            <= self.PLANNER_MAX_AGE_S
+        )
+        planner_ok = bool(
+            planner_heartbeat_ok and nav_ok and nav.get("planner_ok") is True
+        )
         battery_ok = self._fresh(self._battery, now, self.BATTERY_MAX_AGE_S)
         connected = bool(state.get("connected", False))
         goal_link_ok = self._publisher_connected(self._goal_pub)
@@ -448,6 +479,7 @@ class I7Hardware:
             and odom_ok
             and rgb_ok
             and nav_ok
+            and planner_ok
             and connected
             and goal_link_ok
         )
@@ -469,6 +501,7 @@ class I7Hardware:
             ("odom", odom_ok),
             ("rgb", rgb_ok),
             ("i7_nav_state", nav_ok),
+            ("ego_planner_heartbeat", planner_ok),
             ("i7_goal_link", goal_link_ok),
         ):
             if not ready:
@@ -495,6 +528,9 @@ class I7Hardware:
             "odom_ok": odom_ok,
             "rgb_ok": rgb_ok,
             "nav_ok": nav_ok,
+            "planner_ok": planner_ok,
+            "planner_heartbeat_ok": planner_heartbeat_ok,
+            "planner_heartbeat_topic": self.PLANNER_HEARTBEAT_TOPIC,
             "goal_link_ok": goal_link_ok,
             "battery_ok": battery_ok,
             "battery_percentage": battery.get("percentage"),
@@ -526,8 +562,11 @@ class I7Hardware:
         z_m: float,
         after_monotonic: float,
         tolerance_m: float,
+        uses_planner: bool,
     ) -> bool:
         if goal is None or float(goal.get("received_monotonic", 0.0)) < after_monotonic:
+            return False
+        if bool(goal.get("uses_planner")) is not bool(uses_planner):
             return False
         return math.sqrt(
             (float(goal["x_m"]) - x_m) ** 2

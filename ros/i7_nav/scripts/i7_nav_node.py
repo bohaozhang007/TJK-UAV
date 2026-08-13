@@ -24,7 +24,7 @@ from mavros_msgs.srv import CommandBool, CommandTOL
 from nav_msgs.msg import Odometry
 from quadrotor_msgs.msg import PositionCommand
 from sensor_msgs.msg import BatteryState
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Empty, String
 from std_srvs.srv import Trigger, TriggerResponse
 
 
@@ -60,6 +60,7 @@ class GoalData:
     yaw: float
     frame_id: str
     received_monotonic: float
+    uses_planner: bool
 
 
 class I7NavNode:
@@ -81,8 +82,8 @@ class I7NavNode:
         self.setpoint_topic = rospy.get_param(
             "~setpoint_topic", "/mavros/setpoint_raw/local"
         )
-        self.mandatory_stop_topic = rospy.get_param(
-            "~mandatory_stop_topic", "/mandatory_stop_to_planner"
+        self.planner_heartbeat_topic = rospy.get_param(
+            "~planner_heartbeat_topic", "/drone_0_traj_server/heartbeat"
         )
 
         self.control_hz = max(20.0, float(rospy.get_param("~control_hz", 30.0)))
@@ -123,6 +124,12 @@ class I7NavNode:
         self.position_cmd_max_age_s = max(
             0.05, float(rospy.get_param("~position_cmd_max_age_s", 0.5))
         )
+        self.planner_heartbeat_max_age_s = max(
+            0.2, float(rospy.get_param("~planner_heartbeat_max_age_s", 2.0))
+        )
+        self.direct_goal_max_distance_m = max(
+            0.01, float(rospy.get_param("~direct_goal_max_distance_m", 0.15))
+        )
 
         if self.max_height_m <= self.min_height_m:
             raise ValueError("max_height_m must be greater than min_height_m")
@@ -140,6 +147,7 @@ class I7NavNode:
         self._goal: Optional[GoalData] = None
         self._position_cmd: Optional[PositionCommand] = None
         self._position_cmd_received_monotonic = 0.0
+        self._planner_heartbeat_received_monotonic = 0.0
         self._mavros_state: Optional[dict[str, Any]] = None
         self._extended_state: Optional[dict[str, Any]] = None
         self._battery: Optional[dict[str, Any]] = None
@@ -155,9 +163,6 @@ class I7NavNode:
         )
         self._planner_goal_pub = rospy.Publisher(
             self.planner_goal_topic, PoseStamped, queue_size=10
-        )
-        self._mandatory_stop_pub = rospy.Publisher(
-            self.mandatory_stop_topic, Bool, queue_size=2, latch=True
         )
         self._state_pub = rospy.Publisher(
             "~state", String, queue_size=10, latch=True
@@ -192,6 +197,12 @@ class I7NavNode:
                 queue_size=20,
             ),
             rospy.Subscriber(
+                self.planner_heartbeat_topic,
+                Empty,
+                self._planner_heartbeat_callback,
+                queue_size=20,
+            ),
+            rospy.Subscriber(
                 self.goal_topic, PoseStamped, self._goal_callback, queue_size=10
             ),
         ]
@@ -207,7 +218,6 @@ class I7NavNode:
             rospy.Service("~reinitialize", Trigger, self._reinitialize_service),
         ]
 
-        self._mandatory_stop_pub.publish(Bool(data=True))
         self._control_timer = rospy.Timer(
             rospy.Duration(1.0 / self.control_hz), self._control_timer_callback
         )
@@ -293,11 +303,17 @@ class I7NavNode:
             self._position_cmd_received_monotonic = time.monotonic()
             self._condition.notify_all()
 
+    def _planner_heartbeat_callback(self, _message: Empty) -> None:
+        with self._condition:
+            self._planner_heartbeat_received_monotonic = time.monotonic()
+            self._condition.notify_all()
+
     def _goal_callback(self, message: PoseStamped) -> None:
         values = (
             message.pose.position.x,
             message.pose.position.y,
             message.pose.position.z,
+            message.pose.orientation.x,
             message.pose.orientation.w,
         )
         if not all(math.isfinite(float(value)) for value in values):
@@ -317,6 +333,9 @@ class I7NavNode:
             if self._ground_z is None:
                 rospy.logerr("Reject I7 goal because ground height is unavailable")
                 return
+            if self._odom is None:
+                rospy.logerr("Reject I7 goal because odometry is unavailable")
+                return
 
             target_z = float(message.pose.position.z)
             min_z = self._ground_z + self.min_height_m
@@ -330,6 +349,32 @@ class I7NavNode:
                 )
                 return
 
+            requested_direct_control = float(message.pose.orientation.x) > 0.5
+            target_distance_m = math.sqrt(
+                (float(message.pose.position.x) - self._odom.x) ** 2
+                + (float(message.pose.position.y) - self._odom.y) ** 2
+                + (target_z - self._odom.z) ** 2
+            )
+            if (
+                requested_direct_control
+                and target_distance_m > self.direct_goal_max_distance_m
+            ):
+                self._last_error = (
+                    "direct yaw goal contains translation "
+                    f"{target_distance_m:.3f}m > {self.direct_goal_max_distance_m:.3f}m"
+                )
+                rospy.logerr("Reject I7 goal: %s", self._last_error)
+                return
+
+            uses_planner = not requested_direct_control
+            if uses_planner and not self._planner_ok_locked():
+                self._last_error = (
+                    f"EGO planner heartbeat is missing or stale on "
+                    f"{self.planner_heartbeat_topic}"
+                )
+                rospy.logerr("Reject I7 goal: %s", self._last_error)
+                return
+
             goal = GoalData(
                 x=float(message.pose.position.x),
                 y=float(message.pose.position.y),
@@ -340,6 +385,7 @@ class I7NavNode:
                     or (self._odom.frame_id if self._odom is not None else "camera_init")
                 ),
                 received_monotonic=time.monotonic(),
+                uses_planner=uses_planner,
             )
             self._goal = goal
             # Do not allow a still-fresh command from the previous trajectory
@@ -351,12 +397,13 @@ class I7NavNode:
             self._set_state_locked(NavState.NAVIGATING)
             self._condition.notify_all()
 
-        self._mandatory_stop_pub.publish(Bool(data=False))
-        planner_goal = self._goal_pose_message(goal, standard_quaternion=True)
-        self._planner_goal_pub.publish(planner_goal)
         self._active_goal_pub.publish(self._goal_pose_message(goal))
+        if goal.uses_planner:
+            planner_goal = self._goal_pose_message(goal, standard_quaternion=True)
+            self._planner_goal_pub.publish(planner_goal)
         rospy.loginfo(
-            "Accepted I7 goal: x=%.3f y=%.3f z=%.3f yaw=%.1fdeg",
+            "Accepted I7 %s goal: x=%.3f y=%.3f z=%.3f yaw=%.1fdeg",
+            "planner" if goal.uses_planner else "direct-yaw",
             goal.x,
             goal.y,
             goal.z,
@@ -368,22 +415,32 @@ class I7NavNode:
         dt = max(0.0, min(0.2, now - self._last_control_monotonic))
         self._last_control_monotonic = now
         setpoint: Optional[PositionTarget] = None
-        goal_completed = False
-
         with self._condition:
             if self._state == NavState.TAKEOFF:
                 setpoint = self._takeoff_setpoint_locked(dt)
                 self._update_takeoff_completion_locked()
             elif self._state == NavState.NAVIGATING:
-                setpoint = self._navigation_setpoint_locked(dt, now)
-                goal_completed = self._update_goal_completion_locked()
+                if (
+                    self._goal is not None
+                    and self._goal.uses_planner
+                    and not self._planner_ok_locked(now)
+                ):
+                    self._last_error = "EGO planner heartbeat became stale"
+                    self._goal = None
+                    if self._odom is not None:
+                        self._hold = self._copy_pose(self._odom)
+                    self._set_state_locked(NavState.HOLD)
+                    self._condition.notify_all()
+                    rospy.logerr("I7 navigation stopped: %s", self._last_error)
+                    setpoint = self._hold_setpoint_locked(dt)
+                else:
+                    setpoint = self._navigation_setpoint_locked(dt, now)
+                    self._update_goal_completion_locked()
             elif self._state in {NavState.WAIT_OFFBOARD, NavState.HOLD}:
                 setpoint = self._hold_setpoint_locked(dt)
 
         if setpoint is not None:
             self._setpoint_pub.publish(setpoint)
-        if goal_completed:
-            self._mandatory_stop_pub.publish(Bool(data=True))
         if now - self._last_status_monotonic >= 1.0 / self.status_hz:
             self._publish_status()
 
@@ -421,7 +478,7 @@ class I7NavNode:
         if goal is None or odom is None:
             return self._hold_setpoint_locked(dt)
         distance_m = self._distance(odom, goal)
-        if distance_m <= self.goal_reached_distance_m:
+        if not goal.uses_planner or distance_m <= self.goal_reached_distance_m:
             final_target = PoseData(
                 x=goal.x,
                 y=goal.y,
@@ -430,11 +487,12 @@ class I7NavNode:
                 frame_id=goal.frame_id,
             )
             return self._pose_setpoint_locked(final_target, dt)
-        if not command_fresh:
-            return self._hold_setpoint_locked(dt)
 
         command = self._position_cmd
-        assert command is not None
+        if command is None:
+            # EGO needs a short planning interval after receiving a new goal.
+            # Holding the live pose avoids returning to the pre-goal _hold pose.
+            return self._pose_setpoint_locked(odom, dt)
         command_values = (
             command.position.x,
             command.position.y,
@@ -445,20 +503,39 @@ class I7NavNode:
             command.acceleration.x,
             command.acceleration.y,
             command.acceleration.z,
-            command.yaw,
-            command.yaw_dot,
         )
         if not all(math.isfinite(float(value)) for value in command_values):
             self._last_error = "planner emitted a non-finite position command"
             return self._pose_setpoint_locked(odom, dt)
-        requested_yaw = self._normalize_angle(float(command.yaw))
-        yaw, yaw_rate = self._limited_yaw_locked(requested_yaw, dt)
+        # EGO owns only the collision-free xyz trajectory.  Its traj_server
+        # points yaw along the direction of travel, which makes a backwards
+        # move rotate the aircraft by about 180 degrees.  Keep I7 yaw tied to
+        # the Robot command, just as Owl's independent yaw controller does.
+        requested_yaw = goal.yaw
+
+        if not command_fresh:
+            # This traj_server stops publishing when the polynomial duration
+            # expires.  Keep its last (normally final) collision-free setpoint;
+            # _hold still refers to the pose before this goal and would command
+            # the aircraft to fly back to its starting point.
+            last_planned_target = PoseData(
+                x=float(command.position.x),
+                y=float(command.position.y),
+                z=float(command.position.z),
+                yaw=requested_yaw,
+                frame_id=str(command.header.frame_id or goal.frame_id),
+            )
+            return self._pose_setpoint_locked(last_planned_target, dt)
+
+        yaw, _yaw_rate = self._limited_yaw_locked(requested_yaw, dt)
 
         message = PositionTarget()
         message.header.stamp = rospy.Time.now()
         message.header.frame_id = str(command.header.frame_id or goal.frame_id)
         message.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
-        message.type_mask = 0
+        # Publish one yaw control variable.  Supplying yaw and yaw-rate
+        # together can make PX4 fight two angular commands during translation.
+        message.type_mask = PositionTarget.IGNORE_YAW_RATE
         message.position.x = float(command.position.x)
         message.position.y = float(command.position.y)
         message.position.z = float(command.position.z)
@@ -469,7 +546,7 @@ class I7NavNode:
         message.acceleration_or_force.y = float(command.acceleration.y)
         message.acceleration_or_force.z = float(command.acceleration.z)
         message.yaw = yaw
-        message.yaw_rate = yaw_rate
+        message.yaw_rate = 0.0
         return message
 
     def _hold_setpoint_locked(self, dt: float) -> Optional[PositionTarget]:
@@ -535,9 +612,9 @@ class I7NavNode:
             self._set_state_locked(NavState.HOLD)
             self._condition.notify_all()
 
-    def _update_goal_completion_locked(self) -> bool:
+    def _update_goal_completion_locked(self) -> None:
         if self._odom is None or self._goal is None:
-            return False
+            return
         position_ok = self._distance(self._odom, self._goal) <= self.goal_reached_distance_m
         speed_ok = self._speed(self._odom) <= self.stable_speed_m_s
         yaw_ok = abs(self._normalize_angle(self._goal.yaw - self._odom.yaw)) <= self.goal_yaw_tolerance_rad
@@ -557,8 +634,6 @@ class I7NavNode:
             self._goal = None
             self._set_state_locked(NavState.HOLD)
             self._condition.notify_all()
-            return True
-        return False
 
     def _takeoff_service(self, _request: Trigger.Request) -> TriggerResponse:
         try:
@@ -694,7 +769,6 @@ class I7NavNode:
                 self._set_state_locked(NavState.LANDING)
                 self._condition.notify_all()
 
-            self._mandatory_stop_pub.publish(Bool(data=True))
             rospy.wait_for_service("/mavros/cmd/land", timeout=3.0)
             response = self._land_client(0.0, 0.0, 0.0, 0.0, 0.0)
             if not bool(response.success):
@@ -743,7 +817,6 @@ class I7NavNode:
                 NavState.HOLD if self._control_ready_locked() else NavState.IDLE
             )
             self._condition.notify_all()
-        self._mandatory_stop_pub.publish(Bool(data=True))
         return TriggerResponse(success=True, message="navigation aborted; holding")
 
     def _reinitialize_service(self, _request: Trigger.Request) -> TriggerResponse:
@@ -772,7 +845,6 @@ class I7NavNode:
             self._commanded_yaw = self._odom.yaw
             self._set_state_locked(NavState.IDLE)
             self._condition.notify_all()
-        self._mandatory_stop_pub.publish(Bool(data=True))
         return TriggerResponse(
             success=True,
             message="I7 navigation reinitialized; call takeoff before OFFBOARD",
@@ -785,8 +857,15 @@ class I7NavNode:
         if self._odom is not None:
             self._hold = self._copy_pose(self._odom)
         self._set_state_locked(NavState.MANUAL_TAKEOVER)
-        self._mandatory_stop_pub.publish(Bool(data=True))
         rospy.logwarn("I7 manual takeover latched: %s", reason)
+
+    def _planner_ok_locked(self, now: Optional[float] = None) -> bool:
+        current = time.monotonic() if now is None else float(now)
+        return bool(
+            self._planner_heartbeat_received_monotonic > 0.0
+            and current - self._planner_heartbeat_received_monotonic
+            <= self.planner_heartbeat_max_age_s
+        )
 
     def _publish_status(self, *, force: bool = False) -> None:
         now = time.monotonic()
@@ -809,6 +888,8 @@ class I7NavNode:
                 "manual_takeover_latched": self._manual_takeover_latched,
                 "control_session_active": self._control_session_active,
                 "control_ready": self._control_ready_locked(),
+                "planner_ok": self._planner_ok_locked(now),
+                "planner_heartbeat_topic": self.planner_heartbeat_topic,
                 "odom_ok": odom_fresh,
                 "state_ok": state_fresh,
                 "extended_state_ok": extended_fresh,
@@ -891,6 +972,7 @@ class I7NavNode:
             message.pose.orientation.z = math.sin(goal.yaw / 2.0)
             message.pose.orientation.w = math.cos(goal.yaw / 2.0)
         else:
+            message.pose.orientation.x = 0.0 if goal.uses_planner else 1.0
             message.pose.orientation.w = math.degrees(goal.yaw)
         return message
 
@@ -909,7 +991,7 @@ class I7NavNode:
         )
 
     @staticmethod
-    def _goal_dict(goal: Optional[GoalData]) -> Optional[dict[str, float]]:
+    def _goal_dict(goal: Optional[GoalData]) -> Optional[dict[str, Any]]:
         if goal is None:
             return None
         return {
@@ -917,6 +999,7 @@ class I7NavNode:
             "y_m": goal.y,
             "z_m": goal.z,
             "yaw_deg": math.degrees(goal.yaw),
+            "uses_planner": goal.uses_planner,
         }
 
     @staticmethod

@@ -6,7 +6,7 @@ goal_topic: /cxr_goal
 planner_goal_topic: /move_base_simple/goal
 position_cmd_topic: /position_cmd
 setpoint_topic: /mavros/setpoint_raw/local
-mandatory_stop_topic: /mandatory_stop_to_planner
+planner_heartbeat_topic: /drone_0_traj_server/heartbeat
 
 takeoff_alt_m: 1.0
 max_takeoff_vel_m_s: 0.8
@@ -26,3 +26,7 @@ landing_timeout_s: 90.0
 odom_max_age_s: 1.0
 state_max_age_s: 2.0
 position_cmd_max_age_s: 0.5
+planner_heartbeat_max_age_s: 2.0
+
+# Direct control is reserved for a yaw-only command at the current position.
+direct_goal_max_distance_m: 0.15

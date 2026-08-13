@@ -190,6 +190,7 @@ class I7Controller:
         target_z = float(start["z_m"]) + up_m
         target_yaw = self._normalize_angle(start_yaw - math.radians(yaw))
         self._validate_target_height(target_z)
+        uses_planner = any(value != 0 for value in (x, y, z))
 
         sent_at = time.monotonic()
         self._hardware.publish_goal(
@@ -198,11 +199,13 @@ class I7Controller:
             target_z,
             math.degrees(target_yaw),
             str(start["frame_id"]),
+            use_planner=uses_planner,
         )
         ack = self._hardware.wait_for_goal_ack(
             target_x,
             target_y,
             target_z,
+            uses_planner=uses_planner,
             after_monotonic=sent_at,
             timeout_s=self.GOAL_ACK_TIMEOUT_S,
         )
@@ -230,7 +233,8 @@ class I7Controller:
                 "yaw_deg": math.degrees(target_yaw),
                 "frame_id": str(start["frame_id"]),
             },
-            "goal_ack_source": I7Hardware.PLANNER_GOAL_TOPIC,
+            "control_mode": "ego_planner" if uses_planner else "direct_yaw",
+            "goal_ack_source": I7Hardware.NAV_ACTIVE_GOAL_TOPIC,
             "goal_ack": ack,
         }
 
