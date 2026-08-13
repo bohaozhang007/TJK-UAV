@@ -14,16 +14,16 @@ mission:
   # target must remain at or above the planner's 50cm world-height limit.
   waypoints:
     - name: waypoint_1
-      x_cm: 0.0
-      y_cm: 100.0
-      z_cm: 0.0
-      yaw_deg: 90.0
-
-    - name: waypoint_2
-      x_cm: 200.0
-      y_cm: -250.0
+      x_cm: -150.0
+      y_cm: 0.0
       z_cm: 0.0
       yaw_deg: 0.0
+
+    # - name: waypoint_2
+    #   x_cm: 200.0
+    #   y_cm: -250.0
+    #   z_cm: 0.0
+    #   yaw_deg: 0.0
 
 
 # Motion limits and pixel-error conversion used while tracking the target.
