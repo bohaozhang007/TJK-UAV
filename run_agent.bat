@@ -56,6 +56,6 @@ if "%USE_SAM3%"=="1" (
 )
 
 :sam3_ready
-echo [START] Starting Agent v17...
-"%CONDA_EXE%" run --no-capture-output -n yolo python "%SCRIPT_DIR%src\agent\tjk\v17.py" !AGENT_ARGS!
+echo [START] Starting Agent v18...
+"%CONDA_EXE%" run --no-capture-output -n yolo python "%SCRIPT_DIR%src\agent\tjk\v18.py" !AGENT_ARGS!
 exit /b %ERRORLEVEL%
