@@ -23,10 +23,6 @@
     <arg name="flight_type" value="1"/>
   </include>
 
-  <!-- Override the upstream 2 m ceiling without editing EGO's source files. -->
-  <param name="/drone_0_ego_planner_node/grid_map/virtual_ceil"
-         type="double" value="3.3"/>
-
   <node pkg="i7_nav" type="i7_nav_node.py" name="i7_nav" output="screen">
     <rosparam command="load" file="$(find i7_nav)/config/i7_nav.yaml"/>
   </node>

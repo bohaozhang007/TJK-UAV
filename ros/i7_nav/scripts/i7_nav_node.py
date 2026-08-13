@@ -96,9 +96,8 @@ class I7NavNode:
             max(1.0, float(rospy.get_param("~max_yaw_rate_deg_s", 60.0)))
         )
         self.min_height_m = float(rospy.get_param("~min_height_m", 0.5))
-        self.max_height_m = float(rospy.get_param("~max_height_m", 3.0))
         self.goal_reached_distance_m = max(
-            0.02, float(rospy.get_param("~goal_reached_distance_m", 0.10))
+            0.02, float(rospy.get_param("~goal_reached_distance_m", 0.15))
         )
         self.goal_yaw_tolerance_rad = math.radians(
             max(0.5, float(rospy.get_param("~goal_yaw_tolerance_deg", 5.0)))
@@ -107,7 +106,7 @@ class I7NavNode:
             0.01, float(rospy.get_param("~stable_speed_m_s", 0.20))
         )
         self.stable_samples_required = max(
-            1, int(rospy.get_param("~stable_samples", 5))
+            1, int(rospy.get_param("~stable_samples", 3))
         )
         self.takeoff_timeout_s = max(
             5.0, float(rospy.get_param("~takeoff_timeout_s", 120.0))
@@ -131,10 +130,8 @@ class I7NavNode:
             0.01, float(rospy.get_param("~direct_goal_max_distance_m", 0.15))
         )
 
-        if self.max_height_m <= self.min_height_m:
-            raise ValueError("max_height_m must be greater than min_height_m")
-        if not self.min_height_m <= self.takeoff_alt_m <= self.max_height_m:
-            raise ValueError("takeoff_alt_m must be inside the configured height range")
+        if self.takeoff_alt_m < self.min_height_m:
+            raise ValueError("takeoff_alt_m must not be below min_height_m")
 
         self._state = NavState.IDLE
         self._state_changed_monotonic = time.monotonic()
@@ -339,13 +336,11 @@ class I7NavNode:
 
             target_z = float(message.pose.position.z)
             min_z = self._ground_z + self.min_height_m
-            max_z = self._ground_z + self.max_height_m
-            if target_z < min_z or target_z > max_z:
+            if target_z < min_z:
                 rospy.logerr(
-                    "Reject I7 goal z=%.3f outside [%.3f, %.3f]",
+                    "Reject I7 goal z=%.3f below minimum %.3f",
                     target_z,
                     min_z,
-                    max_z,
                 )
                 return
 
@@ -416,7 +411,20 @@ class I7NavNode:
         self._last_control_monotonic = now
         setpoint: Optional[PositionTarget] = None
         with self._condition:
-            if self._state == NavState.TAKEOFF:
+            actively_controlling = self._state in {
+                NavState.WAIT_OFFBOARD,
+                NavState.TAKEOFF,
+                NavState.HOLD,
+                NavState.NAVIGATING,
+            }
+            telemetry_error = self._telemetry_error_locked(now)
+            if actively_controlling and telemetry_error is not None:
+                self._goal = None
+                self._last_error = telemetry_error
+                self._set_state_locked(NavState.ERROR)
+                self._condition.notify_all()
+                rospy.logerr("I7 stopped publishing setpoints: %s", telemetry_error)
+            elif self._state == NavState.TAKEOFF:
                 setpoint = self._takeoff_setpoint_locked(dt)
                 self._update_takeoff_completion_locked()
             elif self._state == NavState.NAVIGATING:
@@ -645,6 +653,10 @@ class I7NavNode:
                 if self._control_ready_locked() and self._odom is not None:
                     self._hold = self._copy_pose(self._odom)
                     self._set_state_locked(NavState.HOLD)
+                elif self._on_ground_disarmed_locked():
+                    # A rejected pre-OFFBOARD takeoff request must remain safe to
+                    # retry after the pilot switches back to POSITION.
+                    self._set_state_locked(NavState.IDLE)
                 elif not self._manual_takeover_latched:
                     self._set_state_locked(NavState.ERROR)
                 self._condition.notify_all()
@@ -660,15 +672,13 @@ class I7NavNode:
                 )
             if self._odom is None:
                 raise RuntimeError("odometry is unavailable")
-            airborne = self._airborne_locked()
-            if airborne and self._control_ready_locked():
-                self._hold = self._copy_pose(self._odom)
-                self._control_session_active = True
-                self._set_state_locked(NavState.HOLD)
-                return TriggerResponse(
-                    success=True,
-                    message="already airborne and OFFBOARD; holding current pose",
+            initial_mode = str((self._mavros_state or {}).get("mode") or "").upper()
+            if initial_mode == "OFFBOARD":
+                raise RuntimeError(
+                    "takeoff must be requested before OFFBOARD; switch to POSITION, "
+                    "call takeoff, then select OFFBOARD"
                 )
+            airborne = self._airborne_locked()
 
             if not airborne:
                 landed_state = int(
@@ -900,7 +910,7 @@ class I7NavNode:
                 "airborne": self._airborne_locked(),
                 "ground_z_m": self._ground_z,
                 "min_height_m": self.min_height_m,
-                "max_height_m": self.max_height_m,
+                "max_height_m": None,
                 "takeoff_alt_m": self.takeoff_alt_m,
                 "active_goal": self._goal_dict(self._goal),
                 "last_error": self._last_error,
@@ -912,24 +922,34 @@ class I7NavNode:
 
     def _require_telemetry_locked(self) -> None:
         now = time.monotonic()
+        error = self._telemetry_error_locked(now)
+        if error is not None:
+            raise RuntimeError(error)
+
+    def _telemetry_error_locked(self, now: Optional[float] = None) -> Optional[str]:
+        current = time.monotonic() if now is None else float(now)
         missing = []
-        if not self._fresh(self._odom, now, self.odom_max_age_s):
+        if not self._fresh(self._odom, current, self.odom_max_age_s):
             missing.append(self.odom_topic)
-        if not self._fresh_mapping(self._mavros_state, now, self.state_max_age_s):
+        if not self._fresh_mapping(
+            self._mavros_state, current, self.state_max_age_s
+        ):
             missing.append("/mavros/state")
         if not self._fresh_mapping(
-            self._extended_state, now, self.state_max_age_s
+            self._extended_state, current, self.state_max_age_s
         ):
             missing.append("/mavros/extended_state")
         if not bool((self._mavros_state or {}).get("connected", False)):
             missing.append("mavros_connected")
         if missing:
-            raise RuntimeError("missing or stale flight telemetry: " + ", ".join(missing))
+            return "missing or stale flight telemetry: " + ", ".join(missing)
+        return None
 
     def _control_ready_locked(self) -> bool:
         state = self._mavros_state or {}
         return bool(
             not self._manual_takeover_latched
+            and self._telemetry_error_locked() is None
             and state.get("connected") is True
             and state.get("armed") is True
             and str(state.get("mode") or "").upper() == "OFFBOARD"

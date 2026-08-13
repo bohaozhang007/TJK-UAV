@@ -26,6 +26,7 @@ class I7Controller:
     OUTPUT_WIDTH = 640
     OUTPUT_HEIGHT = 360
     JPEG_QUALITY = 85
+    # Keep Robot completion criteria identical to i7_nav.yaml.
     POSITION_TOLERANCE_CM = 15.0
     YAW_TOLERANCE_DEG = 5.0
     LINEAR_SPEED_TOLERANCE_CM_S = 20.0
@@ -386,14 +387,12 @@ class I7Controller:
         health = self.health()
         ground_z = health.get("ground_z_m")
         min_height = health.get("min_height_m")
-        max_height = health.get("max_height_m")
-        if ground_z is None or min_height is None or max_height is None:
+        if ground_z is None or min_height is None:
             raise RuntimeError("I7 ground-height safety boundary is unavailable")
         min_z = float(ground_z) + float(min_height)
-        max_z = float(ground_z) + float(max_height)
-        if target_z < min_z or target_z > max_z:
+        if target_z < min_z:
             raise ValueError(
-                f"I7 target z={target_z:.2f}m is outside [{min_z:.2f}, {max_z:.2f}]m"
+                f"I7 target z={target_z:.2f}m is below minimum {min_z:.2f}m"
             )
 
     def _abort_after_command_error(self, operation: str, error: Exception) -> None:
