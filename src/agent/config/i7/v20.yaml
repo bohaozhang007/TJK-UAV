@@ -30,7 +30,7 @@ mission:
       yaw_deg: 0.0
       # true: only verify transit/arrival, then continue to the next waypoint.
       # false: run SEARCH/TRACK/SCAN after arrival.
-      only_arrive: true
+      only_arrive: false
 
     - name: waypoint_2
       x_cm: 350.0
@@ -117,7 +117,7 @@ select:
 track:
   # true: skip iterative TRACK, fly forward once from the aligned best view,
   # then use the reached pose as the SCAN center. false: keep the TRACK flow.
-  skip: true
+  skip: false
   skip_forward_cm: 20.0
   target_stop_ratio: 0.40
   yaw_only_threshold_deg: 10.0
