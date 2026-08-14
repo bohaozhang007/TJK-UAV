@@ -1,0 +1,104 @@
+# Wait after every motion action before reading the resulting pose (seconds).
+action_sleep_s: 1.0
+
+# Multi-waypoint mission in a fixed frame whose origin is the first takeoff
+# hover pose. XYZ uses centimetres; positive yaw is clockwise in degrees.
+mission:
+  frame: takeoff_world
+  position_unit: cm
+  yaw_unit: deg
+
+  # continue: return to the current waypoint and visit the next waypoint.
+  # return_home: return home after the first waypoint task failure.
+  on_task_failure: continue
+
+  # Replace these example waypoints with site-specific collision-free points.
+  # z_cm=0 keeps the takeoff hover altitude. After frame conversion, every
+  # target must remain at or above the planner's 50cm world-height limit.
+  waypoints:
+    - name: waypoint_1
+      x_cm: 0.0
+      y_cm: -150.0
+      z_cm: 50.0
+      yaw_deg: 0.0
+
+    # - name: waypoint_2
+    #   x_cm: 200.0
+    #   y_cm: -250.0
+    #   z_cm: 0.0
+    #   yaw_deg: 0.0
+
+
+# Motion limits and pixel-error conversion used while tracking the target.
+motion:
+  # Forward/backward action.
+  max_fb_step_cm: 30.0
+  # Visual approach deadband; Server pose tolerance filters final XYZ jointly.
+  fb_stop_step_cm: 5.0 # 5.0
+  backward_ratio: 0.5
+
+  # Vertical action.
+  max_z_step_cm: 30.0 # 30.0
+  z_cm_per_pixel: 0.16 # 0.15
+
+  # Yaw action.
+  max_rotate_deg: 30.0 # 45.0
+  rotate_deg_per_pixel: 0.1 # 0.1
+
+# Flight safety thresholds.
+safety:
+  safe_z_cm: 20.0
+  depth_safe_distance_cm: 120.0
+
+# Search pattern at each waypoint.
+search:
+  rotation_step_deg: 30.0
+  height_offset_cm: 100.0
+  # Lock each 360-degree turn to the XYZ captured at its first view.
+  align_xyz_to_first_view: true
+
+# Generic candidate filtering after detector thresholding and NMS.
+detection:
+  max_candidates_per_frame: 5
+
+# Rank robust best views after de-duplicating prompt aliases and rejecting
+# detections that are too close to an image edge.
+select:
+  dedup_iou_threshold: 0.80
+  min_edge_margin_ratio: 0.08
+  area_top_k: 10
+  confidence_top_k: 5
+  max_view_attempts: 3
+
+# Target approach and convergence settings.
+track:
+  target_stop_ratio: 0.40
+  yaw_only_threshold_deg: 10.0
+  max_exec_iters: 200
+
+# Circular multi-view scan settings.
+scan:
+  num_points: 12
+  radius_cm: 20.0 # 30.0
+  yaw_unit_deg: 4.0
+
+# Detector parameters intended for experiment-time tuning.
+# Every listed value is required; implementation paths and device settings
+# are kept inside the detector adapters.
+detectors:
+  yolo:
+    input_size: 640
+    score_threshold: 0.1
+    nms_iou_threshold: 0.70
+    fp16: true
+
+  grounding_dino:
+    box_threshold: 0.35
+    text_threshold: 0.25
+
+  sam3:
+    confidence_threshold: 0.50
+
+# Tracker-specific parameters intended for experiment-time tuning.
+trackers:
+  sam2: {}
