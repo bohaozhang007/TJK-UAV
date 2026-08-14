@@ -10,7 +10,7 @@ planner_heartbeat_topic: /drone_0_traj_server/heartbeat
 
 takeoff_alt_m: 1.0
 max_takeoff_vel_m_s: 0.8
-max_yaw_rate_deg_s: 20.0
+max_yaw_rate_deg_s: 5.0
 
 # Relative to the ground height captured by the I7 navigation node.
 # There is intentionally no software upper-height limit.
