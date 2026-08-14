@@ -98,6 +98,9 @@ detection:
 # Rank robust best views after de-duplicating prompt aliases and rejecting
 # detections that are too close to an image edge.
 select:
+  # Whether target distance from the image center participates in view
+  # selection. false keeps the AREA/CONFIDENCE result without CENTER ranking.
+  use_center_metric: false
   dedup_iou_threshold: 0.80
   min_edge_margin_ratio: 0.08
   area_top_k: 10

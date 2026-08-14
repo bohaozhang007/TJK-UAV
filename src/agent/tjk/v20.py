@@ -371,6 +371,15 @@ class TJKAgent:
             integer=True,
             minimum=1.0,
         )
+        self.select_use_center_metric = select_config.get(
+            "use_center_metric",
+            False,
+        )
+        if not isinstance(self.select_use_center_metric, bool):
+            raise ValueError(
+                "select.use_center_metric must be boolean, got "
+                f"{self.select_use_center_metric!r}"
+            )
 
         # safe thresh
         self.safe_z_cm = _config_number(
@@ -2214,15 +2223,19 @@ class TJKAgent:
         for candidate in candidates:
             view_idx = int(candidate["view_idx"])
             current = selected_by_view.get(view_idx)
-            if current is None or (
+            candidate_rank = (
                 float(candidate["box_area_ratio"]),
                 float(candidate["confidence"]),
-                -float(candidate["center_distance"]),
-            ) > (
+            )
+            current_rank = (
                 float(current["box_area_ratio"]),
                 float(current["confidence"]),
-                -float(current["center_distance"]),
-            ):
+            ) if current is not None else None
+            if self.select_use_center_metric:
+                candidate_rank += (-float(candidate["center_distance"]),)
+                if current_rank is not None:
+                    current_rank += (-float(current["center_distance"]),)
+            if current is None or candidate_rank > current_rank:
                 selected_by_view[view_idx] = candidate
 
         for candidate in candidates:
@@ -2295,6 +2308,13 @@ class TJKAgent:
             context,
             confidence_ranked,
         )
+
+        if not self.select_use_center_metric:
+            self._log(
+                f"[SELECT-RANK][CENTER] context={context} disabled; "
+                "keep CONFIDENCE ranking."
+            )
+            return confidence_ranked
 
         center_ranked = sorted(
             confidence_ranked,
