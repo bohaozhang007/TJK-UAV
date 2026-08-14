@@ -1,0 +1,19 @@
+# Manual-control tuning; commonly adjusted during operation.
+keyboard:
+  speed_percent: 30
+  yaw_speed_percent: 30
+  frequency_hz: 15.0
+  min_command_percent: 1
+  max_command_percent: 100
+  min_frequency_hz: 1.0
+  max_frequency_hz: 30.0
+
+# Server binding and stream infrastructure; normally stable after deployment.
+server:
+  default_robot: ue
+  host: 0.0.0.0
+  port: 8765
+  keepalive_interval_s: 10.0
+  video_stream_default_fps: 10.0
+  video_stream_min_fps: 1.0
+  video_stream_max_fps: 30.0

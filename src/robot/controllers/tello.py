@@ -7,18 +7,39 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-from ..hardware.tello import MOVE_SPEED as TELLO_MOVE_SPEED, Tello
+from ..config_loader import load_robot_config, required_number, required_section
+from ..hardware.tello import Tello
 
 
 class TelloController:
     """Thread-safe controller for one physical Tello drone."""
 
-    DEFAULT_TAKEOFF_HEIGHT_CM = 100.0
-    MOVE_SPEED = TELLO_MOVE_SPEED
-    POSITION_TOLERANCE_CM = 20.0
-    YAW_TOLERANCE_DEG = 1.0
-
-    def __init__(self, image_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        image_dir: str | Path | None = None,
+        *,
+        config_path: str | Path | None = None,
+    ) -> None:
+        config = required_section(
+            load_robot_config("tello", config_path),
+            "controller",
+        )
+        self._takeoff_height_cm = required_number(
+            config, "takeoff_height_cm", minimum=0.0
+        )
+        self._move_speed = required_number(
+            config,
+            "move_speed_percent",
+            integer=True,
+            minimum=1.0,
+            maximum=100.0,
+        )
+        self._position_tolerance_cm = required_number(
+            config, "position_tolerance_cm", minimum=0.0
+        )
+        self._yaw_tolerance_deg = required_number(
+            config, "yaw_tolerance_deg", minimum=0.0
+        )
         self._lock = threading.RLock()
         self._frame_lock = threading.RLock()
         self._tello: Tello | None = None
@@ -78,7 +99,7 @@ class TelloController:
             self._airborne = True
             updated_axes = self._refresh_telemetry_pose(tello)
             if "z" not in updated_axes:
-                self._pose["z"] = self.DEFAULT_TAKEOFF_HEIGHT_CM
+                self._pose["z"] = self._takeoff_height_cm
             return {
                 "ok": True,
                 "message": "takeoff done",
@@ -143,7 +164,7 @@ class TelloController:
                 "x": int(x),
                 "y": int(y),
                 "z": int(z),
-                "speed": self.MOVE_SPEED,
+                "speed": self._move_speed,
             }
             tello.go_xyz_speed(
                 command["x"],
@@ -214,8 +235,8 @@ class TelloController:
     def get_motion_tolerances(self) -> dict[str, Any]:
         """Return conservative filters for Tello's integer SDK commands."""
         return {
-            "position_tolerance_cm": self.POSITION_TOLERANCE_CM,
-            "yaw_tolerance_deg": self.YAW_TOLERANCE_DEG,
+            "position_tolerance_cm": self._position_tolerance_cm,
+            "yaw_tolerance_deg": self._yaw_tolerance_deg,
             "position_error_metric": "euclidean_3d",
             "source": "sdk_minimum_command",
         }

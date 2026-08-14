@@ -10,37 +10,107 @@ from typing import Any
 import cv2
 import numpy as np
 
+from ..config_loader import load_robot_config, required_number, required_section
 from ..hardware.ue import SimDrone
 
 
 class UEController:
     """Adapter from the Robot Server controller protocol to SimDrone."""
 
-    MOVE_SPEED = SimDrone.MOVE_SPEED
-    POSITION_TOLERANCE_CM = 5.0
-    VERTICAL_TOLERANCE_CM = 4.0
-    STABLE_SPEED_CM_S = 3.0
-    POSITION_STABLE_SAMPLES = 4
-    YAW_TOLERANCE_DEG = 2.0
-    YAW_STABLE_RATE_DEG_S = 5.0
-    YAW_STABLE_SAMPLES = 4
-    CONTROL_HZ = 40.0
-
-    # Faster response away from the target, with stronger derivative damping
-    # near the target. Position/yaw tolerances remain unchanged.
-    TRANSLATION_KP = 0.65
-    TRANSLATION_KD = 0.16
-    YAW_KP = 2.2
-    YAW_KD = 0.12
-    # SimDrone maps 50% yaw to the Blueprint's full normalized yaw input.
-    MAX_YAW_COMMAND = 50.0
-
     def __init__(
         self,
         image_dir: str | Path | None = None,
         simulator: SimDrone | None = None,
+        *,
+        config_path: str | Path | None = None,
     ) -> None:
-        self._sim = simulator or SimDrone()
+        config = load_robot_config("ue", config_path)
+        controller_config = required_section(config, "controller")
+        self._move_speed = required_number(
+            controller_config,
+            "move_speed_percent",
+            integer=True,
+            minimum=1.0,
+            maximum=100.0,
+        )
+        self._position_tolerance_cm = required_number(
+            controller_config, "position_tolerance_cm", minimum=0.0
+        )
+        self._vertical_tolerance_cm = required_number(
+            controller_config, "vertical_tolerance_cm", minimum=0.0
+        )
+        self._stable_speed_cm_s = required_number(
+            controller_config, "stable_speed_cm_s", minimum=0.0
+        )
+        self._position_stable_samples = required_number(
+            controller_config,
+            "position_stable_samples",
+            integer=True,
+            minimum=1.0,
+        )
+        self._yaw_tolerance_deg = required_number(
+            controller_config, "yaw_tolerance_deg", minimum=0.0
+        )
+        self._yaw_stable_rate_deg_s = required_number(
+            controller_config, "yaw_stable_rate_deg_s", minimum=0.0
+        )
+        self._yaw_stable_samples = required_number(
+            controller_config,
+            "yaw_stable_samples",
+            integer=True,
+            minimum=1.0,
+        )
+        self._control_hz = required_number(
+            controller_config, "control_hz", minimum=1e-6
+        )
+        self._translation_kp = required_number(
+            controller_config, "translation_kp", minimum=0.0
+        )
+        self._translation_kd = required_number(
+            controller_config, "translation_kd", minimum=0.0
+        )
+        self._yaw_kp = required_number(
+            controller_config, "yaw_kp", minimum=0.0
+        )
+        self._yaw_kd = required_number(
+            controller_config, "yaw_kd", minimum=0.0
+        )
+        self._max_yaw_command = required_number(
+            controller_config,
+            "max_yaw_command_percent",
+            minimum=0.0,
+            maximum=100.0,
+        )
+        self._translation_timeout_speed_floor = required_number(
+            controller_config,
+            "translation_timeout_speed_floor_cm_s",
+            minimum=1e-6,
+        )
+        self._translation_timeout_scale = required_number(
+            controller_config, "translation_timeout_scale", minimum=1e-6
+        )
+        self._rotation_timeout_deg_s = required_number(
+            controller_config, "rotation_timeout_deg_s", minimum=1e-6
+        )
+        self._motion_timeout_padding_s = required_number(
+            controller_config, "motion_timeout_padding_s", minimum=0.0
+        )
+        self._default_motion_timeout_s = required_number(
+            controller_config, "default_motion_timeout_s", minimum=1e-6
+        )
+        self._max_motion_timeout_s = required_number(
+            controller_config, "max_motion_timeout_s", minimum=1e-6
+        )
+        self._rotate_default_timeout_s = required_number(
+            controller_config, "rotate_default_timeout_s", minimum=1e-6
+        )
+        self._rotate_max_timeout_s = required_number(
+            controller_config, "rotate_max_timeout_s", minimum=1e-6
+        )
+        self._control_sample_dt_min_s = required_number(
+            controller_config, "control_sample_dt_min_s", minimum=1e-9
+        )
+        self._sim = simulator or SimDrone(config=config)
         self._operation_lock = threading.RLock()
         self._image_lock = threading.RLock()
         self._xy_origin: tuple[float, float] | None = None
@@ -149,7 +219,7 @@ class UEController:
                 "x": int(x),
                 "y": int(y),
                 "z": int(z),
-                "speed": self.MOVE_SPEED,
+                "speed": self._move_speed,
             }
             start = self._sim.get_pose()
             if not any((command["x"], command["y"], command["z"])):
@@ -175,8 +245,17 @@ class UEController:
                 command["x"] ** 2 + command["y"] ** 2 + command["z"] ** 2
             )
             timeout_s = min(
-                120.0,
-                max(8.0, distance / max(1.0, float(command["speed"])) * 4.0 + 5.0),
+                self._max_motion_timeout_s,
+                max(
+                    self._default_motion_timeout_s,
+                    distance
+                    / max(
+                        self._translation_timeout_speed_floor,
+                        float(command["speed"]),
+                    )
+                    * self._translation_timeout_scale
+                    + self._motion_timeout_padding_s,
+                ),
             )
             pose = self._fly_to_position(target, command["speed"], timeout_s)
             return {
@@ -202,7 +281,7 @@ class UEController:
                 "y": int(y),
                 "z": int(z),
                 "yaw": int(yaw),
-                "speed": self.MOVE_SPEED,
+                "speed": self._move_speed,
             }
             start = self._sim.get_pose()
             if not any(
@@ -239,12 +318,25 @@ class UEController:
                 + command["z"] ** 2
             )
             translation_timeout_s = (
-                distance / max(1.0, float(command["speed"])) * 4.0 + 5.0
+                distance
+                / max(
+                    self._translation_timeout_speed_floor,
+                    float(command["speed"]),
+                )
+                * self._translation_timeout_scale
+                + self._motion_timeout_padding_s
             )
-            rotation_timeout_s = abs(command["yaw"]) / 20.0 + 5.0
+            rotation_timeout_s = (
+                abs(command["yaw"]) / self._rotation_timeout_deg_s
+                + self._motion_timeout_padding_s
+            )
             timeout_s = min(
-                120.0,
-                max(8.0, translation_timeout_s, rotation_timeout_s),
+                self._max_motion_timeout_s,
+                max(
+                    self._default_motion_timeout_s,
+                    translation_timeout_s,
+                    rotation_timeout_s,
+                ),
             )
             pose = self._fly_to_position(
                 target,
@@ -275,7 +367,14 @@ class UEController:
 
             start = self._sim.get_pose()
             target_yaw = self._normalize_yaw(float(start["yaw"]) + angle)
-            timeout_s = min(60.0, max(6.0, abs(angle) / 20.0 + 5.0))
+            timeout_s = min(
+                self._rotate_max_timeout_s,
+                max(
+                    self._rotate_default_timeout_s,
+                    abs(angle) / self._rotation_timeout_deg_s
+                    + self._motion_timeout_padding_s,
+                ),
+            )
             pose = self._rotate_to_yaw(target_yaw, timeout_s)
             return {
                 "ok": True,
@@ -304,10 +403,10 @@ class UEController:
         """Return a conservative 3D bound for UE pose completion."""
         return {
             "position_tolerance_cm": math.hypot(
-                self.POSITION_TOLERANCE_CM,
-                self.VERTICAL_TOLERANCE_CM,
+                self._position_tolerance_cm,
+                self._vertical_tolerance_cm,
             ),
-            "yaw_tolerance_deg": self.YAW_TOLERANCE_DEG,
+            "yaw_tolerance_deg": self._yaw_tolerance_deg,
             "position_error_metric": "euclidean_3d",
             "source": "pose_completion_enclosing_bound",
         }
@@ -376,7 +475,7 @@ class UEController:
         timeout_s: float,
         require_yaw: bool = False,
     ) -> dict[str, float]:
-        period = 1.0 / self.CONTROL_HZ
+        period = 1.0 / self._control_hz
         deadline = time.monotonic() + float(timeout_s)
         previous_pose = self._sim.get_pose()
         previous_time = time.monotonic()
@@ -387,7 +486,10 @@ class UEController:
             while time.monotonic() < deadline:
                 loop_start = time.monotonic()
                 pose = self._sim.get_pose()
-                sample_dt = max(1e-3, loop_start - previous_time)
+                sample_dt = max(
+                    self._control_sample_dt_min_s,
+                    loop_start - previous_time,
+                )
                 vx_world = (float(pose["x"]) - float(previous_pose["x"])) / sample_dt
                 vy_world = (float(pose["y"]) - float(previous_pose["y"])) / sample_dt
                 vz = (float(pose["z"]) - float(previous_pose["z"])) / sample_dt
@@ -408,10 +510,10 @@ class UEController:
                 horizontal_error = math.hypot(dx, dy)
                 horizontal_speed = math.hypot(vx_world, vy_world)
                 position_stable = (
-                    horizontal_error <= self.POSITION_TOLERANCE_CM
-                    and abs(dz) <= self.VERTICAL_TOLERANCE_CM
-                    and horizontal_speed <= self.STABLE_SPEED_CM_S
-                    and abs(vz) <= self.STABLE_SPEED_CM_S
+                    horizontal_error <= self._position_tolerance_cm
+                    and abs(dz) <= self._vertical_tolerance_cm
+                    and horizontal_speed <= self._stable_speed_cm_s
+                    and abs(vz) <= self._stable_speed_cm_s
                 )
                 position_stable_samples = (
                     position_stable_samples + 1 if position_stable else 0
@@ -421,17 +523,17 @@ class UEController:
                     target["yaw"] - float(pose["yaw"])
                 )
                 yaw_stable = (
-                    abs(yaw_error) <= self.YAW_TOLERANCE_DEG
-                    and abs(yaw_rate) <= self.YAW_STABLE_RATE_DEG_S
+                    abs(yaw_error) <= self._yaw_tolerance_deg
+                    and abs(yaw_rate) <= self._yaw_stable_rate_deg_s
                 )
                 yaw_stable_samples = (
                     yaw_stable_samples + 1 if yaw_stable else 0
                 )
                 if (
-                    position_stable_samples >= self.POSITION_STABLE_SAMPLES
+                    position_stable_samples >= self._position_stable_samples
                     and (
                         not require_yaw
-                        or yaw_stable_samples >= self.YAW_STABLE_SAMPLES
+                        or yaw_stable_samples >= self._yaw_stable_samples
                     )
                 ):
                     return pose
@@ -440,13 +542,13 @@ class UEController:
                 command_y = self._pd_command(right_error, right_speed, max_command)
                 command_z = self._pd_command(dz, vz, max_command)
                 command_yaw = max(
-                    -self.MAX_YAW_COMMAND,
+                    -self._max_yaw_command,
                     min(
-                        self.MAX_YAW_COMMAND,
-                        self.YAW_KP * yaw_error - self.YAW_KD * yaw_rate,
+                        self._max_yaw_command,
+                        self._yaw_kp * yaw_error - self._yaw_kd * yaw_rate,
                     ),
                 )
-                if abs(yaw_error) <= self.YAW_TOLERANCE_DEG:
+                if abs(yaw_error) <= self._yaw_tolerance_deg:
                     command_yaw = 0.0
 
                 self._sim.set_velocity(command_x, command_y, command_z, command_yaw)
@@ -468,7 +570,7 @@ class UEController:
         )
 
     def _rotate_to_yaw(self, target_yaw: float, timeout_s: float) -> dict[str, float]:
-        period = 1.0 / self.CONTROL_HZ
+        period = 1.0 / self._control_hz
         deadline = time.monotonic() + float(timeout_s)
         previous_pose = self._sim.get_pose()
         previous_time = time.monotonic()
@@ -478,7 +580,10 @@ class UEController:
             while time.monotonic() < deadline:
                 loop_start = time.monotonic()
                 pose = self._sim.get_pose()
-                sample_dt = max(1e-3, loop_start - previous_time)
+                sample_dt = max(
+                    self._control_sample_dt_min_s,
+                    loop_start - previous_time,
+                )
                 yaw_delta = self._normalize_yaw(
                     float(pose["yaw"]) - float(previous_pose["yaw"])
                 )
@@ -486,21 +591,21 @@ class UEController:
                 error = self._normalize_yaw(target_yaw - float(pose["yaw"]))
 
                 stable = (
-                    abs(error) <= self.YAW_TOLERANCE_DEG
-                    and abs(yaw_rate) <= self.YAW_STABLE_RATE_DEG_S
+                    abs(error) <= self._yaw_tolerance_deg
+                    and abs(yaw_rate) <= self._yaw_stable_rate_deg_s
                 )
                 stable_samples = stable_samples + 1 if stable else 0
-                if stable_samples >= self.YAW_STABLE_SAMPLES:
+                if stable_samples >= self._yaw_stable_samples:
                     return pose
 
                 command_yaw = max(
-                    -self.MAX_YAW_COMMAND,
+                    -self._max_yaw_command,
                     min(
-                        self.MAX_YAW_COMMAND,
-                        self.YAW_KP * error - self.YAW_KD * yaw_rate,
+                        self._max_yaw_command,
+                        self._yaw_kp * error - self._yaw_kd * yaw_rate,
                     ),
                 )
-                if abs(error) <= self.YAW_TOLERANCE_DEG:
+                if abs(error) <= self._yaw_tolerance_deg:
                     command_yaw = 0.0
                 self._sim.set_velocity(0, 0, 0, command_yaw)
                 previous_pose = pose
@@ -539,11 +644,10 @@ class UEController:
         if not self._sim.airborne:
             raise RuntimeError("drone is not airborne, call takeoff first")
 
-    @classmethod
-    def _pd_command(cls, error: float, velocity: float, limit: int) -> float:
+    def _pd_command(self, error: float, velocity: float, limit: int) -> float:
         command = (
-            cls.TRANSLATION_KP * float(error)
-            - cls.TRANSLATION_KD * float(velocity)
+            self._translation_kp * float(error)
+            - self._translation_kd * float(velocity)
         )
         return max(-float(limit), min(float(limit), command))
 

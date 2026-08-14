@@ -12,32 +12,75 @@ import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from ..config_loader import (
+    load_robot_config,
+    required_number,
+    required_section,
+    required_string,
+)
+
 
 class OwlHardware:
     """Thin ROS1 adapter for the topics exposed by the OWL flight stack."""
 
-    ODOM_TOPIC = "/mavros/local_position/odom"
-    RGB_TOPIC = "/visbot_media_g/gimbal_camera/image_raw/compressed"
-    STATE_TOPIC = "/mavros/state"
-    EXTENDED_STATE_TOPIC = "/mavros/extended_state"
-    BATTERY_TOPIC = "/mavros/battery"
-    CONTROL_TOPIC = "/control"
-    GOAL_TOPIC = "/move_base_simple/goal"
-    YAW_TARGET_TOPIC = "/reference/yawsetpoint"
-    PLANNING_GOAL_TOPIC = "/planning/goal"
-    CAPTAIN_TARGET_POSE_TOPIC = "/captain/target_pose"
-
-    READY_TIMEOUT_S = 10.0
-    STATE_MAX_AGE_S = 2.0
-    ODOM_MAX_AGE_S = 2.0
-    RGB_MAX_AGE_S = 2.0
-    BATTERY_MAX_AGE_S = 10.0
-
     LANDED_STATE_ON_GROUND = 1
     LANDED_STATE_IN_AIR = 2
 
-    def __init__(self, node_name: str = "owl_robot_server") -> None:
-        self.node_name = node_name
+    def __init__(
+        self,
+        *,
+        node_name: Optional[str] = None,
+        config: Optional[dict] = None,
+        config_path: Optional[str] = None,
+    ) -> None:
+        config = config or load_robot_config("owl", config_path)
+        hardware_config = required_section(config, "hardware")
+        topics = required_section(config, "topics")
+        self.node_name = node_name or required_string(hardware_config, "node_name")
+        self.odom_topic = required_string(topics, "odom")
+        self.rgb_topic = required_string(topics, "rgb")
+        self.state_topic = required_string(topics, "state")
+        self.extended_state_topic = required_string(topics, "extended_state")
+        self.battery_topic = required_string(topics, "battery")
+        self.control_topic = required_string(topics, "control")
+        self.goal_topic = required_string(topics, "goal")
+        self.yaw_target_topic = required_string(topics, "yaw_target")
+        self.planning_goal_topic = required_string(topics, "planning_goal")
+        self.captain_target_pose_topic = required_string(
+            topics, "captain_target_pose"
+        )
+        self.ready_timeout_s = required_number(
+            hardware_config, "ready_timeout_s", minimum=1e-6
+        )
+        self.state_max_age_s = required_number(
+            hardware_config, "state_max_age_s", minimum=1e-6
+        )
+        self.odom_max_age_s = required_number(
+            hardware_config, "odom_max_age_s", minimum=1e-6
+        )
+        self.rgb_max_age_s = required_number(
+            hardware_config, "rgb_max_age_s", minimum=1e-6
+        )
+        self.battery_max_age_s = required_number(
+            hardware_config, "battery_max_age_s", minimum=1e-6
+        )
+        self.condition_wait_timeout_s = required_number(
+            hardware_config, "condition_wait_timeout_s", minimum=1e-6
+        )
+        self.goal_ack_position_tolerance_m = required_number(
+            hardware_config,
+            "goal_ack_position_tolerance_m",
+            minimum=0.0,
+        )
+        self.control_queue_size = required_number(
+            hardware_config, "control_queue_size", integer=True, minimum=1
+        )
+        self.camera_queue_size = required_number(
+            hardware_config, "camera_queue_size", integer=True, minimum=1
+        )
+        self.camera_buffer_bytes = required_number(
+            hardware_config, "camera_buffer_bytes", integer=True, minimum=1
+        )
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._started = False
@@ -57,8 +100,9 @@ class OwlHardware:
         self._planning_goal: Optional[Dict[str, Any]] = None
         self._captain_target_pose: Optional[Dict[str, Any]] = None
 
-    def connect(self, timeout_s: float = READY_TIMEOUT_S) -> Dict[str, Any]:
+    def connect(self, timeout_s: Optional[float] = None) -> Dict[str, Any]:
         """Initialize ROS and wait until telemetry and Captain links are ready."""
+        timeout_s = self.ready_timeout_s if timeout_s is None else float(timeout_s)
         with self._condition:
             was_started = self._started
             if not self._started:
@@ -85,7 +129,9 @@ class OwlHardware:
                         "OWL initialization timeout: "
                         f"missing or stale: {missing}"
                     )
-                self._condition.wait(timeout=min(0.1, remaining_s))
+                self._condition.wait(
+                    timeout=min(self.condition_wait_timeout_s, remaining_s)
+                )
 
     def _start_ros(self) -> None:
         """Create ROS handles. Caller must hold ``self._condition``."""
@@ -118,19 +164,19 @@ class OwlHardware:
             "YawTarget": YawTarget,
         }
         self._control_pub = rospy.Publisher(
-            self.CONTROL_TOPIC,
+            self.control_topic,
             Control,
-            queue_size=10,
+            queue_size=self.control_queue_size,
         )
         self._goal_pub = rospy.Publisher(
-            self.GOAL_TOPIC,
+            self.goal_topic,
             PoseStamped,
-            queue_size=10,
+            queue_size=self.control_queue_size,
         )
         self._yaw_target_pub = rospy.Publisher(
-            self.YAW_TARGET_TOPIC,
+            self.yaw_target_topic,
             YawTarget,
-            queue_size=10,
+            queue_size=self.control_queue_size,
         )
         self._publishers = [
             self._control_pub,
@@ -139,57 +185,57 @@ class OwlHardware:
         ]
         self._subscribers = [
             rospy.Subscriber(
-                self.ODOM_TOPIC,
+                self.odom_topic,
                 Odometry,
                 self._odom_callback,
-                queue_size=10,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                self.RGB_TOPIC,
+                self.rgb_topic,
                 CompressedImage,
                 self._rgb_callback,
-                queue_size=1,
-                buff_size=8 * 1024 * 1024,
+                queue_size=self.camera_queue_size,
+                buff_size=self.camera_buffer_bytes,
             ),
             rospy.Subscriber(
-                self.STATE_TOPIC,
+                self.state_topic,
                 State,
                 self._state_callback,
-                queue_size=10,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                self.EXTENDED_STATE_TOPIC,
+                self.extended_state_topic,
                 ExtendedState,
                 self._extended_state_callback,
-                queue_size=10,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                self.BATTERY_TOPIC,
+                self.battery_topic,
                 BatteryState,
                 self._battery_callback,
-                queue_size=10,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                self.PLANNING_GOAL_TOPIC,
+                self.planning_goal_topic,
                 PoseStamped,
                 self._planning_goal_callback,
-                queue_size=10,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                self.CAPTAIN_TARGET_POSE_TOPIC,
+                self.captain_target_pose_topic,
                 PoseStamped,
                 self._captain_target_pose_callback,
-                queue_size=10,
+                queue_size=self.control_queue_size,
             ),
         ]
         self._started = True
 
-    def publish_control(self, cmd: int, drone_id: int = 0) -> None:
+    def publish_control(self, cmd: int, drone_id: int) -> None:
         with self._lock:
             self._require_started()
             if not self._publisher_connected(self._control_pub):
                 raise RuntimeError(
-                    f"Captain is not subscribed to {self.CONTROL_TOPIC}"
+                    f"Captain is not subscribed to {self.control_topic}"
                 )
             message = self._message_types["Control"]()
             message.header.stamp = self._rospy.Time.now()
@@ -210,7 +256,7 @@ class OwlHardware:
             self._require_started()
             if not self._publisher_connected(self._goal_pub):
                 raise RuntimeError(
-                    f"Captain is not subscribed to {self.GOAL_TOPIC}"
+                    f"Captain is not subscribed to {self.goal_topic}"
                 )
             message = self._message_types["PoseStamped"]()
             message.header.stamp = self._rospy.Time.now()
@@ -238,7 +284,7 @@ class OwlHardware:
             if not self._publisher_connected(self._yaw_target_pub):
                 raise RuntimeError(
                     "mavros_controller is not subscribed to "
-                    f"{self.YAW_TARGET_TOPIC}"
+                    f"{self.yaw_target_topic}"
                 )
             message = self._message_types["YawTarget"]()
             message.header.stamp = self._rospy.Time.now()
@@ -256,15 +302,14 @@ class OwlHardware:
         *,
         after_monotonic: float,
         timeout_s: float,
-        tolerance_m: float = 0.05,
     ) -> Dict[str, Any]:
         """Wait until Captain echoes a matching goal toward its planner."""
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             while True:
                 for source, goal in (
-                    (self.PLANNING_GOAL_TOPIC, self._planning_goal),
-                    (self.CAPTAIN_TARGET_POSE_TOPIC, self._captain_target_pose),
+                    (self.planning_goal_topic, self._planning_goal),
+                    (self.captain_target_pose_topic, self._captain_target_pose),
                 ):
                     if self._goal_matches(
                         goal,
@@ -272,7 +317,7 @@ class OwlHardware:
                         y_m,
                         z_m,
                         after_monotonic,
-                        tolerance_m,
+                        self.goal_ack_position_tolerance_m,
                     ):
                         result = dict(goal or {})
                         result["source"] = source
@@ -282,33 +327,35 @@ class OwlHardware:
                 if remaining_s <= 0:
                     raise RuntimeError(
                         "Captain did not acknowledge goal on "
-                        f"{self.PLANNING_GOAL_TOPIC} or "
-                        f"{self.CAPTAIN_TARGET_POSE_TOPIC}"
+                        f"{self.planning_goal_topic} or "
+                        f"{self.captain_target_pose_topic}"
                     )
-                self._condition.wait(timeout=min(0.1, remaining_s))
+                self._condition.wait(
+                    timeout=min(self.condition_wait_timeout_s, remaining_s)
+                )
 
     def get_pose_ros(self) -> Dict[str, Any]:
         with self._lock:
             if self._odom is None:
-                raise RuntimeError(f"no odometry received from {self.ODOM_TOPIC}")
+                raise RuntimeError(f"no odometry received from {self.odom_topic}")
             if not self._fresh(
                 self._odom,
                 time.monotonic(),
-                self.ODOM_MAX_AGE_S,
+                self.odom_max_age_s,
             ):
-                raise RuntimeError(f"stale odometry from {self.ODOM_TOPIC}")
+                raise RuntimeError(f"stale odometry from {self.odom_topic}")
             return dict(self._odom)
 
     def get_compressed_rgb(self) -> Tuple[bytes, str]:
         with self._lock:
             if self._rgb is None:
-                raise RuntimeError(f"no image received from {self.RGB_TOPIC}")
+                raise RuntimeError(f"no image received from {self.rgb_topic}")
             if not self._fresh(
                 self._rgb,
                 time.monotonic(),
-                self.RGB_MAX_AGE_S,
+                self.rgb_max_age_s,
             ):
-                raise RuntimeError(f"stale image from {self.RGB_TOPIC}")
+                raise RuntimeError(f"stale image from {self.rgb_topic}")
             return bytes(self._rgb["data"]), str(self._rgb["format"])
 
     def health(self) -> Dict[str, Any]:
@@ -425,15 +472,15 @@ class OwlHardware:
         )
         battery = dict(self._battery) if self._battery is not None else {}
 
-        state_ok = self._fresh(self._state, now, self.STATE_MAX_AGE_S)
+        state_ok = self._fresh(self._state, now, self.state_max_age_s)
         extended_state_ok = self._fresh(
             self._extended_state,
             now,
-            self.STATE_MAX_AGE_S,
+            self.state_max_age_s,
         )
-        odom_ok = self._fresh(self._odom, now, self.ODOM_MAX_AGE_S)
-        rgb_ok = self._fresh(self._rgb, now, self.RGB_MAX_AGE_S)
-        battery_ok = self._fresh(self._battery, now, self.BATTERY_MAX_AGE_S)
+        odom_ok = self._fresh(self._odom, now, self.odom_max_age_s)
+        rgb_ok = self._fresh(self._rgb, now, self.rgb_max_age_s)
+        battery_ok = self._fresh(self._battery, now, self.battery_max_age_s)
         control_link_ok = self._publisher_connected(self._control_pub)
         goal_link_ok = self._publisher_connected(self._goal_pub)
         yaw_link_ok = self._publisher_connected(self._yaw_target_pub)

@@ -143,11 +143,6 @@ def _configure_logger(log_path: Path) -> logging.Logger:
     return logger
 
 class TJKAgent:
-    MIN_TARGET_WORLD_Z_CM = 20.0
-    PURE_ROTATE_FORWARD_CM = 1.0
-    SAM3_SEARCH_TOP_K = 3
-    SAM3_SEARCH_DEBUG_THRESHOLD = 0.0
-
     def __init__(
         self,
         client: BaseClient,
@@ -189,20 +184,22 @@ class TJKAgent:
         self.tracker = tracker
         self.detector_name = detector_name
         self.tracker_name = tracker_name
+        runtime_config = _config_section(config, "runtime")
+        track_config = _config_section(config, "track")
         self.action_sleep_s = _config_number(
-            config,
+            runtime_config,
             "action_sleep_s",
             minimum=0.0,
         )
         self.motion_timeout_s = _config_number(
-            config,
+            runtime_config,
             "motion_timeout_s",
             minimum=1e-6,
         )
-        self.skip_track = _config_bool(config, "skip_track")
+        self.skip_track = _config_bool(track_config, "skip")
         self.skip_track_forward_cm = _config_number(
-            config,
-            "skip_track_forward_cm",
+            track_config,
+            "skip_forward_cm",
             minimum=1e-6,
         )
         mission_config = _config_section(config, "mission")
@@ -232,8 +229,9 @@ class TJKAgent:
         detection_config = _config_section(config, "detection")
         select_config = _config_section(config, "select")
         safety_config = _config_section(config, "safety")
-        track_config = _config_section(config, "track")
         scan_config = _config_section(config, "scan")
+        detectors_config = _config_section(config, "detectors")
+        sam3_detector_config = _config_section(detectors_config, "sam3")
         # Forward/backward action.
         self.max_fb_step_cm = _config_number(
             motion_config, "max_fb_step_cm", minimum=1e-6
@@ -248,19 +246,39 @@ class TJKAgent:
             maximum=1.0,
         )
 
+        # Pixel-error gains are calibrated at one reference resolution and
+        # scaled to the native camera resolution in connect().
+        self.reference_img_width = _config_number(
+            motion_config,
+            "reference_width_px",
+            integer=True,
+            minimum=1.0,
+        )
+        self.reference_img_height = _config_number(
+            motion_config,
+            "reference_height_px",
+            integer=True,
+            minimum=1.0,
+        )
+
         # Vertical action.
-        self.z_cm_per_pixel = _config_number(
+        self.reference_z_cm_per_pixel = _config_number(
             motion_config, "z_cm_per_pixel", minimum=1e-6
         )
         self.max_z_step_cm = _config_number(
             motion_config, "max_z_step_cm", minimum=1e-6
         )
         # Yaw action.
-        self.rotate_deg_per_pixel = _config_number(
+        self.reference_rotate_deg_per_pixel = _config_number(
             motion_config, "rotate_deg_per_pixel", minimum=1e-6
         )
         self.max_rotate_deg = _config_number(
             motion_config, "max_rotate_deg", minimum=1e-6
+        )
+        self.pure_rotate_forward_cm = _config_number(
+            motion_config,
+            "pure_rotate_forward_cm",
+            minimum=0.0,
         )
         if self.fb_stop_step_cm > self.max_fb_step_cm:
             raise ValueError(
@@ -289,6 +307,24 @@ class TJKAgent:
         self.search_align_xyz_to_first_view = _config_bool(
             search_config,
             "align_xyz_to_first_view",
+        )
+        self.sam3_search_top_k = _config_number(
+            search_config,
+            "sam3_top_k",
+            integer=True,
+            minimum=1.0,
+        )
+        self.sam3_search_debug_threshold = _config_number(
+            search_config,
+            "sam3_debug_confidence_threshold",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.sam3_confidence_threshold = _config_number(
+            sam3_detector_config,
+            "confidence_threshold",
+            minimum=0.0,
+            maximum=1.0,
         )
         self.max_candidates_per_frame = _config_number(
             detection_config,
@@ -331,23 +367,38 @@ class TJKAgent:
         self.safe_z_cm = _config_number(
             safety_config, "safe_z_cm", minimum=0.0
         )
-        if self.safe_z_cm < self.MIN_TARGET_WORLD_Z_CM:
-            raise ValueError(
-                "safety.safe_z_cm must be >= "
-                f"{self.MIN_TARGET_WORLD_Z_CM:.2f}cm"
-            )
         self.depth_safe_distance_cm = _config_number(
             safety_config,
             "depth_safe_distance_cm",
             minimum=0.0,
         )
+        self.depth_path_percentile = _config_number(
+            safety_config,
+            "depth_path_percentile",
+            minimum=0.0,
+            maximum=100.0,
+        )
+        self.depth_path_min_roi_width_ratio = _config_number(
+            safety_config,
+            "depth_path_min_roi_width_ratio",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.depth_path_min_roi_height_ratio = _config_number(
+            safety_config,
+            "depth_path_min_roi_height_ratio",
+            minimum=0.0,
+            maximum=1.0,
+        )
 
-        # img setting
-        # connect() replaces these fallbacks with the native camera frame size.
-        self.img_height = 360
-        self.img_width = 640
+        # Image/control defaults use the configured calibration resolution;
+        # connect() replaces them with the native camera frame size and gains.
+        self.img_height = self.reference_img_height
+        self.img_width = self.reference_img_width
         self.horizontal_center = self.img_width / 2
         self.vertical_center = self.img_height / 2
+        self.z_cm_per_pixel = self.reference_z_cm_per_pixel
+        self.rotate_deg_per_pixel = self.reference_rotate_deg_per_pixel
 
         # stop thresh
         self.target_stop_ratio = _config_number(
@@ -399,13 +450,16 @@ class TJKAgent:
         waypoints = []
         names = set()
         required_keys = {"name", "x_cm", "y_cm", "z_cm", "yaw_deg"}
+        optional_keys = {"only_arrive"}
         for index, raw_waypoint in enumerate(raw_waypoints):
             if not isinstance(raw_waypoint, dict):
                 raise ValueError(
                     f"mission.waypoints[{index}] must be a mapping"
                 )
             missing = sorted(required_keys - raw_waypoint.keys())
-            unknown = sorted(raw_waypoint.keys() - required_keys)
+            unknown = sorted(
+                raw_waypoint.keys() - required_keys - optional_keys
+            )
             if missing or unknown:
                 details = []
                 if missing:
@@ -442,6 +496,13 @@ class TJKAgent:
             waypoint["yaw_deg"] = TJKAgent._normalize_angle_deg(
                 waypoint["yaw_deg"]
             )
+            only_arrive = raw_waypoint.get("only_arrive", False)
+            if not isinstance(only_arrive, bool):
+                raise ValueError(
+                    f"mission.waypoints[{index}].only_arrive must be a "
+                    f"boolean, got {only_arrive!r}"
+                )
+            waypoint["only_arrive"] = only_arrive
             waypoints.append(waypoint)
         return waypoints
 
@@ -464,9 +525,26 @@ class TJKAgent:
         self.img_width = width
         self.horizontal_center = width / 2
         self.vertical_center = height / 2
+        self.rotate_deg_per_pixel = (
+            self.reference_rotate_deg_per_pixel
+            * self.reference_img_width
+            / width
+        )
+        self.z_cm_per_pixel = (
+            self.reference_z_cm_per_pixel
+            * self.reference_img_height
+            / height
+        )
 
         self.tracker.set_img_size(height, width)
         print(f"[ROBOT-INFO] RGB resolution: {width}x{height}")
+        self._log(
+            "[TRACK-CONTROL] Pixel gains scaled from reference "
+            f"{self.reference_img_width}x{self.reference_img_height} to "
+            f"{width}x{height}: rotate={self.rotate_deg_per_pixel:.6f}"
+            "deg/pixel "
+            f"z={self.z_cm_per_pixel:.6f}cm/pixel."
+        )
 
         pose = self._copy_pose(
             self._get_pose_for_flight("connect pose readiness")
@@ -542,6 +620,27 @@ class TJKAgent:
         for index, waypoint in enumerate(self.mission_waypoints):
             world_pose = self._mission_to_world_pose(waypoint)
             self._navigate_to_waypoint(index, waypoint, world_pose)
+            if waypoint["only_arrive"]:
+                final_pose = self._copy_pose(
+                    self._get_pose_for_flight(
+                        f"waypoint {waypoint['name']} arrival pose"
+                    )
+                )
+                result = {
+                    "index": index,
+                    "name": waypoint["name"],
+                    "status": "arrived_only",
+                    "mission_pose": self._world_to_mission_pose(final_pose),
+                }
+                self.waypoint_results.append(result)
+                self._log(
+                    f"[MISSION] Waypoint "
+                    f"{index + 1}/{len(self.mission_waypoints)} "
+                    f"name={waypoint['name']!r} status=arrived_only; "
+                    "skip SEARCH/TRACK/SCAN stages."
+                )
+                continue
+
             self._set_mission_state(
                 MissionState.EXECUTING_WAYPOINT,
                 waypoint_index=index,
@@ -581,7 +680,7 @@ class TJKAgent:
             "success": bool(
                 len(self.waypoint_results) == len(self.mission_waypoints)
                 and all(
-                    result["status"] == "succeeded"
+                    result["status"] in {"succeeded", "arrived_only"}
                     for result in self.waypoint_results
                 )
             ),
@@ -1215,7 +1314,7 @@ class TJKAgent:
             frame_rgb,
             vis_name=f"search_view_{view_idx:02d}",
             confidence_threshold=(
-                self.SAM3_SEARCH_DEBUG_THRESHOLD
+                self.sam3_search_debug_threshold
                 if self.detector_name == "sam3"
                 else None
             ),
@@ -1239,7 +1338,7 @@ class TJKAgent:
         cur_frame = view_record["frame"]
         all_detections = detection_result["all_detections"]
         candidate_limit = (
-            self.SAM3_SEARCH_TOP_K
+            self.sam3_search_top_k
             if self.detector_name == "sam3"
             else self.max_candidates_per_frame
         )
@@ -1274,11 +1373,15 @@ class TJKAgent:
                 )
             confidence = float(detection["confidence"])
             label = str(detection["label"])
-            configured_threshold = float(
-                getattr(getattr(self.detector, "cfg", None),
-                        "confidence_threshold", 0.0)
+            configured_threshold = (
+                self.sam3_confidence_threshold
+                if self.detector_name == "sam3"
+                else None
             )
-            below_config_threshold = confidence < configured_threshold
+            below_config_threshold = bool(
+                configured_threshold is not None
+                and confidence < configured_threshold
+            )
             if below_config_threshold:
                 self._log(
                     f"[SEARCH-DEBUG] Keep below-threshold candidate="
@@ -1326,7 +1429,8 @@ class TJKAgent:
 
         visualization_started = time.perf_counter()
         visualization_path = (
-            f"{self.vis_dir}/search_view_{view_idx:02d}_top3.png"
+            f"{self.vis_dir}/search_view_{view_idx:02d}_top"
+            f"{candidate_limit}.png"
         )
         show_fig(
             cur_frame,
@@ -1377,14 +1481,13 @@ class TJKAgent:
                 self.safe_z_cm,
                 float(self.waypoint_pose["z"]) + float(offset_cm),
             )
-            rounded_z = round(target_z_cm, 6)
-            if rounded_z in seen_z:
+            if target_z_cm in seen_z:
                 self._log(
                     f"[SEARCH] Skip duplicate height level={height_idx} "
                     f"z={target_z_cm:.2f}cm after safety clamping."
                 )
                 continue
-            seen_z.add(rounded_z)
+            seen_z.add(target_z_cm)
             targets.append((height_idx, float(offset_cm), target_z_cm))
         return targets
 
@@ -2222,7 +2325,7 @@ class TJKAgent:
                 0.0,
                 dyaw,
             )
-        dx_cm = self.PURE_ROTATE_FORWARD_CM
+        dx_cm = self.pure_rotate_forward_cm
         return self._execute_motion(
             AgentAction.ROTATE,
             dx_cm,
@@ -2282,7 +2385,7 @@ class TJKAgent:
             and not any((dx_cm, dy_cm, dz_cm))
             and dyaw_deg != 0.0
         ):
-            dx_cm = self.PURE_ROTATE_FORWARD_CM
+            dx_cm = self.pure_rotate_forward_cm
             self._log(
                 f"[PURE-ROTATE] context={context!r} "
                 f"using x={dx_cm:.2f}cm with yaw={dyaw_deg:.2f}deg"
@@ -2572,8 +2675,14 @@ class TJKAgent:
             raise RuntimeError("Target mask is empty")
 
         height, width = mask.shape
-        roi_width = max(int(xs.max() - xs.min() + 1), width // 2)
-        roi_height = max(int(ys.max() - ys.min() + 1), height // 2)
+        roi_width = max(
+            int(xs.max() - xs.min() + 1),
+            int(math.ceil(width * self.depth_path_min_roi_width_ratio)),
+        )
+        roi_height = max(
+            int(ys.max() - ys.min() + 1),
+            int(math.ceil(height * self.depth_path_min_roi_height_ratio)),
+        )
         x1 = (width - roi_width) // 2
         y1 = (height - roi_height) // 2
         roi_depth = depth_raw[y1:y1 + roi_height, x1:x1 + roi_width]
@@ -2581,7 +2690,9 @@ class TJKAgent:
         valid_path_depths = roi_depth[np.isfinite(roi_depth) & (roi_depth > 0)]
         if valid_path_depths.size == 0:
             raise RuntimeError("No valid positive depth values inside the forward-path ROI")
-        return float(np.percentile(valid_path_depths, 1))
+        return float(
+            np.percentile(valid_path_depths, self.depth_path_percentile)
+        )
 
     def _relative_pose_delta(self, target_pose, current_pose=None):
         """Convert a world-frame target pose to one body-relative command."""
@@ -3182,8 +3293,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--http-timeout-s",
         type=float,
-        default=180.0,
-        help="Robot Server request timeout in seconds (default: 180)",
+        default=None,
+        help=(
+            "Override the Robot Server request timeout from the selected "
+            "YAML config"
+        ),
     )
     return parser
 
@@ -3286,6 +3400,16 @@ def main():
     args.config = str(_resolve_config_path(args.config, args.client))
     # Validate the required config before creating logs, clients, or models.
     config = _load_config(args.config)
+    runtime_config = _config_section(config, "runtime")
+    configured_http_timeout_s = _config_number(
+        runtime_config,
+        "http_request_timeout_s",
+        minimum=1e-6,
+    )
+    if args.http_timeout_s is None:
+        args.http_timeout_s = configured_http_timeout_s
+    elif not math.isfinite(args.http_timeout_s) or args.http_timeout_s <= 0.0:
+        parser.error("--http-timeout-s must be finite and positive")
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_dir = _timestamped_experiment_dir(args.exp_name, timestamp)
     vis_dir = exp_dir / "vis"

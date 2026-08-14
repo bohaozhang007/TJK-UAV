@@ -1,11 +1,16 @@
 <launch>
-  <arg name="odom_topic" default="/Odometry"/>
-  <arg name="cloud_topic" default="/cloud_registered"/>
+  <!-- Planner motion tuning; most likely to change during flight tests. -->
+  <arg name="max_vel" default="0.5"/>
+  <arg name="max_acc" default="1.0"/>
+
+  <!-- Local planning-map dimensions. -->
   <arg name="map_size_x" default="5.0"/>
   <arg name="map_size_y" default="5.0"/>
   <arg name="map_size_z" default="5.0"/>
-  <arg name="max_vel" default="0.5"/>
-  <arg name="max_acc" default="1.0"/>
+
+  <!-- Deployment topic wiring; normally unchanged. -->
+  <arg name="odom_topic" default="/Odometry"/>
+  <arg name="cloud_topic" default="/cloud_registered"/>
 
   <!-- flight_type=1 accepts interactive goals; no waypoint YAML is loaded. -->
   <include file="$(find ego_planner)/launch/include/run_in_sim.xml">
@@ -15,13 +20,13 @@
     <arg name="init_x" value="0.0"/>
     <arg name="init_y" value="0.0"/>
     <arg name="init_z" value="1.0"/>
+    <arg name="max_vel" value="$(arg max_vel)"/>
+    <arg name="max_acc" value="$(arg max_acc)"/>
     <arg name="map_size_x" value="$(arg map_size_x)"/>
     <arg name="map_size_y" value="$(arg map_size_y)"/>
     <arg name="map_size_z" value="$(arg map_size_z)"/>
     <arg name="odom_topic" value="$(arg odom_topic)"/>
     <arg name="cloud_topic" value="$(arg cloud_topic)"/>
-    <arg name="max_vel" value="$(arg max_vel)"/>
-    <arg name="max_acc" value="$(arg max_acc)"/>
     <arg name="flight_type" value="1"/>
   </include>
 

@@ -22,12 +22,16 @@ source "${WORKSPACE_SETUP}"
 
 export PYTHONPATH="${SCRIPT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-OWL_SERVER_HOST="${OWL_SERVER_HOST:-0.0.0.0}"
-OWL_SERVER_PORT="${OWL_SERVER_PORT:-8765}"
+SERVER_ARGS=()
+if [[ -n "${OWL_SERVER_HOST:-}" ]]; then
+    SERVER_ARGS+=(--host "${OWL_SERVER_HOST}")
+fi
+if [[ -n "${OWL_SERVER_PORT:-}" ]]; then
+    SERVER_ARGS+=(--port "${OWL_SERVER_PORT}")
+fi
 
 cd "${SCRIPT_DIR}"
 exec python3 -m robot.server \
     --robot owl \
-    --host "${OWL_SERVER_HOST}" \
-    --port "${OWL_SERVER_PORT}" \
+    "${SERVER_ARGS[@]}" \
     "$@"

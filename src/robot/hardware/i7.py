@@ -16,39 +16,121 @@ import numpy as np
 class I7Hardware:
     """Cache I7 telemetry and camera frames and expose nav-node commands."""
 
-    ODOM_TOPIC = "/Odometry"
-    STATE_TOPIC = "/mavros/state"
-    EXTENDED_STATE_TOPIC = "/mavros/extended_state"
-    BATTERY_TOPIC = "/mavros/battery"
-    NAV_STATE_TOPIC = "/i7_nav/state"
-    NAV_ACTIVE_GOAL_TOPIC = "/i7_nav/active_goal"
-    PLANNER_HEARTBEAT_TOPIC = "/drone_0_traj_server/heartbeat"
-    GOAL_TOPIC = "/cxr_goal"
-
-    TAKEOFF_SERVICE = "/i7_nav/takeoff"
-    LAND_SERVICE = "/i7_nav/land"
-    FORCE_LAND_SERVICE = "/i7_nav/force_land"
-    ABORT_SERVICE = "/i7_nav/abort"
-    REINITIALIZE_SERVICE = "/i7_nav/reinitialize"
-
-    READY_TIMEOUT_S = 15.0
-    STATE_MAX_AGE_S = 2.0
-    ODOM_MAX_AGE_S = 1.0
-    RGB_MAX_AGE_S = 2.0
-    NAV_MAX_AGE_S = 2.0
-    PLANNER_MAX_AGE_S = 2.0
-    BATTERY_MAX_AGE_S = 10.0
-
     LANDED_STATE_ON_GROUND = 1
     LANDED_STATE_IN_AIR = 2
 
     def __init__(
         self,
-        node_name: str = "i7_robot_server",
-        rtsp_url: str = "rtsp://127.0.0.1:8554/k40t",
+        *,
+        node_name: str,
+        rtsp_url: str,
+        ready_timeout_s: float,
+        ros_services_ready_timeout_s: float,
+        state_max_age_s: float,
+        odom_max_age_s: float,
+        rgb_max_age_s: float,
+        nav_max_age_s: float,
+        planner_max_age_s: float,
+        battery_max_age_s: float,
+        condition_wait_timeout_s: float,
+        camera_open_retry_s: float,
+        camera_read_retry_s: float,
+        camera_join_timeout_s: float,
+        rtsp_io_timeout_us: int,
+        camera_buffer_size: int,
+        control_queue_size: int,
+        status_queue_size: int,
+        odom_topic: str,
+        state_topic: str,
+        extended_state_topic: str,
+        battery_topic: str,
+        nav_state_topic: str,
+        nav_active_goal_topic: str,
+        planner_heartbeat_topic: str,
+        goal_topic: str,
+        takeoff_service: str,
+        landing_service: str,
+        force_land_service: str,
+        abort_service: str,
+        reinitialize_service: str,
     ) -> None:
-        self.node_name = node_name
-        self.rtsp_url = rtsp_url
+        self.node_name = self._nonempty_string("node_name", node_name)
+        self.rtsp_url = self._nonempty_string("rtsp_url", rtsp_url)
+        self.ready_timeout_s = self._positive_threshold(
+            "ready_timeout_s", ready_timeout_s
+        )
+        self.ros_services_ready_timeout_s = self._positive_threshold(
+            "ros_services_ready_timeout_s", ros_services_ready_timeout_s
+        )
+        self.state_max_age_s = self._positive_threshold(
+            "state_max_age_s", state_max_age_s
+        )
+        self.odom_max_age_s = self._positive_threshold(
+            "odom_max_age_s", odom_max_age_s
+        )
+        self.rgb_max_age_s = self._positive_threshold(
+            "rgb_max_age_s", rgb_max_age_s
+        )
+        self.nav_max_age_s = self._positive_threshold(
+            "nav_max_age_s", nav_max_age_s
+        )
+        self.planner_max_age_s = self._positive_threshold(
+            "planner_max_age_s", planner_max_age_s
+        )
+        self.battery_max_age_s = self._positive_threshold(
+            "battery_max_age_s", battery_max_age_s
+        )
+        self.condition_wait_timeout_s = self._positive_threshold(
+            "condition_wait_timeout_s", condition_wait_timeout_s
+        )
+        self.camera_open_retry_s = self._positive_threshold(
+            "camera_open_retry_s", camera_open_retry_s
+        )
+        self.camera_read_retry_s = self._positive_threshold(
+            "camera_read_retry_s", camera_read_retry_s
+        )
+        self.camera_join_timeout_s = self._positive_threshold(
+            "camera_join_timeout_s", camera_join_timeout_s
+        )
+        self.rtsp_io_timeout_us = int(
+            self._positive_threshold("rtsp_io_timeout_us", rtsp_io_timeout_us)
+        )
+        self.camera_buffer_size = int(
+            self._positive_threshold("camera_buffer_size", camera_buffer_size)
+        )
+        self.control_queue_size = int(
+            self._positive_threshold("control_queue_size", control_queue_size)
+        )
+        self.status_queue_size = int(
+            self._positive_threshold("status_queue_size", status_queue_size)
+        )
+        self.odom_topic = self._nonempty_string("odom_topic", odom_topic)
+        self.state_topic = self._nonempty_string("state_topic", state_topic)
+        self.extended_state_topic = self._nonempty_string(
+            "extended_state_topic", extended_state_topic
+        )
+        self.battery_topic = self._nonempty_string("battery_topic", battery_topic)
+        self.nav_state_topic = self._nonempty_string("nav_state_topic", nav_state_topic)
+        self.nav_active_goal_topic = self._nonempty_string(
+            "nav_active_goal_topic", nav_active_goal_topic
+        )
+        self.planner_heartbeat_topic = self._nonempty_string(
+            "planner_heartbeat_topic", planner_heartbeat_topic
+        )
+        self.goal_topic = self._nonempty_string("goal_topic", goal_topic)
+        self.takeoff_service = self._nonempty_string(
+            "takeoff_service", takeoff_service
+        )
+        self.landing_service = self._nonempty_string(
+            "landing_service", landing_service
+        )
+        self.force_land_service = self._nonempty_string(
+            "force_land_service", force_land_service
+        )
+        self.abort_service = self._nonempty_string("abort_service", abort_service)
+        self.reinitialize_service = self._nonempty_string(
+            "reinitialize_service", reinitialize_service
+        )
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._started = False
@@ -73,14 +155,19 @@ class I7Hardware:
         self._camera_thread: Optional[threading.Thread] = None
         self._camera_error: Optional[str] = None
 
-    def connect(self, timeout_s: float = READY_TIMEOUT_S) -> Dict[str, Any]:
+    def connect(self, timeout_s: Optional[float] = None) -> Dict[str, Any]:
+        timeout_s = (
+            self.ready_timeout_s if timeout_s is None else float(timeout_s)
+        )
         with self._condition:
             was_started = self._started
             if not self._started:
                 self._start_ros_locked()
                 self._start_camera_locked()
 
-        self._wait_for_services(timeout_s=min(5.0, max(0.1, timeout_s)))
+        self._wait_for_services(
+            timeout_s=min(self.ros_services_ready_timeout_s, timeout_s)
+        )
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             while True:
@@ -101,7 +188,9 @@ class I7Hardware:
                     raise RuntimeError(
                         f"I7 initialization timeout: missing or stale: {missing}"
                     )
-                self._condition.wait(timeout=min(0.1, remaining_s))
+                self._condition.wait(
+                    timeout=min(self.condition_wait_timeout_s, remaining_s)
+                )
 
     def _start_ros_locked(self) -> None:
         try:
@@ -122,48 +211,62 @@ class I7Hardware:
 
         self._rospy = rospy
         self._message_types = {"PoseStamped": PoseStamped}
-        self._goal_pub = rospy.Publisher(self.GOAL_TOPIC, PoseStamped, queue_size=10)
+        self._goal_pub = rospy.Publisher(
+            self.goal_topic,
+            PoseStamped,
+            queue_size=self.status_queue_size,
+        )
         self._publishers = [self._goal_pub]
         self._subscribers = [
-            rospy.Subscriber(self.ODOM_TOPIC, Odometry, self._odom_callback, queue_size=20),
-            rospy.Subscriber(self.STATE_TOPIC, State, self._state_callback, queue_size=20),
             rospy.Subscriber(
-                self.EXTENDED_STATE_TOPIC,
+                self.odom_topic,
+                Odometry,
+                self._odom_callback,
+                queue_size=self.control_queue_size,
+            ),
+            rospy.Subscriber(
+                self.state_topic,
+                State,
+                self._state_callback,
+                queue_size=self.control_queue_size,
+            ),
+            rospy.Subscriber(
+                self.extended_state_topic,
                 ExtendedState,
                 self._extended_state_callback,
-                queue_size=20,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                self.BATTERY_TOPIC,
+                self.battery_topic,
                 BatteryState,
                 self._battery_callback,
-                queue_size=10,
+                queue_size=self.status_queue_size,
             ),
             rospy.Subscriber(
-                self.NAV_STATE_TOPIC,
+                self.nav_state_topic,
                 String,
                 self._nav_callback,
-                queue_size=10,
+                queue_size=self.status_queue_size,
             ),
             rospy.Subscriber(
-                self.NAV_ACTIVE_GOAL_TOPIC,
+                self.nav_active_goal_topic,
                 PoseStamped,
                 self._active_goal_callback,
-                queue_size=10,
+                queue_size=self.status_queue_size,
             ),
             rospy.Subscriber(
-                self.PLANNER_HEARTBEAT_TOPIC,
+                self.planner_heartbeat_topic,
                 Empty,
                 self._planner_heartbeat_callback,
-                queue_size=20,
+                queue_size=self.control_queue_size,
             ),
         ]
         self._service_clients = {
-            "takeoff": rospy.ServiceProxy(self.TAKEOFF_SERVICE, Trigger),
-            "land": rospy.ServiceProxy(self.LAND_SERVICE, Trigger),
-            "force_land": rospy.ServiceProxy(self.FORCE_LAND_SERVICE, Trigger),
-            "abort": rospy.ServiceProxy(self.ABORT_SERVICE, Trigger),
-            "reinitialize": rospy.ServiceProxy(self.REINITIALIZE_SERVICE, Trigger),
+            "takeoff": rospy.ServiceProxy(self.takeoff_service, Trigger),
+            "land": rospy.ServiceProxy(self.landing_service, Trigger),
+            "force_land": rospy.ServiceProxy(self.force_land_service, Trigger),
+            "abort": rospy.ServiceProxy(self.abort_service, Trigger),
+            "reinitialize": rospy.ServiceProxy(self.reinitialize_service, Trigger),
         }
         self._started = True
 
@@ -172,11 +275,11 @@ class I7Hardware:
             raise RuntimeError("ROS is not initialized")
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         for service_name in (
-            self.TAKEOFF_SERVICE,
-            self.LAND_SERVICE,
-            self.FORCE_LAND_SERVICE,
-            self.ABORT_SERVICE,
-            self.REINITIALIZE_SERVICE,
+            self.takeoff_service,
+            self.landing_service,
+            self.force_land_service,
+            self.abort_service,
+            self.reinitialize_service,
         ):
             remaining_s = deadline - time.monotonic()
             if remaining_s <= 0:
@@ -202,17 +305,17 @@ class I7Hardware:
         # Keep latency bounded: TCP avoids corrupt UDP frames and the relay runs locally.
         os.environ.setdefault(
             "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-            "rtsp_transport;tcp|stimeout;3000000",
+            f"rtsp_transport;tcp|stimeout;{self.rtsp_io_timeout_us}",
         )
         while not self._camera_stop.is_set():
             capture = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            capture.set(cv2.CAP_PROP_BUFFERSIZE, self.camera_buffer_size)
             if not capture.isOpened():
                 with self._condition:
                     self._camera_error = f"cannot open RTSP stream {self.rtsp_url}"
                     self._condition.notify_all()
                 capture.release()
-                self._camera_stop.wait(0.5)
+                self._camera_stop.wait(self.camera_open_retry_s)
                 continue
             with self._condition:
                 self._camera_error = None
@@ -233,7 +336,7 @@ class I7Hardware:
                     self._camera_error = None
                     self._condition.notify_all()
             capture.release()
-            self._camera_stop.wait(0.2)
+            self._camera_stop.wait(self.camera_read_retry_s)
 
     def call_takeoff(self) -> Dict[str, Any]:
         return self._call_trigger("takeoff")
@@ -276,7 +379,7 @@ class I7Hardware:
         with self._lock:
             self._require_started()
             if not self._publisher_connected(self._goal_pub):
-                raise RuntimeError(f"i7_nav is not subscribed to {self.GOAL_TOPIC}")
+                raise RuntimeError(f"i7_nav is not subscribed to {self.goal_topic}")
             message = self._message_types["PoseStamped"]()
             message.header.stamp = self._rospy.Time.now()
             message.header.frame_id = str(frame_id or "camera_init")
@@ -299,7 +402,7 @@ class I7Hardware:
         uses_planner: bool,
         after_monotonic: float,
         timeout_s: float,
-        tolerance_m: float = 0.05,
+        tolerance_m: float,
     ) -> Dict[str, Any]:
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         with self._condition:
@@ -319,19 +422,21 @@ class I7Hardware:
                 if remaining_s <= 0:
                     raise RuntimeError(
                         "i7_nav did not acknowledge goal on "
-                        f"{self.NAV_ACTIVE_GOAL_TOPIC}"
+                        f"{self.nav_active_goal_topic}"
                     )
-                self._condition.wait(timeout=min(0.1, remaining_s))
+                self._condition.wait(
+                    timeout=min(self.condition_wait_timeout_s, remaining_s)
+                )
 
     def get_pose_ros(self) -> Dict[str, Any]:
         with self._lock:
-            if not self._fresh(self._odom, time.monotonic(), self.ODOM_MAX_AGE_S):
-                raise RuntimeError(f"missing or stale odometry from {self.ODOM_TOPIC}")
+            if not self._fresh(self._odom, time.monotonic(), self.odom_max_age_s):
+                raise RuntimeError(f"missing or stale odometry from {self.odom_topic}")
             return dict(self._odom or {})
 
     def get_bgr(self) -> np.ndarray:
         with self._lock:
-            if not self._fresh(self._rgb, time.monotonic(), self.RGB_MAX_AGE_S):
+            if not self._fresh(self._rgb, time.monotonic(), self.rgb_max_age_s):
                 detail = f": {self._camera_error}" if self._camera_error else ""
                 raise RuntimeError(f"missing or stale I7 RTSP frame{detail}")
             return np.asarray(self._rgb["frame_bgr"]).copy()
@@ -344,7 +449,7 @@ class I7Hardware:
         self._camera_stop.set()
         camera_thread = self._camera_thread
         if camera_thread is not None and camera_thread.is_alive():
-            camera_thread.join(timeout=3.5)
+            camera_thread.join(timeout=self.camera_join_timeout_s)
         with self._lock:
             handles = list(self._subscribers) + list(self._publishers)
             self._subscribers = []
@@ -455,20 +560,20 @@ class I7Hardware:
         extended = dict(self._extended_state or {})
         nav = dict(self._nav or {})
         battery = dict(self._battery or {})
-        state_ok = self._fresh(self._state, now, self.STATE_MAX_AGE_S)
-        extended_ok = self._fresh(self._extended_state, now, self.STATE_MAX_AGE_S)
-        odom_ok = self._fresh(self._odom, now, self.ODOM_MAX_AGE_S)
-        rgb_ok = self._fresh(self._rgb, now, self.RGB_MAX_AGE_S)
-        nav_ok = self._fresh(self._nav, now, self.NAV_MAX_AGE_S)
+        state_ok = self._fresh(self._state, now, self.state_max_age_s)
+        extended_ok = self._fresh(self._extended_state, now, self.state_max_age_s)
+        odom_ok = self._fresh(self._odom, now, self.odom_max_age_s)
+        rgb_ok = self._fresh(self._rgb, now, self.rgb_max_age_s)
+        nav_ok = self._fresh(self._nav, now, self.nav_max_age_s)
         planner_heartbeat_ok = bool(
             self._planner_heartbeat_received_monotonic > 0.0
             and now - self._planner_heartbeat_received_monotonic
-            <= self.PLANNER_MAX_AGE_S
+            <= self.planner_max_age_s
         )
         planner_ok = bool(
             planner_heartbeat_ok and nav_ok and nav.get("planner_ok") is True
         )
-        battery_ok = self._fresh(self._battery, now, self.BATTERY_MAX_AGE_S)
+        battery_ok = self._fresh(self._battery, now, self.battery_max_age_s)
         camera_width = (
             int(self._rgb["width"])
             if self._rgb is not None and "width" in self._rgb
@@ -540,7 +645,7 @@ class I7Hardware:
             "nav_ok": nav_ok,
             "planner_ok": planner_ok,
             "planner_heartbeat_ok": planner_heartbeat_ok,
-            "planner_heartbeat_topic": self.PLANNER_HEARTBEAT_TOPIC,
+            "planner_heartbeat_topic": self.planner_heartbeat_topic,
             "goal_link_ok": goal_link_ok,
             "battery_ok": battery_ok,
             "battery_percentage": battery.get("percentage"),
@@ -558,6 +663,19 @@ class I7Hardware:
             return publisher is not None and int(publisher.get_num_connections()) > 0
         except Exception:
             return False
+
+    @staticmethod
+    def _positive_threshold(name: str, value: float) -> float:
+        result = float(value)
+        if not math.isfinite(result) or result <= 0.0:
+            raise ValueError(f"I7 {name} must be finite and positive")
+        return result
+
+    @staticmethod
+    def _nonempty_string(name: str, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"I7 {name} must be a non-empty string")
+        return value.strip()
 
     @staticmethod
     def _fresh(value: Optional[Dict[str, Any]], now: float, max_age_s: float) -> bool:

@@ -1,0 +1,46 @@
+controller:
+  drone_id: 0
+  output_long_edge_px: 640
+  jpeg_quality: 85
+  position_tolerance_cm: 15.0
+  linear_speed_tolerance_cm_s: 20.0
+  position_stable_samples: 3
+  position_poll_hz: 10.0
+  yaw_tolerance_deg: 5.0
+  yaw_publish_hz: 20.0
+  yaw_rate_deg_s: 30.0
+  assumed_speed_m_s: 0.5
+  navigation_start_delay_s: 2.0
+  goal_ack_timeout_s: 2.0
+  takeoff_timeout_s: 30.0
+  landing_timeout_s: 60.0
+  flight_state_poll_hz: 10.0
+  translation_timeout_scale: 3.0
+  motion_timeout_padding_s: 5.0
+  default_motion_timeout_s: 8.0
+  max_motion_timeout_s: 120.0
+
+hardware:
+  node_name: owl_robot_server
+  control_queue_size: 10
+  camera_queue_size: 1
+  camera_buffer_bytes: 8388608
+  ready_timeout_s: 10.0
+  state_max_age_s: 2.0
+  odom_max_age_s: 2.0
+  rgb_max_age_s: 2.0
+  battery_max_age_s: 10.0
+  condition_wait_timeout_s: 0.1
+  goal_ack_position_tolerance_m: 0.05
+
+topics:
+  odom: /mavros/local_position/odom
+  rgb: /visbot_media_g/gimbal_camera/image_raw/compressed
+  state: /mavros/state
+  extended_state: /mavros/extended_state
+  battery: /mavros/battery
+  control: /control
+  goal: /move_base_simple/goal
+  yaw_target: /reference/yawsetpoint
+  planning_goal: /planning/goal
+  captain_target_pose: /captain/target_pose

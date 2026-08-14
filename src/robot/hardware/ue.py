@@ -14,6 +14,14 @@ import numpy as np
 from unrealcv.api import UnrealCv_API
 from unrealcv.launcher import RunUnreal
 
+from ..config_loader import (
+    load_robot_config,
+    required_bool,
+    required_number,
+    required_section,
+    required_string,
+)
+
 
 class SimDrone:
     """Minimal single-drone UnrealCV hardware driver.
@@ -23,48 +31,36 @@ class SimDrone:
     clockwise. Positions are centimetres and yaw is degrees.
     """
 
-    # Closed-loop waypoint moves may use up to 70% of the Blueprint's
-    # available velocity. Final accuracy is enforced by UEController's pose
-    # feedback rather than by keeping the entire trajectory artificially slow.
-    MOVE_SPEED = 70
-    DEFAULT_ENV_BIN = (
-        Path.home()
-        / ".unrealcv"
-        / "UnrealEnv"
-        / "Collection_WinNoEditor"
-        / "Collection"
-        / "Binaries"
-        / "Win64"
-        / "Collection.exe"
-    )
-    DEFAULT_SETTING_DIR = (
-        Path.home()
-        / "unrealzoo-gym"
-        / "gym_unrealcv"
-        / "envs"
-        / "setting"
-        / "Track"
-    )
-    # DEFAULT_INITIAL_POSE = (30.0, 970.0, 520.0, -60.0)
-    # DEFAULT_INITIAL_POSE = (-24210.0, 1072.0, 323.0, -60.0) 适用于 <= v8
-    DEFAULT_INITIAL_POSE = (-24189.0, 278.0, 437.0, 0.0) # >= v9
-
     def __init__(
         self,
         *,
-        env_map: str = "DowntownWest",
-        resolution: tuple[int, int] = (640, 480),
-        initial_pose: Iterable[float] | None = DEFAULT_INITIAL_POSE,
-        start_airborne: bool = True,
-        takeoff_height_cm: float = 100.0,
-        offscreen: bool = False,
+        config: dict | None = None,
+        config_path: str | Path | None = None,
         gpu_id: int | None = None,
-        launch_sleep_s: float = 10.0,
-        command_timeout_s: float = 0.75,
     ) -> None:
-        self.env_bin = self.DEFAULT_ENV_BIN
-        self.env_map = str(env_map)
-        self.setting_file = self.DEFAULT_SETTING_DIR / f"{self.env_map}.json"
+        config = config or load_robot_config("ue", config_path)
+        hardware_config = required_section(config, "hardware")
+        paths_config = required_section(config, "paths")
+        self.env_bin = Path(
+            required_string(paths_config, "environment_binary")
+        ).expanduser().resolve()
+        self.env_map = required_string(hardware_config, "environment_map")
+        setting_dir = Path(
+            required_string(paths_config, "setting_directory")
+        ).expanduser().resolve()
+        self.setting_file = setting_dir / f"{self.env_map}.json"
+        resolution = hardware_config.get("resolution")
+        if not isinstance(resolution, list) or len(resolution) != 2:
+            raise ValueError("UE hardware.resolution must contain width and height")
+        self.resolution = tuple(
+            int(required_number({"value": value}, "value", integer=True, minimum=1.0))
+            for value in resolution
+        )
+        initial_pose = hardware_config.get("initial_pose")
+        if initial_pose is not None and (
+            not isinstance(initial_pose, list) or len(initial_pose) != 4
+        ):
+            raise ValueError("UE hardware.initial_pose must contain x, y, z, yaw")
         setting = self._load_setting(self.setting_file)
         drone_setting = self._load_first_drone_setting(setting, self.setting_file)
         self.drone_name = drone_setting["name"]
@@ -77,7 +73,6 @@ class SimDrone:
         self.camera_id = self.configured_camera_id
         self.camera_name = ""
         self.camera_id_source = "setting"
-        self.resolution = (int(resolution[0]), int(resolution[1]))
         self.initial_pose, self.initial_pose_source = self._resolve_initial_pose(
             initial_pose,
             drone_setting,
@@ -85,12 +80,51 @@ class SimDrone:
             self.setting_file,
         )
 
-        self.start_airborne = bool(start_airborne)
-        self.takeoff_height_cm = float(takeoff_height_cm)
-        self.offscreen = bool(offscreen)
+        self.start_airborne = required_bool(hardware_config, "start_airborne")
+        self.takeoff_height_cm = required_number(
+            hardware_config, "takeoff_height_cm", minimum=1e-6
+        )
+        self.offscreen = required_bool(hardware_config, "offscreen")
         self.gpu_id = gpu_id
-        self.launch_sleep_s = float(launch_sleep_s)
-        self.command_timeout_s = max(0.0, float(command_timeout_s))
+        self.launch_sleep_s = required_number(
+            hardware_config, "launch_sleep_s", minimum=0.0
+        )
+        self.command_timeout_s = required_number(
+            hardware_config, "command_timeout_s", minimum=0.0
+        )
+        self.yaw_input_scale = required_number(
+            hardware_config, "yaw_input_scale", minimum=0.0
+        )
+        self.velocity_active_epsilon = required_number(
+            hardware_config, "velocity_active_epsilon", minimum=0.0
+        )
+        self.disconnect_join_timeout_s = required_number(
+            hardware_config, "disconnect_join_timeout_s", minimum=0.0
+        )
+        self.remove_agents_timeout_s = required_number(
+            hardware_config, "remove_agents_timeout_s", minimum=0.0
+        )
+        self.remove_agents_poll_interval_s = required_number(
+            hardware_config, "remove_agents_poll_interval_s", minimum=1e-6
+        )
+        self.request_retries = required_number(
+            hardware_config, "request_retries", integer=True, minimum=1.0
+        )
+        self.request_retry_interval_s = required_number(
+            hardware_config, "request_retry_interval_s", minimum=0.0
+        )
+        self.watchdog_join_timeout_s = required_number(
+            hardware_config, "watchdog_join_timeout_s", minimum=0.0
+        )
+        self.watchdog_interval_min_s = required_number(
+            hardware_config, "watchdog_interval_min_s", minimum=1e-6
+        )
+        self.watchdog_interval_max_s = required_number(
+            hardware_config, "watchdog_interval_max_s", minimum=1e-6
+        )
+        self.watchdog_interval_divisor = required_number(
+            hardware_config, "watchdog_interval_divisor", minimum=1e-6
+        )
 
         self._io_lock = threading.RLock()
         self._state_lock = threading.RLock()
@@ -227,11 +261,19 @@ class SimDrone:
         x_action = command[0] / 100.0
         y_action = command[1] / 100.0
         z_action = command[2] / 100.0
-        yaw_action = float(np.clip(command[3] / 100.0 * 2.0, -1.0, 1.0))
+        yaw_action = float(
+            np.clip(
+                command[3] / 100.0 * self.yaw_input_scale,
+                -1.0,
+                1.0,
+            )
+        )
         self._set_velocity_raw(x_action, y_action, z_action, yaw_action)
         with self._state_lock:
             self._last_velocity_at = time.monotonic()
-            self._velocity_active = any(abs(value) > 1e-9 for value in command)
+            self._velocity_active = any(
+                abs(value) > self.velocity_active_epsilon for value in command
+            )
         return {
             "ok": True,
             "command": {"x": command[0], "y": command[1], "z": command[2], "yaw": command[3]},
@@ -343,8 +385,7 @@ class SimDrone:
             }
         return {"ok": True, "message": "closed", "health": self.health()}
 
-    @staticmethod
-    def _disconnect_unrealcv_client(client: Any, join_timeout_s: float = 5.0) -> None:
+    def _disconnect_unrealcv_client(self, client: Any) -> None:
         """Stop UnrealCV's receiver before closing its socket.
 
         UnrealCV 1.1.7 closes the socket first. Its receiver then treats the
@@ -361,7 +402,7 @@ class SimDrone:
             if receive_queue is None:
                 raise RuntimeError("UnrealCV client has no receiver control queue")
             receive_queue.put(None)
-            receiver.join(timeout=max(0.0, float(join_timeout_s)))
+            receiver.join(timeout=self.disconnect_join_timeout_s)
             if receiver.is_alive():
                 raise RuntimeError("UnrealCV receiver thread did not stop")
 
@@ -384,7 +425,7 @@ class SimDrone:
         if self.drone_name not in object_names:
             raise RuntimeError(f"drone object not found in Unreal scene: {self.drone_name}")
 
-    def _remove_other_agents(self, timeout_s: float = 5.0) -> None:
+    def _remove_other_agents(self) -> None:
         present_objects = set(self._get_object_names())
         targets = [name for name in self.other_agent_names if name in present_objects]
         if not targets:
@@ -395,12 +436,12 @@ class SimDrone:
             for name in targets:
                 self._request(f"vset /object/{name}/destroy")
 
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        deadline = time.monotonic() + self.remove_agents_timeout_s
         remaining = set(targets)
         while remaining and time.monotonic() < deadline:
             remaining.intersection_update(self._get_object_names())
             if remaining:
-                time.sleep(0.05)
+                time.sleep(self.remove_agents_poll_interval_s)
         if remaining:
             raise RuntimeError(
                 "failed to remove non-drone agents: " + ", ".join(sorted(remaining))
@@ -652,13 +693,13 @@ class SimDrone:
         with self._io_lock:
             self._request(f"vbp {self.drone_name} set_move {params}")
 
-    def _request(self, command: str, retries: int = 100) -> Any:
+    def _request(self, command: str) -> Any:
         api = self._require_api()
-        for _ in range(max(1, int(retries))):
+        for _ in range(self.request_retries):
             response = api.client.request(command, -1)
             if response is not None:
                 return response
-            time.sleep(0.01)
+            time.sleep(self.request_retry_interval_s)
         raise RuntimeError(f"UnrealCV request failed: {command}")
 
     def _require_api(self) -> UnrealCv_API:
@@ -688,11 +729,17 @@ class SimDrone:
         self._watchdog_stop.set()
         thread = self._watchdog_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=1.0)
+            thread.join(timeout=self.watchdog_join_timeout_s)
         self._watchdog_thread = None
 
     def _watchdog_loop(self) -> None:
-        interval = min(0.1, max(0.02, self.command_timeout_s / 4.0))
+        interval = min(
+            self.watchdog_interval_max_s,
+            max(
+                self.watchdog_interval_min_s,
+                self.command_timeout_s / self.watchdog_interval_divisor,
+            ),
+        )
         while not self._watchdog_stop.wait(interval):
             with self._state_lock:
                 should_stop = (

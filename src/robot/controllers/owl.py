@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, Optional
 import cv2
 import numpy as np
 
+from ..config_loader import load_robot_config, required_number, required_section
 from ..hardware.owl import OwlHardware
 
 
@@ -26,42 +27,17 @@ class OwlController:
     TAKEOFF_TASK_ID = 20
     LANDING_TASK_ID = 21
     NAVIGATION_TASK_ID = 105
-    DRONE_ID = 0
-    OUTPUT_LONG_EDGE = 640
-    JPEG_QUALITY = 85
-    POSITION_TOLERANCE_CM = 15.0
-    LINEAR_SPEED_TOLERANCE_CM_S = 20.0
-    POSITION_STABLE_SAMPLES = 3
-    POSITION_POLL_HZ = 10.0
-    YAW_TOLERANCE_DEG = 5.0
-    YAW_PUBLISH_HZ = 20.0
-    YAW_RATE_DEG_S = 30.0
-    ASSUMED_SPEED_M_S = 0.5
-    NAVIGATION_START_DELAY_S = 2.0
-    GOAL_ACK_TIMEOUT_S = 2.0
-    TAKEOFF_TIMEOUT_S = 30.0
-    LANDING_TIMEOUT_S = 60.0
-    FLIGHT_STATE_POLL_HZ = 10.0
 
     def __init__(
         self,
         image_dir: Optional[str] = None,
         hardware: Optional[OwlHardware] = None,
         *,
-        position_tolerance_cm: float = POSITION_TOLERANCE_CM,
-        linear_speed_tolerance_cm_s: float = LINEAR_SPEED_TOLERANCE_CM_S,
-        position_stable_samples: int = POSITION_STABLE_SAMPLES,
-        position_poll_hz: float = POSITION_POLL_HZ,
-        yaw_tolerance_deg: float = YAW_TOLERANCE_DEG,
-        yaw_publish_hz: float = YAW_PUBLISH_HZ,
-        yaw_rate_deg_s: float = YAW_RATE_DEG_S,
-        navigation_start_delay_s: float = NAVIGATION_START_DELAY_S,
-        goal_ack_timeout_s: float = GOAL_ACK_TIMEOUT_S,
-        takeoff_timeout_s: float = TAKEOFF_TIMEOUT_S,
-        landing_timeout_s: float = LANDING_TIMEOUT_S,
-        flight_state_poll_hz: float = FLIGHT_STATE_POLL_HZ,
+        config_path: str | Path | None = None,
     ) -> None:
-        self._hardware = hardware or OwlHardware()
+        config = load_robot_config("owl", config_path)
+        controller_config = required_section(config, "controller")
+        self._hardware = hardware or OwlHardware(config=config)
         self._operation_lock = threading.RLock()
         self._image_lock = threading.RLock()
         self._yaw_lock = threading.RLock()
@@ -76,26 +52,77 @@ class OwlController:
         self._yaw_frame_id = "world"
         self._image_dir = Path(image_dir or "captures").expanduser().resolve()
         self._image_dir.mkdir(parents=True, exist_ok=True)
-        self._position_tolerance_cm = max(1.0, float(position_tolerance_cm))
-        self._linear_speed_tolerance_cm_s = max(
-            0.0,
-            float(linear_speed_tolerance_cm_s),
+        self._output_long_edge = required_number(
+            controller_config, "output_long_edge_px", integer=True, minimum=1.0
         )
-        self._position_stable_samples = max(1, int(position_stable_samples))
-        self._position_poll_hz = max(1.0, float(position_poll_hz))
-        self._yaw_tolerance_deg = max(0.1, float(yaw_tolerance_deg))
-        self._yaw_publish_hz = max(20.0, float(yaw_publish_hz))
+        self._drone_id = required_number(
+            controller_config, "drone_id", integer=True, minimum=0
+        )
+        self._jpeg_quality = required_number(
+            controller_config,
+            "jpeg_quality",
+            integer=True,
+            minimum=1.0,
+            maximum=100.0,
+        )
+        self._position_tolerance_cm = required_number(
+            controller_config, "position_tolerance_cm", minimum=0.0
+        )
+        self._linear_speed_tolerance_cm_s = required_number(
+            controller_config, "linear_speed_tolerance_cm_s", minimum=0.0
+        )
+        self._position_stable_samples = required_number(
+            controller_config,
+            "position_stable_samples",
+            integer=True,
+            minimum=1.0,
+        )
+        self._position_poll_hz = required_number(
+            controller_config, "position_poll_hz", minimum=1e-6
+        )
+        self._yaw_tolerance_deg = required_number(
+            controller_config, "yaw_tolerance_deg", minimum=0.0
+        )
+        self._yaw_publish_hz = required_number(
+            controller_config, "yaw_publish_hz", minimum=1e-6
+        )
         self._yaw_rate_rad_s = math.radians(
-            max(1.0, float(yaw_rate_deg_s))
+            required_number(controller_config, "yaw_rate_deg_s", minimum=1e-6)
         )
-        self._navigation_start_delay_s = max(
-            0.0,
-            float(navigation_start_delay_s),
+        self._assumed_speed_m_s = required_number(
+            controller_config, "assumed_speed_m_s", minimum=1e-6
         )
-        self._goal_ack_timeout_s = max(0.1, float(goal_ack_timeout_s))
-        self._takeoff_timeout_s = max(0.1, float(takeoff_timeout_s))
-        self._landing_timeout_s = max(0.1, float(landing_timeout_s))
-        self._flight_state_poll_hz = max(1.0, float(flight_state_poll_hz))
+        self._navigation_start_delay_s = required_number(
+            controller_config, "navigation_start_delay_s", minimum=0.0
+        )
+        self._goal_ack_timeout_s = required_number(
+            controller_config, "goal_ack_timeout_s", minimum=1e-6
+        )
+        self._takeoff_timeout_s = required_number(
+            controller_config, "takeoff_timeout_s", minimum=1e-6
+        )
+        self._landing_timeout_s = required_number(
+            controller_config, "landing_timeout_s", minimum=1e-6
+        )
+        self._flight_state_poll_hz = required_number(
+            controller_config, "flight_state_poll_hz", minimum=1e-6
+        )
+        self._translation_timeout_scale = required_number(
+            controller_config, "translation_timeout_scale", minimum=1e-6
+        )
+        self._motion_timeout_padding_s = required_number(
+            controller_config, "motion_timeout_padding_s", minimum=0.0
+        )
+        self._default_motion_timeout_s = required_number(
+            controller_config, "default_motion_timeout_s", minimum=1e-6
+        )
+        self._max_motion_timeout_s = required_number(
+            controller_config, "max_motion_timeout_s", minimum=1e-6
+        )
+        if self._max_motion_timeout_s < self._default_motion_timeout_s:
+            raise ValueError(
+                "OWL max_motion_timeout_s must be >= default_motion_timeout_s"
+            )
 
     def init(self) -> Dict[str, Any]:
         with self._operation_lock:
@@ -135,7 +162,7 @@ class OwlController:
             try:
                 self._hardware.publish_control(
                     self.TAKEOFF_TASK_ID,
-                    self.DRONE_ID,
+                    self._drone_id,
                 )
                 final_health = self._wait_for_health(
                     lambda value: value.get("control_ready") is True,
@@ -170,7 +197,7 @@ class OwlController:
         success, encoded = cv2.imencode(
             ".jpg",
             frame_bgr,
-            [cv2.IMWRITE_JPEG_QUALITY, self.JPEG_QUALITY],
+            [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality],
         )
         if not success:
             raise RuntimeError("failed to encode OWL RGB frame as JPEG")
@@ -324,14 +351,23 @@ class OwlController:
             + up_m * up_m
         )
         translation_timeout_s = (
-            distance_m / self.ASSUMED_SPEED_M_S * 3.0 + 5.0
+            distance_m
+            / self._assumed_speed_m_s
+            * self._translation_timeout_scale
+            + self._motion_timeout_padding_s
         )
         rotation_timeout_s = (
-            abs(math.radians(yaw)) / self._yaw_rate_rad_s + 5.0
+            abs(math.radians(yaw))
+            / self._yaw_rate_rad_s
+            + self._motion_timeout_padding_s
         )
         timeout_s = min(
-            120.0,
-            max(8.0, translation_timeout_s, rotation_timeout_s),
+            self._max_motion_timeout_s,
+            max(
+                self._default_motion_timeout_s,
+                translation_timeout_s,
+                rotation_timeout_s,
+            ),
         )
         final_pose = self._wait_for_pose(
             target_x_m,
@@ -365,8 +401,8 @@ class OwlController:
             "estimated": False,
             "frame": "agent_world_x_forward_y_right_z_up",
             "sources": {
-                "position": OwlHardware.ODOM_TOPIC,
-                "orientation": OwlHardware.ODOM_TOPIC,
+                "position": self._hardware.odom_topic,
+                "orientation": self._hardware.odom_topic,
             },
         }
 
@@ -411,7 +447,7 @@ class OwlController:
                 }
 
             self._navigation_state = "landing"
-            self._hardware.publish_control(self.LANDING_TASK_ID, self.DRONE_ID)
+            self._hardware.publish_control(self.LANDING_TASK_ID, self._drone_id)
             try:
                 final_health = self._wait_for_health(
                     lambda value: (
@@ -491,7 +527,7 @@ class OwlController:
             return
         self._hardware.publish_control(
             self.NAVIGATION_TASK_ID,
-            self.DRONE_ID,
+                self._drone_id,
         )
         self._navigation_state = "starting"
         if self._navigation_start_delay_s > 0:
@@ -737,8 +773,8 @@ class OwlController:
                 )
             height, width = frame_bgr.shape[:2]
             long_edge = max(height, width)
-            if long_edge != self.OUTPUT_LONG_EDGE:
-                scale = self.OUTPUT_LONG_EDGE / float(long_edge)
+            if long_edge != self._output_long_edge:
+                scale = self._output_long_edge / float(long_edge)
                 output_width = max(1, int(round(width * scale)))
                 output_height = max(1, int(round(height * scale)))
                 frame_bgr = cv2.resize(

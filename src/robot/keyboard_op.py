@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Any, Protocol
+
+from .config_loader import load_robot_config, required_number, required_section
 
 class VelocityController(Protocol):
     def velocity(self, x: int, y: int, z: int, yaw: int) -> dict[str, Any]: ...
@@ -19,14 +22,64 @@ class KeyboardOp:
     def __init__(
         self,
         controller: VelocityController,
-        speed: int = 30,
-        yaw_speed: int = 30,
-        frequency_hz: float = 15.0,
+        *,
+        config: dict[str, Any] | None = None,
+        config_path: str | Path | None = None,
     ) -> None:
+        keyboard_config = required_section(
+            config or load_robot_config("common", config_path),
+            "keyboard",
+        )
+        min_command = required_number(
+            keyboard_config,
+            "min_command_percent",
+            integer=True,
+            minimum=0.0,
+        )
+        max_command = required_number(
+            keyboard_config,
+            "max_command_percent",
+            integer=True,
+            minimum=float(min_command),
+        )
+        min_frequency = required_number(
+            keyboard_config, "min_frequency_hz", minimum=1e-6
+        )
+        max_frequency = required_number(
+            keyboard_config,
+            "max_frequency_hz",
+            minimum=float(min_frequency),
+        )
         self.controller = controller
-        self.speed = max(1, min(100, int(speed)))
-        self.yaw_speed = max(1, min(100, int(yaw_speed)))
-        self.frequency_hz = max(1.0, min(30.0, float(frequency_hz)))
+        self.speed = max(
+            int(min_command),
+            min(
+                int(max_command),
+                required_number(
+                    keyboard_config,
+                    "speed_percent",
+                    integer=True,
+                ),
+            ),
+        )
+        self.yaw_speed = max(
+            int(min_command),
+            min(
+                int(max_command),
+                required_number(
+                    keyboard_config,
+                    "yaw_speed_percent",
+                    integer=True,
+                ),
+            ),
+        )
+        self.frequency_hz = max(
+            float(min_frequency),
+            min(
+                float(max_frequency),
+                required_number(keyboard_config, "frequency_hz"),
+            ),
+        )
         self._pressed: set[str] = set()
         self._state_lock = threading.RLock()
         self._stop_event = threading.Event()

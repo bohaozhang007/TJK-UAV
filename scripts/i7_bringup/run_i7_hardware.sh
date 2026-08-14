@@ -2,7 +2,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-STARTUP_GRACE_S="${I7_STARTUP_GRACE_S:-2}"
+source "${SCRIPT_DIR}/load_i7_config.sh"
+
+STARTUP_GRACE_S="${I7_STARTUP_GRACE_S:-$(read_i7_bringup_config startup_grace_s)}"
+SHUTDOWN_POLL_S="$(read_i7_bringup_config shutdown_poll_interval_s)"
+INTERRUPT_SHUTDOWN_TIMEOUT_S="$(read_i7_bringup_config interrupt_shutdown_timeout_s)"
+TERMINATE_SHUTDOWN_TIMEOUT_S="$(read_i7_bringup_config terminate_shutdown_timeout_s)"
 
 COMPONENTS=(
   00_roscore.sh
@@ -29,7 +34,11 @@ signal_all() {
 }
 
 wait_for_shutdown() {
-  local attempts="$1"
+  local timeout_s="$1"
+  local attempts
+  attempts="$(python3 -c \
+    'import math, sys; print(max(1, math.ceil(float(sys.argv[1]) / float(sys.argv[2]))))' \
+    "${timeout_s}" "${SHUTDOWN_POLL_S}")"
   local attempt pid any_alive
   for ((attempt=0; attempt<attempts; attempt++)); do
     any_alive=false
@@ -42,7 +51,7 @@ wait_for_shutdown() {
     if [[ "${any_alive}" == false ]]; then
       return 0
     fi
-    sleep 0.1
+    sleep "${SHUTDOWN_POLL_S}"
   done
   return 1
 }
@@ -59,9 +68,9 @@ cleanup() {
   if ((${#PIDS[@]} > 0)); then
     echo "Stopping all I7 hardware components..."
     signal_all INT
-    if ! wait_for_shutdown 80; then
+    if ! wait_for_shutdown "${INTERRUPT_SHUTDOWN_TIMEOUT_S}"; then
       signal_all TERM
-      if ! wait_for_shutdown 30; then
+      if ! wait_for_shutdown "${TERMINATE_SHUTDOWN_TIMEOUT_S}"; then
         signal_all KILL
       fi
     fi

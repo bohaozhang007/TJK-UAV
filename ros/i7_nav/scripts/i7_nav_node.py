@@ -65,6 +65,28 @@ class GoalData:
     planner_output_ready: bool = False
 
 
+def _required_positive_float_param(name: str) -> float:
+    value = float(rospy.get_param(f"~{name}"))
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"I7 parameter {name} must be finite and positive")
+    return value
+
+
+def _required_positive_int_param(name: str) -> int:
+    raw = rospy.get_param(f"~{name}")
+    value = int(raw)
+    if isinstance(raw, bool) or float(raw) != value or value <= 0:
+        raise ValueError(f"I7 parameter {name} must be a positive integer")
+    return value
+
+
+def _required_string_param(name: str) -> str:
+    value = rospy.get_param(f"~{name}")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"I7 parameter {name} must be a non-empty string")
+    return value.strip()
+
+
 class I7NavNode:
     ON_GROUND = 1
     IN_AIR = 2
@@ -73,63 +95,104 @@ class I7NavNode:
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
 
-        self.odom_topic = rospy.get_param("~odom_topic", "/Odometry")
-        self.goal_topic = rospy.get_param("~goal_topic", "/cxr_goal")
-        self.planner_goal_topic = rospy.get_param(
-            "~planner_goal_topic", "/move_base_simple/goal"
+        self.odom_topic = _required_string_param("topics/odom_topic")
+        self.state_topic = _required_string_param("topics/state_topic")
+        self.extended_state_topic = _required_string_param(
+            "topics/extended_state_topic"
         )
-        self.position_cmd_topic = rospy.get_param(
-            "~position_cmd_topic", "/position_cmd"
+        self.battery_topic = _required_string_param("topics/battery_topic")
+        self.goal_topic = _required_string_param("topics/goal_topic")
+        self.planner_goal_topic = _required_string_param(
+            "topics/planner_goal_topic"
         )
-        self.setpoint_topic = rospy.get_param(
-            "~setpoint_topic", "/mavros/setpoint_raw/local"
+        self.position_cmd_topic = _required_string_param(
+            "topics/position_cmd_topic"
         )
-        self.planner_heartbeat_topic = rospy.get_param(
-            "~planner_heartbeat_topic", "/drone_0_traj_server/heartbeat"
+        self.setpoint_topic = _required_string_param("topics/setpoint_topic")
+        self.planner_heartbeat_topic = _required_string_param(
+            "topics/planner_heartbeat_topic"
+        )
+        self.nav_state_topic = _required_string_param("topics/nav_state_topic")
+        self.nav_active_goal_topic = _required_string_param(
+            "topics/nav_active_goal_topic"
+        )
+        self.takeoff_service = _required_string_param("services/takeoff_service")
+        self.landing_service = _required_string_param("services/landing_service")
+        self.force_land_service = _required_string_param(
+            "services/force_land_service"
+        )
+        self.abort_service = _required_string_param("services/abort_service")
+        self.reinitialize_service = _required_string_param(
+            "services/reinitialize_service"
+        )
+        self.mavros_arm_service = _required_string_param(
+            "services/mavros_arm_service"
+        )
+        self.mavros_land_service = _required_string_param(
+            "services/mavros_land_service"
         )
 
-        self.control_hz = max(20.0, float(rospy.get_param("~control_hz", 30.0)))
-        self.status_hz = max(1.0, float(rospy.get_param("~status_hz", 5.0)))
-        self.takeoff_alt_m = float(rospy.get_param("~takeoff_alt_m", 1.0))
-        self.max_takeoff_vel_m_s = max(
-            0.1, float(rospy.get_param("~max_takeoff_vel_m_s", 0.8))
+        self.control_hz = _required_positive_float_param("control/control_hz")
+        self.status_hz = _required_positive_float_param("control/status_hz")
+        self.control_queue_size = _required_positive_int_param(
+            "control/control_queue_size"
+        )
+        self.status_queue_size = _required_positive_int_param(
+            "control/status_queue_size"
+        )
+        self.control_dt_max_s = _required_positive_float_param(
+            "control/control_dt_max_s"
+        )
+        self.condition_wait_timeout_s = _required_positive_float_param(
+            "timeouts/condition_wait_timeout_s"
+        )
+        self.mavros_service_timeout_s = _required_positive_float_param(
+            "timeouts/mavros_service_timeout_s"
+        )
+        self.takeoff_alt_m = _required_positive_float_param(
+            "flight/takeoff_alt_m"
+        )
+        self.max_takeoff_vel_m_s = _required_positive_float_param(
+            "flight/max_takeoff_vel_m_s"
         )
         self.max_yaw_rate_rad_s = math.radians(
-            max(1.0, float(rospy.get_param("~max_yaw_rate_deg_s", 60.0)))
+            _required_positive_float_param("flight/max_yaw_rate_deg_s")
         )
-        self.min_height_m = float(rospy.get_param("~min_height_m", 0.5))
-        self.goal_reached_distance_m = max(
-            0.02, float(rospy.get_param("~goal_reached_distance_m", 0.15))
+        self.min_height_m = _required_positive_float_param(
+            "flight/min_height_m"
+        )
+        self.goal_reached_distance_m = _required_positive_float_param(
+            "completion/goal_reached_distance_m"
         )
         self.goal_yaw_tolerance_rad = math.radians(
-            max(0.5, float(rospy.get_param("~goal_yaw_tolerance_deg", 5.0)))
+            _required_positive_float_param("completion/goal_yaw_tolerance_deg")
         )
-        self.stable_speed_m_s = max(
-            0.01, float(rospy.get_param("~stable_speed_m_s", 0.20))
+        self.stable_speed_m_s = _required_positive_float_param(
+            "completion/stable_speed_m_s"
         )
-        self.stable_samples_required = max(
-            1, int(rospy.get_param("~stable_samples", 3))
+        self.stable_samples_required = _required_positive_int_param(
+            "completion/stable_samples"
         )
-        self.takeoff_timeout_s = max(
-            5.0, float(rospy.get_param("~takeoff_timeout_s", 120.0))
+        self.takeoff_timeout_s = _required_positive_float_param(
+            "timeouts/takeoff_timeout_s"
         )
-        self.landing_timeout_s = max(
-            10.0, float(rospy.get_param("~landing_timeout_s", 90.0))
+        self.landing_timeout_s = _required_positive_float_param(
+            "timeouts/landing_timeout_s"
         )
-        self.odom_max_age_s = max(
-            0.1, float(rospy.get_param("~odom_max_age_s", 1.0))
+        self.odom_max_age_s = _required_positive_float_param(
+            "timeouts/odom_max_age_s"
         )
-        self.state_max_age_s = max(
-            0.1, float(rospy.get_param("~state_max_age_s", 2.0))
+        self.state_max_age_s = _required_positive_float_param(
+            "timeouts/state_max_age_s"
         )
-        self.position_cmd_max_age_s = max(
-            0.05, float(rospy.get_param("~position_cmd_max_age_s", 0.5))
+        self.position_cmd_max_age_s = _required_positive_float_param(
+            "timeouts/position_cmd_max_age_s"
         )
-        self.planner_heartbeat_max_age_s = max(
-            0.2, float(rospy.get_param("~planner_heartbeat_max_age_s", 2.0))
+        self.planner_heartbeat_max_age_s = _required_positive_float_param(
+            "timeouts/planner_heartbeat_max_age_s"
         )
-        self.direct_goal_max_distance_m = max(
-            0.01, float(rospy.get_param("~direct_goal_max_distance_m", 0.15))
+        self.direct_goal_max_distance_m = _required_positive_float_param(
+            "flight/direct_goal_max_distance_m"
         )
 
         if self.takeoff_alt_m < self.min_height_m:
@@ -158,63 +221,86 @@ class I7NavNode:
         self._last_status_monotonic = 0.0
 
         self._setpoint_pub = rospy.Publisher(
-            self.setpoint_topic, PositionTarget, queue_size=20
+            self.setpoint_topic,
+            PositionTarget,
+            queue_size=self.control_queue_size,
         )
         self._planner_goal_pub = rospy.Publisher(
-            self.planner_goal_topic, PoseStamped, queue_size=10
+            self.planner_goal_topic,
+            PoseStamped,
+            queue_size=self.status_queue_size,
         )
         self._state_pub = rospy.Publisher(
-            "~state", String, queue_size=10, latch=True
+            self.nav_state_topic,
+            String,
+            queue_size=self.status_queue_size,
+            latch=True,
         )
         self._active_goal_pub = rospy.Publisher(
-            "~active_goal", PoseStamped, queue_size=10, latch=True
+            self.nav_active_goal_topic,
+            PoseStamped,
+            queue_size=self.status_queue_size,
+            latch=True,
         )
 
         self._subscribers = [
             rospy.Subscriber(
-                self.odom_topic, Odometry, self._odom_callback, queue_size=20
+                self.odom_topic,
+                Odometry,
+                self._odom_callback,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                "/mavros/state", State, self._mavros_state_callback, queue_size=20
+                self.state_topic,
+                State,
+                self._mavros_state_callback,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                "/mavros/extended_state",
+                self.extended_state_topic,
                 ExtendedState,
                 self._extended_state_callback,
-                queue_size=20,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                "/mavros/battery",
+                self.battery_topic,
                 BatteryState,
                 self._battery_callback,
-                queue_size=10,
+                queue_size=self.status_queue_size,
             ),
             rospy.Subscriber(
                 self.position_cmd_topic,
                 PositionCommand,
                 self._position_cmd_callback,
-                queue_size=20,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
                 self.planner_heartbeat_topic,
                 Empty,
                 self._planner_heartbeat_callback,
-                queue_size=20,
+                queue_size=self.control_queue_size,
             ),
             rospy.Subscriber(
-                self.goal_topic, PoseStamped, self._goal_callback, queue_size=10
+                self.goal_topic,
+                PoseStamped,
+                self._goal_callback,
+                queue_size=self.status_queue_size,
             ),
         ]
 
-        self._arm_client = rospy.ServiceProxy("/mavros/cmd/arming", CommandBool)
-        self._land_client = rospy.ServiceProxy("/mavros/cmd/land", CommandTOL)
+        self._arm_client = rospy.ServiceProxy(self.mavros_arm_service, CommandBool)
+        self._land_client = rospy.ServiceProxy(self.mavros_land_service, CommandTOL)
 
         self._services = [
-            rospy.Service("~takeoff", Trigger, self._takeoff_service),
-            rospy.Service("~land", Trigger, self._land_service),
-            rospy.Service("~force_land", Trigger, self._force_land_service),
-            rospy.Service("~abort", Trigger, self._abort_service),
-            rospy.Service("~reinitialize", Trigger, self._reinitialize_service),
+            rospy.Service(self.takeoff_service, Trigger, self._takeoff_service),
+            rospy.Service(self.landing_service, Trigger, self._land_service),
+            rospy.Service(self.force_land_service, Trigger, self._force_land_service),
+            rospy.Service(self.abort_service, Trigger, self._abort_service),
+            rospy.Service(
+                self.reinitialize_service,
+                Trigger,
+                self._reinitialize_service,
+            ),
         ]
 
         self._control_timer = rospy.Timer(
@@ -431,7 +517,10 @@ class I7NavNode:
 
     def _control_timer_callback(self, _event: rospy.TimerEvent) -> None:
         now = time.monotonic()
-        dt = max(0.0, min(0.2, now - self._last_control_monotonic))
+        dt = max(
+            0.0,
+            min(self.control_dt_max_s, now - self._last_control_monotonic),
+        )
         self._last_control_monotonic = now
         setpoint: Optional[PositionTarget] = None
         with self._condition:
@@ -737,7 +826,7 @@ class I7NavNode:
                 armed = bool((self._mavros_state or {}).get("armed", False))
                 airborne = self._airborne_locked()
                 if mode != "OFFBOARD":
-                    self._condition.wait(timeout=0.1)
+                    self._condition.wait(timeout=self.condition_wait_timeout_s)
                     continue
                 self._control_session_active = True
 
@@ -753,7 +842,10 @@ class I7NavNode:
                 )
 
             if not armed:
-                rospy.wait_for_service("/mavros/cmd/arming", timeout=3.0)
+                rospy.wait_for_service(
+                    self.mavros_arm_service,
+                    timeout=self.mavros_service_timeout_s,
+                )
                 response = self._arm_client(True)
                 if not bool(response.success):
                     raise RuntimeError(
@@ -769,7 +861,7 @@ class I7NavNode:
                     and self._state == NavState.TAKEOFF
                     and not self._manual_takeover_latched
                 ):
-                    self._condition.wait(timeout=0.1)
+                    self._condition.wait(timeout=self.condition_wait_timeout_s)
                 if self._manual_takeover_latched:
                     raise RuntimeError("manual takeover latched during takeoff")
                 if self._state == NavState.HOLD:
@@ -807,7 +899,10 @@ class I7NavNode:
                 self._set_state_locked(NavState.LANDING)
                 self._condition.notify_all()
 
-            rospy.wait_for_service("/mavros/cmd/land", timeout=3.0)
+            rospy.wait_for_service(
+                self.mavros_land_service,
+                timeout=self.mavros_service_timeout_s,
+            )
             response = self._land_client(0.0, 0.0, 0.0, 0.0, 0.0)
             if not bool(response.success):
                 raise RuntimeError(
@@ -826,7 +921,7 @@ class I7NavNode:
                         return TriggerResponse(
                             success=True, message="landing complete; vehicle disarmed"
                         )
-                    self._condition.wait(timeout=0.1)
+                    self._condition.wait(timeout=self.condition_wait_timeout_s)
             raise RuntimeError("landing timed out before ground/disarm confirmation")
         except Exception as exc:
             rospy.logerr("I7 landing failed: %s", exc)
@@ -962,11 +1057,11 @@ class I7NavNode:
         if not self._fresh_mapping(
             self._mavros_state, current, self.state_max_age_s
         ):
-            missing.append("/mavros/state")
+            missing.append(self.state_topic)
         if not self._fresh_mapping(
             self._extended_state, current, self.state_max_age_s
         ):
-            missing.append("/mavros/extended_state")
+            missing.append(self.extended_state_topic)
         if not bool((self._mavros_state or {}).get("connected", False)):
             missing.append("mavros_connected")
         if missing:

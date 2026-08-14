@@ -1,0 +1,49 @@
+controller:
+  move_speed_percent: 70
+  position_tolerance_cm: 5.0
+  vertical_tolerance_cm: 4.0
+  stable_speed_cm_s: 3.0
+  position_stable_samples: 4
+  yaw_tolerance_deg: 2.0
+  yaw_stable_rate_deg_s: 5.0
+  yaw_stable_samples: 4
+  control_hz: 40.0
+  translation_kp: 0.65
+  translation_kd: 0.16
+  yaw_kp: 2.2
+  yaw_kd: 0.12
+  max_yaw_command_percent: 50.0
+  translation_timeout_speed_floor_cm_s: 1.0
+  translation_timeout_scale: 4.0
+  rotation_timeout_deg_s: 20.0
+  motion_timeout_padding_s: 5.0
+  default_motion_timeout_s: 8.0
+  max_motion_timeout_s: 120.0
+  rotate_default_timeout_s: 6.0
+  rotate_max_timeout_s: 60.0
+  control_sample_dt_min_s: 0.001
+
+hardware:
+  environment_map: DowntownWest
+  resolution: [640, 480]
+  initial_pose: [-24189.0, 278.0, 437.0, 0.0]
+  start_airborne: true
+  takeoff_height_cm: 100.0
+  offscreen: false
+  launch_sleep_s: 10.0
+  command_timeout_s: 0.75
+  yaw_input_scale: 2.0
+  velocity_active_epsilon: 1.0e-9
+  disconnect_join_timeout_s: 5.0
+  remove_agents_timeout_s: 5.0
+  remove_agents_poll_interval_s: 0.05
+  request_retries: 100
+  request_retry_interval_s: 0.01
+  watchdog_join_timeout_s: 1.0
+  watchdog_interval_min_s: 0.02
+  watchdog_interval_max_s: 0.1
+  watchdog_interval_divisor: 4.0
+
+paths:
+  environment_binary: ~/.unrealcv/UnrealEnv/Collection_WinNoEditor/Collection/Binaries/Win64/Collection.exe
+  setting_directory: ~/unrealzoo-gym/gym_unrealcv/envs/setting/Track

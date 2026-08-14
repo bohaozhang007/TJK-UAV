@@ -27,14 +27,19 @@ unset -f source_setup
 export ROS_PACKAGE_PATH="${SCRIPT_DIR}/ros:/home/jkhk/planner/release:${ROS_PACKAGE_PATH:-}"
 export PYTHONPATH="${SCRIPT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-I7_SERVER_HOST="${I7_SERVER_HOST:-0.0.0.0}"
-I7_SERVER_PORT="${I7_SERVER_PORT:-8765}"
-I7_CAPTURE_DIR="${I7_CAPTURE_DIR:-${SCRIPT_DIR}/captures}"
+SERVER_ARGS=()
+if [[ -n "${I7_SERVER_HOST:-}" ]]; then
+  SERVER_ARGS+=(--host "${I7_SERVER_HOST}")
+fi
+if [[ -n "${I7_SERVER_PORT:-}" ]]; then
+  SERVER_ARGS+=(--port "${I7_SERVER_PORT}")
+fi
+if [[ -n "${I7_CAPTURE_DIR:-}" ]]; then
+  SERVER_ARGS+=(--vdir "${I7_CAPTURE_DIR}")
+fi
 
 cd "${SCRIPT_DIR}"
 exec python3 -m robot.server \
   --robot i7 \
-  --host "${I7_SERVER_HOST}" \
-  --port "${I7_SERVER_PORT}" \
-  --vdir "${I7_CAPTURE_DIR}" \
+  "${SERVER_ARGS[@]}" \
   "$@"

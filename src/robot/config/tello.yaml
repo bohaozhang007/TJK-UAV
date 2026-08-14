@@ -1,0 +1,5 @@
+controller:
+  takeoff_height_cm: 100.0
+  move_speed_percent: 30
+  position_tolerance_cm: 20.0
+  yaw_tolerance_deg: 1.0

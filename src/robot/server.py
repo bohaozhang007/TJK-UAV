@@ -12,6 +12,12 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from .config_loader import (
+    load_robot_config,
+    required_number,
+    required_section,
+    required_string,
+)
 from .keyboard_op import KeyboardOp, VelocityController
 
 
@@ -74,9 +80,10 @@ class NullKeepalive:
 
 class KeepaliveThread(threading.Thread):
     """后台心跳线程，每10秒发送一次 velocity(0,0,0,0) 以保持连接"""
-    def __init__(self, controller: VelocityController):
+    def __init__(self, controller: VelocityController, interval_s: float):
         super().__init__(daemon=True)
         self.controller = controller
+        self.interval_s = float(interval_s)
         self._stop_event = threading.Event()
         self._active = False
 
@@ -92,7 +99,7 @@ class KeepaliveThread(threading.Thread):
     def run(self):
         while not self._stop_event.is_set():
             # 阻塞等待 10 秒，如果中途触发了 stop_event 则立刻唤醒并退出
-            is_stopped = self._stop_event.wait(10.0)
+            is_stopped = self._stop_event.wait(self.interval_s)
             if is_stopped:
                 break
             
@@ -108,6 +115,9 @@ class ApiHandler(BaseHTTPRequestHandler):
     controller: RobotController | None = None
     keepalive: Keepalive | None = None
     keyboard_op: KeyboardOp | None = None
+    video_stream_default_fps: float | None = None
+    video_stream_min_fps: float | None = None
+    video_stream_max_fps: float | None = None
 
     def _json_response(self, code: int, payload: dict):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -166,10 +176,15 @@ class ApiHandler(BaseHTTPRequestHandler):
 </html>
 """
 
-    def _stream_video_feed(self, fps: float = 10.0):
+    def _stream_video_feed(self, fps: float):
         assert self.controller is not None
+        if self.video_stream_min_fps is None or self.video_stream_max_fps is None:
+            raise RuntimeError("Robot Server video configuration is unavailable")
         boundary = "frame"
-        interval_seconds = 1.0 / max(1.0, min(30.0, float(fps)))
+        interval_seconds = 1.0 / max(
+            self.video_stream_min_fps,
+            min(self.video_stream_max_fps, float(fps)),
+        )
         frame_bytes = self.controller.get_rgb_byte()
 
         self.send_response(200)
@@ -248,7 +263,11 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if path == "/video_feed":
             try:
-                fps = float(query.get("fps", ["10"])[0])
+                if self.video_stream_default_fps is None:
+                    raise RuntimeError("Robot Server video configuration is unavailable")
+                fps = float(
+                    query.get("fps", [str(self.video_stream_default_fps)])[0]
+                )
                 self._stream_video_feed(fps=fps)
             except Exception as exc:
                 self._json_response(400, {"ok": False, "error": str(exc)})
@@ -333,10 +352,26 @@ def run_http_server(
     host: str,
     port: int,
     keyboard_op: KeyboardOp | None = None,
+    server_config: dict[str, Any] | None = None,
 ):
+    server_config = required_section(
+        server_config or load_robot_config("common"),
+        "server",
+    )
     ApiHandler.controller = controller
     ApiHandler.keepalive = keepalive
     ApiHandler.keyboard_op = keyboard_op
+    ApiHandler.video_stream_default_fps = required_number(
+        server_config, "video_stream_default_fps", minimum=1e-6
+    )
+    ApiHandler.video_stream_min_fps = required_number(
+        server_config, "video_stream_min_fps", minimum=1e-6
+    )
+    ApiHandler.video_stream_max_fps = required_number(
+        server_config,
+        "video_stream_max_fps",
+        minimum=ApiHandler.video_stream_min_fps,
+    )
     server = ThreadingHTTPServer((host, port), ApiHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -467,29 +502,46 @@ def run_console(
             print({"ok": False, "error": str(exc)})
 
 
-def build_controller(robot: str, image_dir: str) -> RobotController:
+def build_controller(
+    robot: str,
+    image_dir: str,
+    config_path: str | Path | None = None,
+) -> RobotController:
     if robot == "tello":
         from .controllers.tello import TelloController
 
-        return TelloController(image_dir=image_dir)
+        return TelloController(image_dir=image_dir, config_path=config_path)
     if robot == "ue":
         from .controllers.ue import UEController
 
-        return UEController(image_dir=image_dir)
+        return UEController(image_dir=image_dir, config_path=config_path)
     if robot == "owl":
         from .controllers.owl import OwlController
 
-        return OwlController(image_dir=image_dir)
+        return OwlController(image_dir=image_dir, config_path=config_path)
     if robot == "i7":
         from .controllers.i7 import I7Controller
 
-        return I7Controller(image_dir=image_dir)
+        return I7Controller(image_dir=image_dir, config_path=config_path)
     raise ValueError(f"unsupported robot: {robot}")
 
 
-def build_keep_alive(robot: str, controller: RobotController) -> Keepalive:
+def build_keep_alive(
+    robot: str,
+    controller: RobotController,
+    common_config: dict[str, Any] | None = None,
+) -> Keepalive:
     if robot == "tello":
-        keepalive = KeepaliveThread(controller)
+        server_config = required_section(
+            common_config or load_robot_config("common"),
+            "server",
+        )
+        keepalive = KeepaliveThread(
+            controller,
+            required_number(
+                server_config, "keepalive_interval_s", minimum=1e-6
+            ),
+        )
         keepalive.start()
         return keepalive
     if robot in {"ue", "owl", "i7"}:
@@ -502,11 +554,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--robot",
         choices=("tello", "ue", "owl", "i7"),
-        default="ue",
-        help="controller backend to use (default: ue)",
+        default=None,
+        help="controller backend to use (default comes from common config)",
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Optional YAML override for the selected Robot backend",
+    )
+    parser.add_argument(
+        "--common-config",
+        default=None,
+        help="Optional YAML override for Robot Server and keyboard settings",
+    )
     parser.add_argument(
         "--vdir",
         default=str(Path(__file__).resolve().parents[2] / "captures"),
@@ -519,20 +581,38 @@ def main():
     parser = _build_arg_parser()
     args = parser.parse_args()
 
-    controller = build_controller(args.robot, args.vdir)
-    keepalive = build_keep_alive(args.robot, controller)
-    keyboard_op = KeyboardOp(controller)
+    common_config = load_robot_config("common", args.common_config)
+    server_config = required_section(common_config, "server")
+    robot = args.robot or required_string(server_config, "default_robot")
+    if robot not in {"tello", "ue", "owl", "i7"}:
+        raise ValueError(f"unsupported default Robot backend: {robot}")
+    host = (
+        args.host
+        if args.host is not None
+        else required_string(server_config, "host")
+    )
+    port = (
+        args.port
+        if args.port is not None
+        else required_number(
+            server_config, "port", integer=True, minimum=1, maximum=65535
+        )
+    )
+    controller = build_controller(robot, args.vdir, args.config)
+    keepalive = build_keep_alive(robot, controller, common_config)
+    keyboard_op = KeyboardOp(controller, config=common_config)
 
     server = run_http_server(
         controller,
         keepalive,
-        args.host,
-        args.port,
+        host,
+        port,
         keyboard_op=keyboard_op,
+        server_config=common_config,
     )
 
-    print(f"HTTP ready at http://{args.host}:{args.port} robot={args.robot}")
-    print(f"Live preview: http://{args.host}:{args.port}/preview")
+    print(f"HTTP ready at http://{host}:{port} robot={robot}")
+    print(f"Live preview: http://{host}:{port}/preview")
     print(
         "Endpoints: /init /takeoff /get_rgb_meta /get_rgb_byte "
         "/get_depth_meta /get_depth_np /velocity /move_relative_xyz "

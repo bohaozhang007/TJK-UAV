@@ -1,14 +1,12 @@
-# Wait after every motion action before reading the resulting pose (seconds).
-action_sleep_s: 1.0
-
-# Minimum Robot-side completion timeout for each I7 motion. Longer movements
-# may receive a larger distance-based timeout (seconds).
-motion_timeout_s: 15.0
-
-# true: skip iterative TRACK, fly forward once from the aligned best view,
-# then use the reached pose as the SCAN center. false: keep the v20 TRACK flow.
-skip_track: true
-skip_track_forward_cm: 30.0
+# Runtime timing and Robot request limits.
+runtime:
+  # Wait after every motion action before reading the resulting pose (seconds).
+  action_sleep_s: 1.0
+  # Minimum Robot-side completion timeout for each I7 motion. Longer movements
+  # may receive a larger distance-based timeout (seconds).
+  motion_timeout_s: 15.0
+  # --http-timeout-s can override this for one run without changing the YAML.
+  http_request_timeout_s: 180.0
 
 # Multi-waypoint mission in a fixed frame whose origin is the first takeoff
 # hover pose. XYZ uses centimetres; positive yaw is clockwise in degrees.
@@ -30,16 +28,26 @@ mission:
       y_cm: -150.0
       z_cm: 50.0
       yaw_deg: 0.0
+      # true: only verify transit/arrival, then continue to the next waypoint.
+      # false: run SEARCH/TRACK/SCAN after arrival.
+      only_arrive: false
 
     # - name: waypoint_2
     #   x_cm: 200.0
     #   y_cm: -250.0
     #   z_cm: 0.0
     #   yaw_deg: 0.0
+    #   only_arrive: false
 
 
 # Motion limits and pixel-error conversion used while tracking the target.
 motion:
+  # Resolution at which the pixel-error gains below were calibrated. At
+  # startup, v20 scales the horizontal gain by reference_width/actual_width
+  # and the vertical gain by reference_height/actual_height.
+  reference_width_px: 640
+  reference_height_px: 360
+
   # Forward/backward action.
   max_fb_step_cm: 50.0
   # Visual approach deadband; Server pose tolerance filters final XYZ jointly.
@@ -48,16 +56,25 @@ motion:
 
   # Vertical action.
   max_z_step_cm: 30.0 # 30.0
-  z_cm_per_pixel: 0.08 # 0.16
+  z_cm_per_pixel: 0.16
 
   # Yaw action.
   max_rotate_deg: 30.0 # 45.0
-  rotate_deg_per_pixel: 0.05 # 0.1
+  rotate_deg_per_pixel: 0.1
+  # Small forward component used by non-SEARCH pure-yaw actions so I7 routes
+  # the command through the XYZ/EGO path.
+  pure_rotate_forward_cm: 1.0
 
 # Flight safety thresholds.
 safety:
+  # Absolute world-height floor used when planning Agent targets.
   safe_z_cm: 20.0
   depth_safe_distance_cm: 120.0
+  # Forward-path depth uses this percentile inside an ROI that covers at
+  # least these fractions of the image width and height.
+  depth_path_percentile: 1.0
+  depth_path_min_roi_width_ratio: 0.5
+  depth_path_min_roi_height_ratio: 0.5
 
 # Search pattern at each waypoint.
 search:
@@ -65,6 +82,10 @@ search:
   height_offset_cm: 100.0
   # Lock each 360-degree turn to the XYZ captured at its first view.
   align_xyz_to_first_view: true
+  # SAM3 search intentionally requests low-threshold debug results, then keeps
+  # only the strongest configured number of candidates per view.
+  sam3_top_k: 3
+  sam3_debug_confidence_threshold: 0.0
 
 # Generic candidate filtering after detector thresholding and NMS.
 detection:
@@ -81,6 +102,10 @@ select:
 
 # Target approach and convergence settings.
 track:
+  # true: skip iterative TRACK, fly forward once from the aligned best view,
+  # then use the reached pose as the SCAN center. false: keep the TRACK flow.
+  skip: true
+  skip_forward_cm: 30.0
   target_stop_ratio: 0.40
   yaw_only_threshold_deg: 10.0
   max_exec_iters: 200

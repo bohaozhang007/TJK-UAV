@@ -1,32 +1,98 @@
-control_hz: 30.0
-status_hz: 5.0
+# Flight envelope and direct-control safety limits.
+flight:
+  takeoff_alt_m: 1.0
+  max_takeoff_vel_m_s: 0.8
+  max_yaw_rate_deg_s: 5.0
+  # Relative to the ground height captured by the I7 navigation node.
+  # There is intentionally no software upper-height limit.
+  min_height_m: 0.5
+  # Direct control is reserved for a yaw-only command at the current position.
+  direct_goal_max_distance_m: 0.15
 
-odom_topic: /Odometry
-goal_topic: /cxr_goal
-planner_goal_topic: /move_base_simple/goal
-position_cmd_topic: /position_cmd
-setpoint_topic: /mavros/setpoint_raw/local
-planner_heartbeat_topic: /drone_0_traj_server/heartbeat
+# Pose-completion thresholds shared by i7_nav and I7Controller.
+completion:
+  goal_reached_distance_m: 0.15
+  goal_yaw_tolerance_deg: 5.0
+  stable_speed_m_s: 0.20
+  stable_samples: 3
 
-takeoff_alt_m: 1.0
-max_takeoff_vel_m_s: 0.8
-max_yaw_rate_deg_s: 5.0
+# Operation deadlines and telemetry freshness limits.
+timeouts:
+  takeoff_timeout_s: 120.0
+  landing_timeout_s: 90.0
+  odom_max_age_s: 1.0
+  state_max_age_s: 2.0
+  position_cmd_max_age_s: 0.5
+  planner_heartbeat_max_age_s: 2.0
+  condition_wait_timeout_s: 0.1
+  mavros_service_timeout_s: 3.0
 
-# Relative to the ground height captured by the I7 navigation node.
-# There is intentionally no software upper-height limit.
-min_height_m: 0.5
+# ROS loop rates and queue capacities.
+control:
+  control_hz: 30.0
+  status_hz: 5.0
+  control_dt_max_s: 0.2
+  control_queue_size: 20
+  status_queue_size: 10
 
-goal_reached_distance_m: 0.15
-goal_yaw_tolerance_deg: 5.0
-stable_speed_m_s: 0.20
-stable_samples: 3
+# Robot Server completion and timeout policy. Position/yaw/speed completion
+# tolerances above are shared by i7_nav and I7Controller from this same file.
+robot_controller:
+  node_name: i7_robot_server
+  rtsp_url: rtsp://127.0.0.1:8554/k40t
+  jpeg_quality: 85
+  ready_timeout_s: 15.0
+  ros_services_ready_timeout_s: 5.0
+  rgb_max_age_s: 2.0
+  nav_max_age_s: 2.0
+  battery_max_age_s: 10.0
+  camera_open_retry_s: 0.5
+  camera_read_retry_s: 0.2
+  camera_join_timeout_s: 3.5
+  rtsp_io_timeout_us: 3000000
+  camera_buffer_size: 1
+  completion_poll_hz: 10.0
+  goal_ack_timeout_s: 2.0
+  goal_ack_position_tolerance_m: 0.05
+  assumed_speed_m_s: 0.5
+  translation_timeout_scale: 3.0
+  rotation_timeout_deg_s: 30.0
+  motion_timeout_padding_s: 5.0
+  default_motion_timeout_s: 15.0
+  max_motion_timeout_s: 120.0
 
-takeoff_timeout_s: 120.0
-landing_timeout_s: 90.0
-odom_max_age_s: 1.0
-state_max_age_s: 2.0
-position_cmd_max_age_s: 0.5
-planner_heartbeat_max_age_s: 2.0
+# ROS topic wiring; normally unchanged after deployment.
+topics:
+  odom_topic: /Odometry
+  state_topic: /mavros/state
+  extended_state_topic: /mavros/extended_state
+  battery_topic: /mavros/battery
+  goal_topic: /cxr_goal
+  planner_goal_topic: /move_base_simple/goal
+  position_cmd_topic: /position_cmd
+  setpoint_topic: /mavros/setpoint_raw/local
+  planner_heartbeat_topic: /drone_0_traj_server/heartbeat
+  nav_state_topic: /i7_nav/state
+  nav_active_goal_topic: /i7_nav/active_goal
 
-# Direct control is reserved for a yaw-only command at the current position.
-direct_goal_max_distance_m: 0.15
+# ROS service wiring; normally unchanged after deployment.
+services:
+  takeoff_service: /i7_nav/takeoff
+  landing_service: /i7_nav/land
+  force_land_service: /i7_nav/force_land
+  abort_service: /i7_nav/abort
+  reinitialize_service: /i7_nav/reinitialize
+  mavros_arm_service: /mavros/cmd/arming
+  mavros_land_service: /mavros/cmd/land
+
+bringup:
+  startup_grace_s: 2.0
+  shutdown_poll_interval_s: 0.1
+  interrupt_shutdown_timeout_s: 8.0
+  terminate_shutdown_timeout_s: 3.0
+  mavros_fcu_url: /dev/ttyTHS0:921600
+  mavros_gcs_url: udp://0.0.0.0:14555@192.168.31.240:14550
+  mediamtx_binary: /home/jkhk/workspace/jetson-core/libs/mediamtx/arm64/mediamtx
+  mediamtx_rtsp_address: :8554
+  camera_source_url: rtsp://192.168.144.64:558/live/single
+  camera_source_on_demand: "yes"

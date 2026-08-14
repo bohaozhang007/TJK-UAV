@@ -11,8 +11,57 @@ from typing import Any, Dict, Optional
 
 import cv2
 import numpy as np
+import yaml
 
 from ..hardware.i7 import I7Hardware
+
+
+def _load_i7_nav_config(config_path: Optional[str | Path] = None) -> dict:
+    path = (
+        Path(config_path).expanduser().resolve()
+        if config_path is not None
+        else (
+            Path(__file__).resolve().parents[3]
+            / "ros"
+            / "i7_nav"
+            / "config"
+            / "i7_nav.yaml"
+        )
+    )
+    try:
+        with path.open("r", encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+    except (OSError, yaml.YAMLError) as exc:
+        raise RuntimeError(f"Failed to load I7 navigation config: {path}") from exc
+    if not isinstance(config, dict):
+        raise ValueError(f"I7 navigation config must be a mapping: {path}")
+    return config
+
+
+def _required_number(config: dict, key: str, *, integer: bool = False):
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"I7 config value {key} must be numeric, got {value!r}")
+    result = int(value) if integer else float(value)
+    if integer and float(value) != result:
+        raise ValueError(f"I7 config value {key} must be an integer, got {value!r}")
+    if not math.isfinite(float(result)) or result <= 0:
+        raise ValueError(f"I7 config value {key} must be positive, got {result!r}")
+    return result
+
+
+def _required_string(config: dict, key: str) -> str:
+    value = config.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"I7 config value {key} must be a non-empty string")
+    return value.strip()
+
+
+def _required_section(config: dict, key: str) -> dict:
+    value = config.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"Missing I7 config section: {key}")
+    return value
 
 
 class I7Controller:
@@ -23,22 +72,137 @@ class I7Controller:
     public world y and yaw have the opposite sign.
     """
 
-    JPEG_QUALITY = 85
-    # Keep Robot completion criteria identical to i7_nav.yaml.
-    POSITION_TOLERANCE_CM = 15.0
-    YAW_TOLERANCE_DEG = 5.0
-    LINEAR_SPEED_TOLERANCE_CM_S = 20.0
-    STABLE_SAMPLES = 3
-    POLL_HZ = 10.0
-    GOAL_ACK_TIMEOUT_S = 2.0
-    ASSUMED_SPEED_M_S = 0.5
-
     def __init__(
         self,
         image_dir: Optional[str] = None,
         hardware: Optional[I7Hardware] = None,
+        config_path: Optional[str | Path] = None,
     ) -> None:
-        self._hardware = hardware or I7Hardware()
+        config = _load_i7_nav_config(config_path)
+        completion_config = _required_section(config, "completion")
+        timeouts_config = _required_section(config, "timeouts")
+        control_config = _required_section(config, "control")
+        controller_config = _required_section(config, "robot_controller")
+        topics_config = _required_section(config, "topics")
+        services_config = _required_section(config, "services")
+        self._jpeg_quality = _required_number(
+            controller_config, "jpeg_quality", integer=True
+        )
+        self._position_tolerance_cm = 100.0 * _required_number(
+            completion_config, "goal_reached_distance_m"
+        )
+        self._yaw_tolerance_deg = _required_number(
+            completion_config, "goal_yaw_tolerance_deg"
+        )
+        self._linear_speed_tolerance_cm_s = 100.0 * _required_number(
+            completion_config, "stable_speed_m_s"
+        )
+        self._stable_samples = _required_number(
+            completion_config, "stable_samples", integer=True
+        )
+        self._poll_hz = _required_number(
+            controller_config, "completion_poll_hz"
+        )
+        self._goal_ack_timeout_s = _required_number(
+            controller_config, "goal_ack_timeout_s"
+        )
+        self._goal_ack_position_tolerance_m = _required_number(
+            controller_config, "goal_ack_position_tolerance_m"
+        )
+        self._assumed_speed_m_s = _required_number(
+            controller_config, "assumed_speed_m_s"
+        )
+        self._translation_timeout_scale = _required_number(
+            controller_config, "translation_timeout_scale"
+        )
+        self._rotation_timeout_deg_s = _required_number(
+            controller_config, "rotation_timeout_deg_s"
+        )
+        self._motion_timeout_padding_s = _required_number(
+            controller_config, "motion_timeout_padding_s"
+        )
+        self._default_motion_timeout_s = _required_number(
+            controller_config, "default_motion_timeout_s"
+        )
+        self._max_motion_timeout_s = _required_number(
+            controller_config, "max_motion_timeout_s"
+        )
+        if self._max_motion_timeout_s < self._default_motion_timeout_s:
+            raise ValueError(
+                "I7 config max_motion_timeout_s must be >= "
+                "default_motion_timeout_s"
+            )
+        self._hardware = hardware or I7Hardware(
+            node_name=_required_string(controller_config, "node_name"),
+            rtsp_url=_required_string(controller_config, "rtsp_url"),
+            ready_timeout_s=_required_number(
+                controller_config, "ready_timeout_s"
+            ),
+            ros_services_ready_timeout_s=_required_number(
+                controller_config, "ros_services_ready_timeout_s"
+            ),
+            state_max_age_s=_required_number(timeouts_config, "state_max_age_s"),
+            odom_max_age_s=_required_number(timeouts_config, "odom_max_age_s"),
+            rgb_max_age_s=_required_number(
+                controller_config, "rgb_max_age_s"
+            ),
+            nav_max_age_s=_required_number(
+                controller_config, "nav_max_age_s"
+            ),
+            planner_max_age_s=_required_number(
+                timeouts_config, "planner_heartbeat_max_age_s"
+            ),
+            battery_max_age_s=_required_number(
+                controller_config, "battery_max_age_s"
+            ),
+            condition_wait_timeout_s=_required_number(
+                timeouts_config, "condition_wait_timeout_s"
+            ),
+            camera_open_retry_s=_required_number(
+                controller_config, "camera_open_retry_s"
+            ),
+            camera_read_retry_s=_required_number(
+                controller_config, "camera_read_retry_s"
+            ),
+            camera_join_timeout_s=_required_number(
+                controller_config, "camera_join_timeout_s"
+            ),
+            rtsp_io_timeout_us=_required_number(
+                controller_config, "rtsp_io_timeout_us", integer=True
+            ),
+            camera_buffer_size=_required_number(
+                controller_config, "camera_buffer_size", integer=True
+            ),
+            control_queue_size=_required_number(
+                control_config, "control_queue_size", integer=True
+            ),
+            status_queue_size=_required_number(
+                control_config, "status_queue_size", integer=True
+            ),
+            odom_topic=_required_string(topics_config, "odom_topic"),
+            state_topic=_required_string(topics_config, "state_topic"),
+            extended_state_topic=_required_string(
+                topics_config, "extended_state_topic"
+            ),
+            battery_topic=_required_string(topics_config, "battery_topic"),
+            nav_state_topic=_required_string(topics_config, "nav_state_topic"),
+            nav_active_goal_topic=_required_string(
+                topics_config, "nav_active_goal_topic"
+            ),
+            planner_heartbeat_topic=_required_string(
+                topics_config, "planner_heartbeat_topic"
+            ),
+            goal_topic=_required_string(topics_config, "goal_topic"),
+            takeoff_service=_required_string(services_config, "takeoff_service"),
+            landing_service=_required_string(services_config, "landing_service"),
+            force_land_service=_required_string(
+                services_config, "force_land_service"
+            ),
+            abort_service=_required_string(services_config, "abort_service"),
+            reinitialize_service=_required_string(
+                services_config, "reinitialize_service"
+            ),
+        )
         self._operation_lock = threading.RLock()
         self._image_lock = threading.RLock()
         self._image_dir = Path(image_dir or "captures").expanduser().resolve()
@@ -115,7 +279,7 @@ class I7Controller:
         success, encoded = cv2.imencode(
             ".jpg",
             frame,
-            [cv2.IMWRITE_JPEG_QUALITY, self.JPEG_QUALITY],
+            [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality],
         )
         if not success:
             raise RuntimeError("failed to encode I7 RGB frame as JPEG")
@@ -211,20 +375,33 @@ class I7Controller:
             target_z,
             uses_planner=uses_planner,
             after_monotonic=sent_at,
-            timeout_s=self.GOAL_ACK_TIMEOUT_S,
+            timeout_s=self._goal_ack_timeout_s,
+            tolerance_m=self._goal_ack_position_tolerance_m,
         )
 
         distance_m = math.sqrt(forward_m**2 + right_m**2 + up_m**2)
-        translation_timeout = distance_m / self.ASSUMED_SPEED_M_S * 3.0 + 5.0
-        rotation_timeout = abs(math.radians(yaw)) / math.radians(30.0) + 5.0
-        configured_timeout_s = 8.0 if timeout_s is None else float(timeout_s)
+        translation_timeout = (
+            distance_m
+            / self._assumed_speed_m_s
+            * self._translation_timeout_scale
+            + self._motion_timeout_padding_s
+        )
+        rotation_timeout = (
+            abs(float(yaw)) / self._rotation_timeout_deg_s
+            + self._motion_timeout_padding_s
+        )
+        configured_timeout_s = (
+            self._default_motion_timeout_s
+            if timeout_s is None
+            else float(timeout_s)
+        )
         if not math.isfinite(configured_timeout_s) or configured_timeout_s <= 0.0:
             raise ValueError(
                 "motion timeout must be finite and positive, got "
                 f"{configured_timeout_s!r}"
             )
         effective_timeout_s = min(
-            120.0,
+            self._max_motion_timeout_s,
             max(configured_timeout_s, translation_timeout, rotation_timeout),
         )
         final_pose = self._wait_for_pose(
@@ -249,7 +426,7 @@ class I7Controller:
             "control_mode": "ego_planner" if uses_planner else "direct_yaw",
             "configured_motion_timeout_s": configured_timeout_s,
             "effective_motion_timeout_s": effective_timeout_s,
-            "goal_ack_source": I7Hardware.NAV_ACTIVE_GOAL_TOPIC,
+            "goal_ack_source": self._hardware.nav_active_goal_topic,
             "goal_ack": ack,
         }
 
@@ -270,17 +447,17 @@ class I7Controller:
             "estimated": False,
             "frame": "agent_world_x_forward_y_right_z_up",
             "sources": {
-                "position": I7Hardware.ODOM_TOPIC,
-                "orientation": I7Hardware.ODOM_TOPIC,
+                "position": self._hardware.odom_topic,
+                "orientation": self._hardware.odom_topic,
             },
         }
 
     def get_motion_tolerances(self) -> Dict[str, Any]:
         return {
-            "position_tolerance_cm": self.POSITION_TOLERANCE_CM,
-            "yaw_tolerance_deg": self.YAW_TOLERANCE_DEG,
-            "linear_speed_tolerance_cm_s": self.LINEAR_SPEED_TOLERANCE_CM_S,
-            "stable_samples": self.STABLE_SAMPLES,
+            "position_tolerance_cm": self._position_tolerance_cm,
+            "yaw_tolerance_deg": self._yaw_tolerance_deg,
+            "linear_speed_tolerance_cm_s": self._linear_speed_tolerance_cm_s,
+            "stable_samples": self._stable_samples,
             "position_error_metric": "euclidean_3d",
             "source": "robot_pose_completion",
         }
@@ -382,16 +559,16 @@ class I7Controller:
                 + float(last_pose["vz_m_s"]) ** 2
             )
             if (
-                position_error_cm <= self.POSITION_TOLERANCE_CM
-                and yaw_error_deg <= self.YAW_TOLERANCE_DEG
-                and speed_cm_s <= self.LINEAR_SPEED_TOLERANCE_CM_S
+                position_error_cm <= self._position_tolerance_cm
+                and yaw_error_deg <= self._yaw_tolerance_deg
+                and speed_cm_s <= self._linear_speed_tolerance_cm_s
             ):
                 stable_samples += 1
-                if stable_samples >= self.STABLE_SAMPLES:
+                if stable_samples >= self._stable_samples:
                     return last_pose
             else:
                 stable_samples = 0
-            time.sleep(1.0 / self.POLL_HZ)
+            time.sleep(1.0 / self._poll_hz)
         raise RuntimeError(
             "I7 pose move timeout: "
             f"position_error={position_error_cm:.1f}cm, "

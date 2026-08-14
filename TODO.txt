@@ -1,0 +1,8 @@
+- 旋转问题
+- 整个 action 流程如何，direct-yaw 等动作指令分发路径
+- 停止条件判断的修改
+- 所有 config 简化，阈值冗余能合并；能归类的归类；能调整的靠前；
+- agent 不够合理，不应含任何与具体 robot 相关的配置/代码，比如图像分辨率等，最终的 config 和 agent 应该普适所有 robot
+- 硬件层的结构统一化，i7 有些混乱，将 ros 放进 robot 层？
+- third-party 组织结构，使得直接同目录安装各个 third-party 和 TJK-UAV 即可运行 
+- 'TJK-UAV' -> 'Mul-UAV', TJK-UAV 为 agent 目录
