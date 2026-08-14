@@ -1,8 +1,8 @@
 # Flight envelope and direct-control safety limits.
 flight:
   takeoff_alt_m: 1.0
-  max_takeoff_vel_m_s: 0.8
-  max_yaw_rate_deg_s: 10.0
+  max_takeoff_vel_m_s: 0.4
+  max_yaw_rate_deg_s: 5.0
   # Relative to the ground height captured by the I7 navigation node.
   # There is intentionally no software upper-height limit.
   min_height_m: 0.5

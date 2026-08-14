@@ -33,9 +33,9 @@ mission:
       only_arrive: false
 
     # - name: waypoint_2
-    #   x_cm: 200.0
-    #   y_cm: -250.0
-    #   z_cm: 0.0
+    #   x_cm: 300.0
+    #   y_cm: 350.0
+    #   z_cm: 50.0
     #   yaw_deg: 0.0
     #   only_arrive: false
 
@@ -78,11 +78,11 @@ safety:
 
 # Search pattern at each waypoint.
 search:
-  rotation_step_deg: 60.0 # 30
+  rotation_step_deg: 30.0 # 30
   height_offset_cm: 100.0
   # Forward distance sent together with every SEARCH rotation. Values <= 0,
   # such as 0 or -1, disable forward motion.
-  forward_cm: 20.0
+  forward_cm: 30.0
   # Keep only Z aligned to the first view of each 360-degree SEARCH turn.
   # X/Y are allowed to change with forward motion.
   align_z_to_first_view: true
@@ -98,6 +98,9 @@ detection:
 # Rank robust best views after de-duplicating prompt aliases and rejecting
 # detections that are too close to an image edge.
 select:
+  # true: after the AREA stage, rank by area * confidence. false: rank only
+  # by confidence as before.
+  use_area_confidence_product: true
   # Whether target distance from the image center participates in view
   # selection. false keeps the AREA/CONFIDENCE result without CENTER ranking.
   use_center_metric: false

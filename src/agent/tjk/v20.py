@@ -380,6 +380,15 @@ class TJKAgent:
                 "select.use_center_metric must be boolean, got "
                 f"{self.select_use_center_metric!r}"
             )
+        self.select_use_area_confidence_product = select_config.get(
+            "use_area_confidence_product",
+            True,
+        )
+        if not isinstance(self.select_use_area_confidence_product, bool):
+            raise ValueError(
+                "select.use_area_confidence_product must be boolean, got "
+                f"{self.select_use_area_confidence_product!r}"
+            )
 
         # safe thresh
         self.safe_z_cm = _config_number(
@@ -2259,6 +2268,8 @@ class TJKAgent:
                 f"label={candidate['label']!r} "
                 f"area={candidate['box_area_ratio']:.3%} "
                 f"confidence={candidate['confidence']:.3f} "
+                f"area_x_confidence="
+                f"{candidate['box_area_ratio'] * candidate['confidence']:.6f} "
                 f"center=({candidate['center_x']:.1f},"
                 f"{candidate['center_y']:.1f}) "
                 f"center_distance={candidate['center_distance']:.3f} "
@@ -2295,29 +2306,41 @@ class TJKAgent:
         )[: self.select_area_top_k]
         self._log_candidate_ranking("AREA", context, area_ranked)
 
-        confidence_ranked = sorted(
-            area_ranked,
-            key=lambda candidate: (
+        if self.select_use_area_confidence_product:
+            second_stage = "AREA_X_CONFIDENCE"
+            second_stage_key = lambda candidate: (
+                -float(candidate["box_area_ratio"])
+                * float(candidate["confidence"]),
                 -float(candidate["confidence"]),
                 -float(candidate["box_area_ratio"]),
                 int(candidate["view_idx"]),
-            ),
+            )
+        else:
+            second_stage = "CONFIDENCE"
+            second_stage_key = lambda candidate: (
+                -float(candidate["confidence"]),
+                -float(candidate["box_area_ratio"]),
+                int(candidate["view_idx"]),
+            )
+        second_stage_ranked = sorted(
+            area_ranked,
+            key=second_stage_key,
         )[: self.select_confidence_top_k]
         self._log_candidate_ranking(
-            "CONFIDENCE",
+            second_stage,
             context,
-            confidence_ranked,
+            second_stage_ranked,
         )
 
         if not self.select_use_center_metric:
             self._log(
                 f"[SELECT-RANK][CENTER] context={context} disabled; "
-                "keep CONFIDENCE ranking."
+                f"keep {second_stage} ranking."
             )
-            return confidence_ranked
+            return second_stage_ranked
 
         center_ranked = sorted(
-            confidence_ranked,
+            second_stage_ranked,
             key=lambda candidate: (
                 float(candidate["center_distance"]),
                 -float(candidate["confidence"]),
@@ -2667,7 +2690,7 @@ class TJKAgent:
         return float(pose["z"])
 
     def check_box_offset(self, bbox):
-        # bbox: [[x1, y1], [x2, y2]]
+        bbox = np.asarray(bbox).reshape(2, 2)
         box_center = (bbox[0, :] + bbox[1, :]) / 2
         horizontal_offset = box_center[0] - self.horizontal_center
         # Image y grows downward, so positive vertical_offset means the object is above center.
@@ -2675,6 +2698,7 @@ class TJKAgent:
         return horizontal_offset, vertical_offset
 
     def get_bbox_state(self, bbox):
+        bbox = np.asarray(bbox).reshape(2, 2)
         w = bbox[1, 0] - bbox[0, 0]
         h = bbox[1, 1] - bbox[0, 1]
         box_ratio = max(w / self.img_width, h / self.img_height)
