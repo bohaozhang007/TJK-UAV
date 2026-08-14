@@ -1,6 +1,10 @@
 # Wait after every motion action before reading the resulting pose (seconds).
 action_sleep_s: 1.0
 
+# Minimum Robot-side completion timeout for each I7 motion. Longer movements
+# may receive a larger distance-based timeout (seconds).
+motion_timeout_s: 15.0
+
 # true: skip iterative TRACK, fly forward once from the aligned best view,
 # then use the reached pose as the SCAN center. false: keep the v20 TRACK flow.
 skip_track: true

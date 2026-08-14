@@ -372,6 +372,7 @@ class BaseClient:
         y: float = 0.0,
         z: float = 0.0,
         yaw: float = 0.0,
+        timeout_s: float | None = None,
     ) -> JsonObject:
         """Send one combined relative XYZ-and-yaw motion command."""
         command = self.quantize_motion(x, y, z, yaw)
@@ -381,11 +382,19 @@ class BaseClient:
                 "message": "move_relative_xyz_yaw skipped",
                 "command": command,
             }
+        payload = dict(command)
+        if timeout_s is not None:
+            timeout_s = float(timeout_s)
+            if not math.isfinite(timeout_s) or timeout_s <= 0.0:
+                raise ValueError(
+                    f"motion timeout must be finite and positive, got {timeout_s!r}"
+                )
+            payload["timeout_s"] = timeout_s
         return self._require_ok(
             self._request_json(
                 "POST",
                 "/move_relative_xyz_yaw",
-                command,
+                payload,
             ),
             "move_relative_xyz_yaw",
         )

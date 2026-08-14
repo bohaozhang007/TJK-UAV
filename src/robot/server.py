@@ -41,6 +41,7 @@ class RobotController(VelocityController, Protocol):
         y: int,
         z: int,
         yaw: int,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]: ...
 
     def rotate(self, angle_deg: int) -> dict[str, Any]: ...

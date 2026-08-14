@@ -61,6 +61,8 @@ class GoalData:
     frame_id: str
     received_monotonic: float
     uses_planner: bool
+    planner_goal_published_monotonic: float = 0.0
+    planner_output_ready: bool = False
 
 
 class I7NavNode:
@@ -298,6 +300,19 @@ class I7NavNode:
         with self._condition:
             self._position_cmd = message
             self._position_cmd_received_monotonic = time.monotonic()
+            if (
+                self._goal is not None
+                and self._goal.uses_planner
+                and not self._goal.planner_output_ready
+                and self._goal.planner_goal_published_monotonic > 0.0
+                and self._position_cmd_received_monotonic
+                > self._goal.planner_goal_published_monotonic
+            ):
+                self._goal.planner_output_ready = True
+                rospy.loginfo(
+                    "EGO output accepted for active goal before MAVROS "
+                    "trajectory forwarding"
+                )
             self._condition.notify_all()
 
     def _planner_heartbeat_callback(self, _message: Empty) -> None:
@@ -392,10 +407,19 @@ class I7NavNode:
             self._set_state_locked(NavState.NAVIGATING)
             self._condition.notify_all()
 
-        self._active_goal_pub.publish(self._goal_pose_message(goal))
         if goal.uses_planner:
             planner_goal = self._goal_pose_message(goal, standard_quaternion=True)
             self._planner_goal_pub.publish(planner_goal)
+            with self._condition:
+                if self._goal is goal:
+                    # Drop anything received between accepting the Robot goal
+                    # and publishing its EGO goal. The next PositionCommand is
+                    # therefore downstream of this planner request.
+                    goal.planner_goal_published_monotonic = time.monotonic()
+                    self._position_cmd = None
+                    self._position_cmd_received_monotonic = 0.0
+                    self._condition.notify_all()
+        self._active_goal_pub.publish(self._goal_pose_message(goal))
         rospy.loginfo(
             "Accepted I7 %s goal: x=%.3f y=%.3f z=%.3f yaw=%.1fdeg",
             "planner" if goal.uses_planner else "direct-yaw",
@@ -485,8 +509,7 @@ class I7NavNode:
         )
         if goal is None or odom is None:
             return self._hold_setpoint_locked(dt)
-        distance_m = self._distance(odom, goal)
-        if not goal.uses_planner or distance_m <= self.goal_reached_distance_m:
+        if not goal.uses_planner:
             final_target = PoseData(
                 x=goal.x,
                 y=goal.y,
@@ -497,9 +520,11 @@ class I7NavNode:
             return self._pose_setpoint_locked(final_target, dt)
 
         command = self._position_cmd
-        if command is None:
+        if not goal.planner_output_ready or command is None:
             # EGO needs a short planning interval after receiving a new goal.
-            # Holding the live pose avoids returning to the pre-goal _hold pose.
+            # Only a live-pose hold setpoint is sent to MAVROS during this
+            # interval; no motion trajectory is forwarded until a new EGO
+            # PositionCommand has been accepted for the active goal.
             return self._pose_setpoint_locked(odom, dt)
         command_values = (
             command.position.x,
@@ -622,6 +647,9 @@ class I7NavNode:
 
     def _update_goal_completion_locked(self) -> None:
         if self._odom is None or self._goal is None:
+            return
+        if self._goal.uses_planner and not self._goal.planner_output_ready:
+            self._goal_stable_samples = 0
             return
         position_ok = self._distance(self._odom, self._goal) <= self.goal_reached_distance_m
         speed_ok = self._speed(self._odom) <= self.stable_speed_m_s
@@ -1020,6 +1048,10 @@ class I7NavNode:
             "z_m": goal.z,
             "yaw_deg": math.degrees(goal.yaw),
             "uses_planner": goal.uses_planner,
+            "planner_goal_published": (
+                goal.planner_goal_published_monotonic > 0.0
+            ),
+            "planner_output_ready": goal.planner_output_ready,
         }
 
     @staticmethod

@@ -17,6 +17,8 @@ class I7Client(OwlClient):
     chain instead of OWL's Captain/yaw link.
     """
 
+    SUPPORTS_MOTION_TIMEOUT = True
+
     def start(self) -> JsonObject:
         # Check DA3 before BaseClient.start can initiate the blocking takeoff
         # sequence. For I7, takeoff must be requested before selecting OFFBOARD.

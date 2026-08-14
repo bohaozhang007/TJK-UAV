@@ -194,6 +194,11 @@ class TJKAgent:
             "action_sleep_s",
             minimum=0.0,
         )
+        self.motion_timeout_s = _config_number(
+            config,
+            "motion_timeout_s",
+            minimum=1e-6,
+        )
         self.skip_track = _config_bool(config, "skip_track")
         self.skip_track_forward_cm = _config_number(
             config,
@@ -1114,6 +1119,7 @@ class TJKAgent:
                             context=f"search view={view_idx} anchor align",
                             log_timing=False,
                             pure_yaw_forward_compensation=False,
+                            filter_translation_by_tolerance=False,
                         )
                     else:
                         self.exec_rotate_action_deg(
@@ -2223,7 +2229,7 @@ class TJKAgent:
             0.0,
             0.0,
             dyaw,
-            lambda: self.client.move_rel_xyz_yaw(
+            lambda: self._client_move_rel_xyz_yaw(
                 x=dx_cm,
                 y=0.0,
                 z=0.0,
@@ -2233,6 +2239,17 @@ class TJKAgent:
             track_id=track_id,
             log_timing=log_timing,
         )
+
+    def _client_move_rel_xyz_yaw(self, *, x, y, z, yaw):
+        kwargs = {
+            "x": x,
+            "y": y,
+            "z": z,
+            "yaw": yaw,
+        }
+        if getattr(self.client, "SUPPORTS_MOTION_TIMEOUT", False):
+            kwargs["timeout_s"] = self.motion_timeout_s
+        return self.client.move_rel_xyz_yaw(**kwargs)
 
     def exec_xyz_yaw_hybrid(
         self,
@@ -2244,6 +2261,7 @@ class TJKAgent:
         log_timing=True,
         track_id=None,
         pure_yaw_forward_compensation=True,
+        filter_translation_by_tolerance=True,
     ):
         """Send XYZ translation and yaw through one combined command."""
         dx_cm, dy_cm, dz_cm, dyaw_deg = (
@@ -2254,6 +2272,9 @@ class TJKAgent:
                 dyaw_deg,
                 context=context,
                 track_id=track_id,
+                filter_translation_by_tolerance=(
+                    filter_translation_by_tolerance
+                ),
             )
         )
         if (
@@ -2280,7 +2301,7 @@ class TJKAgent:
             dy_cm,
             dz_cm,
             dyaw_deg,
-            lambda: self.client.move_rel_xyz_yaw(
+            lambda: self._client_move_rel_xyz_yaw(
                 x=dx_cm,
                 y=dy_cm,
                 z=dz_cm,
@@ -2300,6 +2321,7 @@ class TJKAgent:
         *,
         context="",
         track_id=None,
+        filter_translation_by_tolerance=True,
     ):
         if self.position_tolerance_cm is None or self.yaw_tolerance_deg is None:
             raise FlightSafetyError(
@@ -2331,7 +2353,10 @@ class TJKAgent:
             translation_norm_cm = math.sqrt(
                 dx_cm * dx_cm + dy_cm * dy_cm + dz_cm * dz_cm
             )
-            if translation_norm_cm <= self.position_tolerance_cm:
+            if (
+                filter_translation_by_tolerance
+                and translation_norm_cm <= self.position_tolerance_cm
+            ):
                 self._log(
                     f"[MOTION-FILTER]{subject} "
                     f"translation_norm={translation_norm_cm:.2f}cm <= "
@@ -2339,6 +2364,15 @@ class TJKAgent:
                     "xyz skipped"
                 )
                 dx_cm = dy_cm = dz_cm = 0.0
+            elif (
+                not filter_translation_by_tolerance
+                and translation_norm_cm <= self.position_tolerance_cm
+            ):
+                self._log(
+                    f"[MOTION-FILTER]{subject} "
+                    f"translation_norm={translation_norm_cm:.2f}cm retained "
+                    "for EGO anchor alignment"
+                )
 
         raw_yaw_requested = raw[3] != 0.0
         if raw_yaw_requested and dyaw_deg == 0.0:

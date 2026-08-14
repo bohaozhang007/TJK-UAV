@@ -146,11 +146,15 @@ class I7Controller:
         y: int,
         z: int,
         yaw: int,
+        timeout_s: Optional[float] = None,
     ) -> Dict[str, Any]:
         with self._operation_lock:
             command = {"x": int(x), "y": int(y), "z": int(z), "yaw": int(yaw)}
             try:
-                return self._move_relative_xyz_yaw(**command)
+                return self._move_relative_xyz_yaw(
+                    **command,
+                    timeout_s=timeout_s,
+                )
             except Exception as exc:
                 self._abort_after_command_error("move_relative_xyz_yaw", exc)
 
@@ -160,6 +164,7 @@ class I7Controller:
         y: int,
         z: int,
         yaw: int,
+        timeout_s: Optional[float] = None,
     ) -> Dict[str, Any]:
         self._require_control_ready()
         start = self._hardware.get_pose_ros()
@@ -212,13 +217,22 @@ class I7Controller:
         distance_m = math.sqrt(forward_m**2 + right_m**2 + up_m**2)
         translation_timeout = distance_m / self.ASSUMED_SPEED_M_S * 3.0 + 5.0
         rotation_timeout = abs(math.radians(yaw)) / math.radians(30.0) + 5.0
-        timeout_s = min(120.0, max(8.0, translation_timeout, rotation_timeout))
+        configured_timeout_s = 8.0 if timeout_s is None else float(timeout_s)
+        if not math.isfinite(configured_timeout_s) or configured_timeout_s <= 0.0:
+            raise ValueError(
+                "motion timeout must be finite and positive, got "
+                f"{configured_timeout_s!r}"
+            )
+        effective_timeout_s = min(
+            120.0,
+            max(configured_timeout_s, translation_timeout, rotation_timeout),
+        )
         final_pose = self._wait_for_pose(
             target_x,
             target_y,
             target_z,
             target_yaw,
-            timeout_s=timeout_s,
+            timeout_s=effective_timeout_s,
         )
         return {
             "ok": True,
@@ -233,6 +247,8 @@ class I7Controller:
                 "frame_id": str(start["frame_id"]),
             },
             "control_mode": "ego_planner" if uses_planner else "direct_yaw",
+            "configured_motion_timeout_s": configured_timeout_s,
+            "effective_motion_timeout_s": effective_timeout_s,
             "goal_ack_source": I7Hardware.NAV_ACTIVE_GOAL_TOPIC,
             "goal_ack": ack,
         }
