@@ -70,6 +70,6 @@ if "%USE_SAM3%"=="1" (
 )
 
 :sam3_ready
-echo [START] Starting Agent v19...
+echo [START] Starting Agent v20...
 conda.exe run --no-capture-output -n "%AGENT_ENV%" python "%SCRIPT_DIR%src\agent\tjk\v20.py" !AGENT_ARGS!
 exit /b %ERRORLEVEL%

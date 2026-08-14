@@ -194,6 +194,12 @@ class TJKAgent:
             "action_sleep_s",
             minimum=0.0,
         )
+        self.skip_track = _config_bool(config, "skip_track")
+        self.skip_track_forward_cm = _config_number(
+            config,
+            "skip_track_forward_cm",
+            minimum=1e-6,
+        )
         mission_config = _config_section(config, "mission")
         self.mission_frame = str(mission_config.get("frame", ""))
         if self.mission_frame != "takeoff_world":
@@ -368,6 +374,7 @@ class TJKAgent:
             minimum=12.0,
             maximum=12.0,
         )
+        self.scan_simplified = _config_bool(scan_config, "simplified")
         self.scan_radius_cm = _config_number(
             scan_config,
             "radius_cm",
@@ -812,11 +819,20 @@ class TJKAgent:
                         "select",
                         self.select,
                     )
-                    self.state = (
-                        WaypointState.TRACK
-                        if select_succeeded
-                        else WaypointState.RETURN_WAYPOINT
-                    )
+                    if not select_succeeded:
+                        self.state = WaypointState.RETURN_WAYPOINT
+                    elif self.skip_track:
+                        track_succeeded = self._run_task_stage(
+                            "skip_track_forward",
+                            self._skip_track_and_prepare_scan,
+                        )
+                        self.state = (
+                            WaypointState.SCAN
+                            if track_succeeded
+                            else WaypointState.RETURN_WAYPOINT
+                        )
+                    else:
+                        self.state = WaypointState.TRACK
                 elif self.state == WaypointState.TRACK:
                     track_succeeded = self._run_task_stage(
                         "track",
@@ -863,6 +879,7 @@ class TJKAgent:
         self._log(
             f"[RES] Waypoint task completed; candidates="
             f"{len(self.search_candidates)} target_selected={select_succeeded} "
+            f"track_skipped={self.skip_track} "
             f"target_reached={track_succeeded} "
             f"scan_completed={scan_succeeded}."
         )
@@ -1594,18 +1611,27 @@ class TJKAgent:
             f"image={best_view_path}"
         )
 
-        self.tracker.reset()
-        track_init_frame_idx = self.tracker.frame_idx
-        tracker_started = time.perf_counter()
-        bbox, _mask = self.tracker.track_with_mask(
-            cur_frame,
-            box=redetected["box"],
-        )
-        track_init_id = self._track_frame_id(track_init_frame_idx)
-        tracker_fields = self._tracker_timing_fields(
-            self.tracker,
-            time.perf_counter() - tracker_started,
-        )
+        tracker_fields = None
+        track_init_id = None
+        if self.skip_track:
+            bbox = redetected["box"]
+            self._log(
+                "[TRACK-SKIP] Skip tracker initialization; align the best "
+                "view directly from its re-detected box."
+            )
+        else:
+            self.tracker.reset()
+            track_init_frame_idx = self.tracker.frame_idx
+            tracker_started = time.perf_counter()
+            bbox, _mask = self.tracker.track_with_mask(
+                cur_frame,
+                box=redetected["box"],
+            )
+            track_init_id = self._track_frame_id(track_init_frame_idx)
+            tracker_fields = self._tracker_timing_fields(
+                self.tracker,
+                time.perf_counter() - tracker_started,
+            )
 
         decision_started = time.perf_counter()
         state = self.get_bbox_state(bbox)
@@ -1614,30 +1640,80 @@ class TJKAgent:
         decision_s = time.perf_counter() - decision_started
         self.exec_rotate_action_deg(
             angle_to_rotate,
-            context=f"track_init candidate={selected['candidate_idx']}",
+            context=(
+                f"select_align candidate={selected['candidate_idx']}"
+                if self.skip_track
+                else f"track_init candidate={selected['candidate_idx']}"
+            ),
             track_id=track_init_id,
             log_timing=False,
         )
         motion_timing = self._last_motion_timing
-        self._log_timing(
-            capture_s
-            + detector_s
-            + visualization_s
-            + tracker_fields["total"]
-            + decision_s
-            + motion_timing["drone_execution_s"],
-            command_id=self._last_motion_command_id,
-            capture=capture_s,
-            detector={
+        tracker_total_s = (
+            tracker_fields["total"] if tracker_fields is not None else 0.0
+        )
+        timing_fields = {
+            "capture": capture_s,
+            "detector": {
                 "total": detector_s + visualization_s,
                 "infer": detector_inference_s,
                 "vis": visualization_s,
             },
-            tracker=tracker_fields,
-            decision=decision_s,
-            execution=motion_timing["drone_execution_s"],
+            "decision": decision_s,
+            "execution": motion_timing["drone_execution_s"],
+        }
+        if tracker_fields is not None:
+            timing_fields["tracker"] = tracker_fields
+        self._log_timing(
+            capture_s
+            + detector_s
+            + visualization_s
+            + tracker_total_s
+            + decision_s
+            + motion_timing["drone_execution_s"],
+            command_id=self._last_motion_command_id,
+            **timing_fields,
         )
 
+        return True
+
+    def _skip_track_and_prepare_scan(self):
+        """Fly forward once and use the reached pose as the scan center."""
+        if self.selected_candidate is None:
+            raise TaskFailure(
+                "Selected candidate is unavailable for skipped-track approach"
+            )
+
+        self._ensure_flight_safety("before skipped-track forward action")
+        start_pose = self._copy_pose(
+            self._get_pose_for_flight("skipped-track forward start pose")
+        )
+        self._log(
+            f"[TRACK-SKIP] Forward {self.skip_track_forward_cm:.2f}cm "
+            f"from best view pose={self._format_pose(start_pose)}."
+        )
+        self.exec_xyz_yaw_hybrid(
+            self.skip_track_forward_cm,
+            0.0,
+            0.0,
+            0.0,
+            context="skip_track fixed forward",
+        )
+        self._ensure_flight_safety("after skipped-track forward action")
+        scan_center_pose = self._copy_pose(
+            self._get_pose_for_flight("skipped-track scan center pose")
+        )
+        self.last_track_observation = {
+            "frame_rgb": None,
+            "depth_raw": None,
+            "bbox": np.asarray(self.selected_candidate["box"]).copy(),
+            "mask": None,
+            "pose": scan_center_pose,
+        }
+        self._log(
+            "[TRACK-SKIP] TRACK bypass completed; enter SCAN with center="
+            f"{self._format_pose(scan_center_pose)}."
+        )
         return True
 
     def track(self):
@@ -1819,8 +1895,8 @@ class TJKAgent:
             )
             self._capture_scan_point(clock_hour, self._last_motion_timing)
 
-        # Close the 30-degree arc from 11 o'clock to 12 o'clock without
-        # taking a duplicate image.
+        # Return from the final clock position to 12 o'clock without taking
+        # a duplicate image.
         self._move_to_pose_hybrid(
             trajectory[0],
             context="scan_close_circle clock_hour=12",
@@ -2516,22 +2592,34 @@ class TJKAgent:
         pose = observation["pose"]
         origin_yaw_rad = np.radians(float(pose["yaw"]))
         # Positive dyaw is a right turn in the agent command convention.
-        yaw_steps_by_hour = {
-            1: -1,
-            2: -2,
-            3: -3,
-            4: -2,
-            5: -1,
-            6: 0,
-            7: 1,
-            8: 2,
-            9: 3,
-            10: 2,
-            11: 1,
-            12: 0,
-        }
+        if self.scan_simplified:
+            clock_hours = [12, 3, 6, 9]
+            # Preserve the full scan's yaw direction while compressing each
+            # quarter-circle transition to one configured yaw unit. Thus the
+            # commands reaching 6 and 9 o'clock each add +yaw_unit_deg.
+            yaw_steps_by_hour = {
+                12: 0,
+                3: -1,
+                6: 0,
+                9: 1,
+            }
+        else:
+            clock_hours = [12, *range(1, self.scan_num_points)]
+            yaw_steps_by_hour = {
+                1: -1,
+                2: -2,
+                3: -3,
+                4: -2,
+                5: -1,
+                6: 0,
+                7: 1,
+                8: 2,
+                9: 3,
+                10: 2,
+                11: 1,
+                12: 0,
+            }
         trajectory = []
-        clock_hours = [12, *range(1, self.scan_num_points)]
         for clock_hour in clock_hours:
             clock_angle_rad = 2.0 * np.pi * clock_hour / self.scan_num_points
             right_offset_cm = float(
@@ -2575,7 +2663,8 @@ class TJKAgent:
         )
         self._log(
             "[SCAN] Planned simple clock trajectory: "
-            f"points={self.scan_num_points} radius={self.scan_radius_cm:.2f}cm "
+            f"simplified={self.scan_simplified} "
+            f"points={len(trajectory)} radius={self.scan_radius_cm:.2f}cm "
             f"yaw_unit={self.scan_yaw_unit_deg:.2f}deg "
             f"center=(x={float(pose['x']):.2f}cm, y={float(pose['y']):.2f}cm, "
             f"z={float(pose['z']):.2f}cm, yaw={float(pose['yaw']):.2f}deg) "
