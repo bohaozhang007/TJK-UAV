@@ -304,9 +304,18 @@ class TJKAgent:
             integer=True,
             minimum=0.0,
         )
-        self.search_align_xyz_to_first_view = _config_bool(
+        self.search_forward_cm = _config_number(
             search_config,
-            "align_xyz_to_first_view",
+            "forward_cm",
+        )
+        if not math.isfinite(self.search_forward_cm):
+            raise ValueError(
+                "search.forward_cm must be finite, got "
+                f"{self.search_forward_cm!r}"
+            )
+        self.search_align_z_to_first_view = _config_bool(
+            search_config,
+            "align_z_to_first_view",
         )
         self.sam3_search_top_k = _config_number(
             search_config,
@@ -1136,7 +1145,7 @@ class TJKAgent:
                         context=f"search_height={height_idx}",
                     )
 
-                search_anchor_pose = None
+                search_anchor_z_cm = None
                 for i in range(self.search_rotation_count):
                     self._raise_search_worker_errors(pending_views)
                     view_idx = height_idx * self.search_rotation_count + i
@@ -1151,12 +1160,12 @@ class TJKAgent:
                             f"search view={view_idx} capture pose"
                         )
                     )
-                    if search_anchor_pose is None:
-                        search_anchor_pose = self._copy_pose(capture_pose)
+                    if search_anchor_z_cm is None:
+                        search_anchor_z_cm = float(capture_pose["z"])
                         self._log(
                             f"[SEARCH-ANCHOR] height={height_idx} "
                             f"view={view_idx} "
-                            f"pose={self._format_pose(search_anchor_pose)}"
+                            f"z={search_anchor_z_cm:.2f}cm"
                         )
                     submitted_at = time.perf_counter()
                     detection_future = executor.submit(
@@ -1171,9 +1180,7 @@ class TJKAgent:
                         "height_offset_cm": height_offset_cm,
                         "frame": cur_frame,
                         "pose": capture_pose,
-                        "search_anchor_pose": self._copy_pose(
-                            search_anchor_pose
-                        ),
+                        "search_anchor_z_cm": search_anchor_z_cm,
                         "capture_s": capture_rgb_s,
                         "submitted_at": submitted_at,
                         "future": detection_future,
@@ -1188,44 +1195,43 @@ class TJKAgent:
 
                     # The detector consumes this frame while the main thread
                     # commands and waits for the next stable camera view.
-                    if self.search_align_xyz_to_first_view:
-                        target_pose = self._search_anchor_target_pose(
-                            search_anchor_pose,
-                            next_rotation_idx=i + 1,
+                    current_pose = self._copy_pose(
+                        self._get_pose_for_flight(
+                            f"search view={view_idx} motion pose"
                         )
-                        current_pose = self._copy_pose(
-                            self._get_pose_for_flight(
-                                f"search view={view_idx} alignment pose"
-                            )
-                        )
-                        delta = self._relative_pose_delta(
-                            target_pose,
-                            current_pose=current_pose,
-                        )
-                        view_record["search_target_pose"] = self._copy_pose(
-                            target_pose
-                        )
-                        self._log(
-                            f"[SEARCH-ALIGN] height={height_idx} "
-                            f"view={view_idx} "
-                            f"anchor={self._format_pose(search_anchor_pose)} "
-                            f"current={self._format_pose(current_pose)} "
-                            f"target={self._format_pose(target_pose)} "
-                            f"body_delta={self._format_motion_command(*delta)}"
-                        )
-                        self.exec_xyz_yaw_hybrid(
-                            *delta,
-                            context=f"search view={view_idx} anchor align",
-                            log_timing=False,
-                            pure_yaw_forward_compensation=False,
-                            filter_translation_by_tolerance=False,
-                        )
-                    else:
-                        self.exec_rotate_action_deg(
-                            self.search_rotation_step_deg,
-                            context=f"search view={view_idx}",
-                            log_timing=False,
-                        )
+                    )
+                    forward_cm = max(0.0, self.search_forward_cm)
+                    dz_cm = (
+                        search_anchor_z_cm - float(current_pose["z"])
+                        if self.search_align_z_to_first_view
+                        else 0.0
+                    )
+                    command = (
+                        forward_cm,
+                        0.0,
+                        dz_cm,
+                        self.search_rotation_step_deg,
+                    )
+                    view_record["search_command"] = {
+                        "forward_cm": forward_cm,
+                        "dz_cm": dz_cm,
+                        "dyaw_deg": self.search_rotation_step_deg,
+                    }
+                    self._log(
+                        f"[SEARCH-MOTION] height={height_idx} "
+                        f"view={view_idx} "
+                        f"anchor_z={search_anchor_z_cm:.2f}cm "
+                        f"current_z={float(current_pose['z']):.2f}cm "
+                        f"align_z={self.search_align_z_to_first_view} "
+                        f"command={self._format_motion_command(*command)}"
+                    )
+                    self.exec_xyz_yaw_hybrid(
+                        *command,
+                        context=f"search view={view_idx} forward rotate z align",
+                        log_timing=False,
+                        pure_yaw_forward_compensation=False,
+                        filter_translation_by_tolerance=False,
+                    )
                     view_record["motion_timing"] = dict(
                         self._last_motion_timing
                     )
@@ -2715,18 +2721,6 @@ class TJKAgent:
             float(target_pose["yaw"]) - float(pose["yaw"])
         )
         return body_dx_cm, body_dy_cm, dz_cm, dyaw_deg
-
-    def _search_anchor_target_pose(self, anchor_pose, next_rotation_idx):
-        """Return the absolute pose for the next view in one SEARCH turn."""
-        return {
-            "x": float(anchor_pose["x"]),
-            "y": float(anchor_pose["y"]),
-            "z": float(anchor_pose["z"]),
-            "yaw": self._normalize_angle_deg(
-                float(anchor_pose["yaw"])
-                + float(next_rotation_idx) * self.search_rotation_step_deg
-            ),
-        }
 
     def _estimate_scan_circle(self):
         """Plan a 12-point clock-face circle around the track-end pose."""

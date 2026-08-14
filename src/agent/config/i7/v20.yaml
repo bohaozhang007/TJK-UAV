@@ -78,10 +78,14 @@ safety:
 
 # Search pattern at each waypoint.
 search:
-  rotation_step_deg: 30.0
+  rotation_step_deg: 60.0 # 30
   height_offset_cm: 100.0
-  # Lock each 360-degree turn to the XYZ captured at its first view.
-  align_xyz_to_first_view: true
+  # Forward distance sent together with every SEARCH rotation. Values <= 0,
+  # such as 0 or -1, disable forward motion.
+  forward_cm: 20.0
+  # Keep only Z aligned to the first view of each 360-degree SEARCH turn.
+  # X/Y are allowed to change with forward motion.
+  align_z_to_first_view: true
   # SAM3 search intentionally requests low-threshold debug results, then keeps
   # only the strongest configured number of candidates per view.
   sam3_top_k: 3
