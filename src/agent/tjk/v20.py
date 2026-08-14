@@ -231,7 +231,10 @@ class TJKAgent:
         safety_config = _config_section(config, "safety")
         scan_config = _config_section(config, "scan")
         detectors_config = _config_section(config, "detectors")
-        sam3_detector_config = _config_section(detectors_config, "sam3")
+        active_detector_config = _config_section(
+            detectors_config,
+            detector_name,
+        )
         # Forward/backward action.
         self.max_fb_step_cm = _config_number(
             motion_config, "max_fb_step_cm", minimum=1e-6
@@ -329,9 +332,16 @@ class TJKAgent:
             minimum=0.0,
             maximum=1.0,
         )
-        self.sam3_confidence_threshold = _config_number(
-            sam3_detector_config,
-            "confidence_threshold",
+        detector_threshold_key = {
+            "yolo": "score_threshold",
+            "grounding_dino": "box_threshold",
+            "sam3": "confidence_threshold",
+        }.get(detector_name)
+        if detector_threshold_key is None:
+            raise ValueError(f"Unsupported detector backend: {detector_name!r}")
+        self.detector_confidence_threshold = _config_number(
+            active_detector_config,
+            detector_threshold_key,
             minimum=0.0,
             maximum=1.0,
         )
@@ -388,6 +398,15 @@ class TJKAgent:
             raise ValueError(
                 "select.use_area_confidence_product must be boolean, got "
                 f"{self.select_use_area_confidence_product!r}"
+            )
+        self.select_filter_by_detector_confidence = select_config.get(
+            "filter_by_detector_confidence",
+            False,
+        )
+        if not isinstance(self.select_filter_by_detector_confidence, bool):
+            raise ValueError(
+                "select.filter_by_detector_confidence must be boolean, got "
+                f"{self.select_filter_by_detector_confidence!r}"
             )
 
         # safe thresh
@@ -1398,7 +1417,7 @@ class TJKAgent:
             confidence = float(detection["confidence"])
             label = str(detection["label"])
             configured_threshold = (
-                self.sam3_confidence_threshold
+                self.detector_confidence_threshold
                 if self.detector_name == "sam3"
                 else None
             )
@@ -2211,6 +2230,26 @@ class TJKAgent:
             deduplicated.extend(kept)
         return deduplicated
 
+    def _filter_detector_confidence_candidates(self, candidates, context):
+        if not self.select_filter_by_detector_confidence:
+            return candidates
+
+        retained = []
+        for candidate in candidates:
+            confidence = float(candidate["confidence"])
+            if confidence < self.detector_confidence_threshold:
+                self._log(
+                    f"[SELECT-FILTER][DETECTOR-CONFIDENCE] "
+                    f"context={context} view={candidate['view_idx']} "
+                    f"candidate={self._candidate_number(candidate)} "
+                    f"confidence={confidence:.3f} threshold="
+                    f"{self.detector_confidence_threshold:.3f} "
+                    f"detector={self.detector_name}"
+                )
+                continue
+            retained.append(candidate)
+        return retained
+
     def _filter_edge_safe_candidates(self, candidates, context):
         safe_candidates = []
         for candidate in candidates:
@@ -2279,9 +2318,13 @@ class TJKAgent:
     def _rank_view_candidates(self, candidates, context):
         if not candidates:
             return []
+        confidence_safe = self._filter_detector_confidence_candidates(
+            candidates,
+            context,
+        )
         enriched = [
             self._enrich_candidate_geometry(candidate)
-            for candidate in candidates
+            for candidate in confidence_safe
         ]
         deduplicated = self._deduplicate_view_candidates(
             enriched,

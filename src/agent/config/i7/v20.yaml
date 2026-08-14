@@ -30,14 +30,14 @@ mission:
       yaw_deg: 0.0
       # true: only verify transit/arrival, then continue to the next waypoint.
       # false: run SEARCH/TRACK/SCAN after arrival.
-      only_arrive: false
+      only_arrive: true
 
-    # - name: waypoint_2
-    #   x_cm: 300.0
-    #   y_cm: 350.0
-    #   z_cm: 50.0
-    #   yaw_deg: 0.0
-    #   only_arrive: false
+    - name: waypoint_2
+      x_cm: 350.0
+      y_cm: 150.0
+      z_cm: 50.0
+      yaw_deg: 0.0
+      only_arrive: false
 
 
 # Motion limits and pixel-error conversion used while tracking the target.
@@ -82,7 +82,7 @@ search:
   height_offset_cm: 100.0
   # Forward distance sent together with every SEARCH rotation. Values <= 0,
   # such as 0 or -1, disable forward motion.
-  forward_cm: 30.0
+  forward_cm: 16.0
   # Keep only Z aligned to the first view of each 360-degree SEARCH turn.
   # X/Y are allowed to change with forward motion.
   align_z_to_first_view: true
@@ -98,6 +98,9 @@ detection:
 # Rank robust best views after de-duplicating prompt aliases and rejecting
 # detections that are too close to an image edge.
 select:
+  # true: before AREA ranking, discard candidates whose confidence is below
+  # the active detector's configured confidence threshold.
+  filter_by_detector_confidence: true
   # true: after the AREA stage, rank by area * confidence. false: rank only
   # by confidence as before.
   use_area_confidence_product: true
@@ -115,7 +118,7 @@ track:
   # true: skip iterative TRACK, fly forward once from the aligned best view,
   # then use the reached pose as the SCAN center. false: keep the TRACK flow.
   skip: true
-  skip_forward_cm: 30.0
+  skip_forward_cm: 20.0
   target_stop_ratio: 0.40
   yaw_only_threshold_deg: 10.0
   max_exec_iters: 200
