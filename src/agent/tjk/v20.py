@@ -408,6 +408,15 @@ class TJKAgent:
                 "select.filter_by_detector_confidence must be boolean, got "
                 f"{self.select_filter_by_detector_confidence!r}"
             )
+        self.select_use_edge_margin_filter = select_config.get(
+            "use_edge_margin_filter",
+            False,
+        )
+        if not isinstance(self.select_use_edge_margin_filter, bool):
+            raise ValueError(
+                "select.use_edge_margin_filter must be boolean, got "
+                f"{self.select_use_edge_margin_filter!r}"
+            )
 
         # safe thresh
         self.safe_z_cm = _config_number(
@@ -2251,6 +2260,13 @@ class TJKAgent:
         return retained
 
     def _filter_edge_safe_candidates(self, candidates, context):
+        if not self.select_use_edge_margin_filter:
+            self._log(
+                f"[SELECT-FILTER][EDGE] context={context} disabled; "
+                "keep all candidates."
+            )
+            return candidates
+
         safe_candidates = []
         for candidate in candidates:
             margin = float(candidate["edge_margin_ratio"])

@@ -24,19 +24,19 @@ mission:
   # target must remain at or above the planner's 50cm world-height limit.
   waypoints:
     - name: waypoint_1
-      x_cm: 0.0
+      x_cm: 100.0
       y_cm: -150.0
-      z_cm: 50.0
-      yaw_deg: 0.0
+      z_cm: 0.0
+      yaw_deg: -90.0
       # true: only verify transit/arrival, then continue to the next waypoint.
       # false: run SEARCH/TRACK/SCAN after arrival.
       only_arrive: false
 
     - name: waypoint_2
-      x_cm: 350.0
-      y_cm: 150.0
-      z_cm: 50.0
-      yaw_deg: 0.0
+      x_cm: 650.0
+      y_cm: -150.0
+      z_cm: 0.0
+      yaw_deg: -90.0
       only_arrive: false
 
 
@@ -79,7 +79,7 @@ safety:
 # Search pattern at each waypoint.
 search:
   rotation_step_deg: 30.0 # 30
-  height_offset_cm: 100.0
+  height_offset_cm: 50.0
   # Forward distance sent together with every SEARCH rotation. Values <= 0,
   # such as 0 or -1, disable forward motion.
   forward_cm: 16.0
@@ -98,8 +98,8 @@ detection:
 # Rank robust best views after de-duplicating prompt aliases and rejecting
 # detections that are too close to an image edge.
 select:
-  # Preserve the standard v20 behavior of rejecting detections near edges.
-  use_edge_margin_filter: true
+  # Whether to reject detections that are too close to an image edge.
+  use_edge_margin_filter: false
   # true: before AREA ranking, discard candidates whose confidence is below
   # the active detector's configured confidence threshold.
   filter_by_detector_confidence: true
