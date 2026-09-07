@@ -16,6 +16,12 @@ set "AGENT_ARGS="
 
 where conda.exe >nul 2>nul
 if errorlevel 1 (
+    if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" (
+        set "PATH=%USERPROFILE%\anaconda3\Scripts;%PATH%"
+    )
+)
+where conda.exe >nul 2>nul
+if errorlevel 1 (
     echo Error: conda.exe was not found on PATH.
     exit /b 1
 )
