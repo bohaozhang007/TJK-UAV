@@ -3,6 +3,24 @@ import base64
 import math
 import numpy as np
 
+class ObservationUnavailable(ValueError):
+    code = 503
+    error_code = 'observation_unavailable'
+    retryable = True
+
+
+class InvalidObservation(ValueError):
+    code = 422
+    error_code = 'invalid_observation'
+    retryable = False
+
+
+class ObservationEpochChanged(ValueError):
+    code = 409
+    error_code = 'localization_epoch_changed'
+    retryable = False
+
+
 def rotation(q):
     q = np.asarray(q,dtype=float)
     if q.shape != (4,) or not np.isfinite(q).all() or abs(np.linalg.norm(q)-1) > .02:
@@ -17,11 +35,13 @@ def interpolate_pose(history, stamp, max_sync):
     before = [p for p in history if p['stamp'] <= stamp]
     after = [p for p in history if p['stamp'] >= stamp]
     if not before or not after:
-        raise ValueError('exposure not bracketed by odometry')
+        raise ObservationUnavailable('exposure not bracketed by odometry')
     a,b = before[-1],after[0]
     sync = max(stamp-a['stamp'],b['stamp']-stamp)
-    if sync > max_sync or a['frame'] != b['frame'] or a['body'] != b['body']:
-        raise ValueError('odometry/exposure synchronization failed')
+    if a['frame'] != b['frame'] or a['body'] != b['body']:
+        raise ValueError('odometry exposure frames mismatch')
+    if sync > max_sync:
+        raise ObservationUnavailable('odometry/exposure synchronization failed')
     f = 0 if b['stamp']==a['stamp'] else (stamp-a['stamp'])/(b['stamp']-a['stamp'])
     qa,qb = np.array(a['q']),np.array(b['q'])
     rotation(qa); rotation(qb)
@@ -125,11 +145,11 @@ def build_observation(hw):
     m,info,hist,epoch,edges = hw.camera_snapshot()
     config = hw.c
     if m is None:
-        raise ValueError('RGB unavailable')
+        raise ObservationUnavailable('RGB unavailable')
     stamp = m.header.stamp.to_sec()
     age = hw.now_s()-stamp
     if stamp <= 0 or not 0 <= age <= config['hardware']['rgb_max_age_s']:
-        raise ValueError('stale RGB acquisition timestamp')
+        raise ObservationUnavailable('stale RGB acquisition timestamp')
     k,d,rectified,geometry = camera_intrinsics(config['hardware'],m,info)
     world_body,sync,world,body = interpolate_pose(hist,stamp,config['hardware']['sync_max_s'])
     mode = config['hardware'].get('extrinsics_mode','tf')
@@ -168,7 +188,9 @@ def build_observation(hw):
     transform[:3,3] *= 100
     yaw = math.atan2(world_body[1,0],world_body[0,0])
     if epoch != hw.current_epoch():
-        raise ValueError('localization changed during observation')
+        raise ObservationEpochChanged('localization changed during observation')
+    if not 0 <= hw.now_s()-stamp <= config['hardware']['rgb_max_age_s']:
+        raise ObservationUnavailable('RGB expired during observation assembly')
     geometry['extrinsics'] = mode
     geometry['camera_translation'] = 'body_coincident_assumption' if mode == 'body_coincident_fixed' else 'tf'
     quality = 'approximate' if not rectified or mode != 'tf' else 'calibrated'

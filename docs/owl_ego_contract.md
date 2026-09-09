@@ -251,3 +251,108 @@ The existing Agent client currently rejects this profile before session/takeoff;
 this is expected until the Agent-side adaptation is implemented and verified.
 Target world positions and the 100 cm deduplication rule are approximate under
 this profile; onboard FAST-LIO collision avoidance is unchanged.
+
+## 2026-09-09 Robot round 2: planning transitions and observation availability
+
+Status: Robot implementation and mock-FCU validation are recorded in
+[`collab/messages/robot-002.md`](collab/messages/robot-002.md). Agent adaptation
+is pending; protocol_version remains 1. These additive fields do not change
+coordinates, session ownership, the 5 s lease, or the relative-motion 15 s
+budget. Older clients that require planner_ok in every phase must be adapted
+before using this Robot version for a mission.
+
+### Health and task semantics
+
+Previously planner heartbeat freshness also gated Node authorization during
+process replacement, conflicting with the Core's 10 s planning startup window.
+Now control authority and planner readiness are separate:
+
+- `hold_ready`: fresh telemetry/extended state and validated cloud/config/control
+  publisher audit, bridge enabled, armed OFFBOARD, no manual takeover or landing.
+  This can remain true while stopping after lease loss; it does not grant a new
+  session or authorize a new navigation task.
+- `control_ready`: the existing initialized/airborne/armed/OFFBOARD/session
+  conditions plus the same external authorization checks. It no longer requires
+  a planner heartbeat. A true value alone does not mean an active task succeeded;
+  always inspect task status and health error/manual_takeover/epoch.
+- `planner_state`: `starting`, `ready`, `lost`, or `not_required`.
+  `starting` means an active XYZ task is planning, lacks a fresh heartbeat from
+  its own generation, and remains within the 10 s startup budget. `ready` means
+  that generation has a heartbeat no older than 1 s; it does not prove a first
+  trajectory or a ready obstacle map. `lost` means a required planner is outside
+  those conditions. `not_required` covers hold, stopping, terminal tasks, takeoff
+  and pure yaw. An idle process heartbeat cannot make a new generation ready.
+- `planner_ok` is true only for `planner_state:ready`. It is deliberately false
+  in `starting` and `not_required`; never make it unconditionally true.
+- `active_task_id` is the current task ID or null. Blocking TRACK can be located
+  through this field and cancelled with the existing cancel endpoint.
+- `landed_state` is the MAVROS enum (0 UNKNOWN, 1 ON_GROUND, 2 IN_AIR,
+  3 TAKEOFF, 4 LANDING); `landed_state_fresh` indicates receipt freshness.
+  Landing succeeds only with fresh explicit ON_GROUND and fresh connected,
+  disarmed State. UNKNOWN/LANDING/expired messages are not landing confirmation.
+
+During bounded startup, the bridge continues hold setpoints. If no trajectory
+arrives within 10 s, the task fails and holds. Once executing, heartbeat loss
+exceeding 1 s fails/holds immediately, even during the first 10 s of the task.
+Telemetry/control loss still revokes output as appropriate; this change does
+not bypass the watchdog or pilot takeover. A failed task stays failed; a safe
+hold is not automatic mission recovery.
+
+Agent must check control/hold authority, odometry, epoch, manual takeover and
+errors in all airborne phases; allow `starting` only for the matching planning
+task, `ready` for a planner-backed task, and `not_required` for hold/stopping or
+bridge-controlled pure yaw/takeoff. Do not require planner_ok for those latter
+phases. Poll terminal status and wait for stopped:true before submitting new
+motion. The existing Agent does not yet implement these phase-aware checks.
+
+Task status responses may additionally include:
+
+- `generation`: immutable planner ownership ID, retained in the task record
+  after cancellation/arrival for diagnostics, not an instruction to resume it.
+- `timing_s`: monotonic durations from task acceptance: process_setup_started,
+  process_spawned, first_odom_forwarded, fsm_initialized, first_map_output,
+  first_heartbeat, goal_sent, first_trajectory and terminal,
+  when observed. Fields are absent until observed or if not applicable.
+- `diagnostics`: measured position_error_cm, yaw_error_deg, speed_m_s,
+  yaw_rate_deg_s and elapsed_s, from odometry. Terminal records retain the last
+  sample. These do not replace status/stopped checks.
+
+For the pinned upstream EGO, Robot connects to its DataDisp output before
+forwarding odometry through a private per-process topic. The first DataDisp
+before any goal acknowledges INIT → WAIT_TARGET; Robot then waits for a
+inflated-map output before sending the goal. This avoids an upstream
+initialization race where an early goal blocks waiting for an unset trigger.
+`first_map_output` measures the first observed (possibly empty, heading-filtered) inflated-map output after FSM
+initialization, not exact map computation CPU time, cloud completeness or
+physical obstacle-map correctness. No upstream source changes are required.
+
+### Temporarily unavailable observations
+
+Robot keeps a bounded RGB cache and selects the newest fresh exposure supported
+by bracketing odometry, or waits up to 80 ms for sensor callbacks while releasing
+the cache lock. Repeated reads retain that exposure's frame_id. The 50 ms sync
+bound and acquisition-age limit are unchanged, including an age recheck after
+JPEG assembly. No current pose substitution is permitted.
+
+When no fresh synchronized exposure is available, HTTP 503 returns:
+
+```json
+{"ok":false,"error":"no fresh exposure bracketed by odometry within 80 ms wait",
+ "error_code":"observation_unavailable","retryable":true}
+```
+
+A localization epoch change during snapshot wait or assembly returns HTTP 409,
+`error_code:localization_epoch_changed`, `retryable:false`; invalidate the
+mission's old world coordinates rather than retrying them in a new frame.
+Invalid geometry/calibration returns HTTP 422, `error_code:invalid_observation`,
+`retryable:false`; it is not temporary absence.
+`/health` keeps `rgb_ok:false` on observation failure and adds
+`observation_error_code` and `observation_retryable` to distinguish the reason.
+
+Agent should retry only explicit observation_unavailable/retryable:true with a
+bounded overall time budget (initial recommendation 0.5 s, 50–100 ms spacing),
+while heartbeats and safety checks remain independent. Persistent absence ends
+that attempt and invokes existing failure handling. Do not retry epoch changes,
+invalid geometry or arbitrary HTTP errors as if they were missing frames.
+The explicit approximate-geometry opt-in and both rectified/calibration_quality
+checks from the previous section remain required and are still Agent-owned.

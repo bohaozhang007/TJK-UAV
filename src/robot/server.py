@@ -254,7 +254,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 result = self.controller.handle_http(self.command, path, body if self.command == "POST" else params)
                 self._json_response(200 if result.get("ok") else 409, result)
             except Exception as exc:
-                self._json_response(getattr(exc, "code", 400), {"ok": False, "error": str(exc)})
+                self._json_response(getattr(exc, "code", 400), dict({"ok": False, "error": str(exc)},
+                    **{k: getattr(exc, k) for k in ("error_code", "retryable") if hasattr(exc, k)}))
             return
 
         if path == "/preview":

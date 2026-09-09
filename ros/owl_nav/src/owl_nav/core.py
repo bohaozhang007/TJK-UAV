@@ -63,6 +63,8 @@ class FlightCore:
         self.stamp = None
         self.frame = None
         self.state_at = -math.inf
+        self.ext_at = -math.inf
+        self.landed_state = 0
         self.connected = self.armed = self.airborne = False
         self.mode = ''
         self.manual = False
@@ -93,18 +95,44 @@ class FlightCore:
         return (self.pose is not None and now - self.odom_at <= self.c['odom_timeout_s']
                 and now - self.state_at <= self.c['state_timeout_s'] and self.connected)
 
+    def planner_state(self, now):
+        task = self.tasks.get(self.active)
+        if task and self.generation is not None and task.get('planner_required'):
+            if now-self.planner_at <= self.c['planner_timeout_s']:
+                return 'ready'
+            if task['status'] == 'planning' and now-task['started'] <= self.c['planning_timeout_s']:
+                return 'starting'
+            return 'lost'
+        return 'not_required'
+
+    def planner_heartbeat(self, generation, now):
+        if generation != self.generation or generation is None:
+            return False
+        self.planner_at = now
+        if self.active:
+            self.tasks[self.active]['timing_s'].setdefault('first_heartbeat', now-self.tasks[self.active]['started'])
+        return True
+
     def status(self, now):
         return dict(initialized=self.initialized, airborne=self.airborne,
                     control_ready=self.initialized and self.enabled and self.fresh(now)
                     and not self.manual and not self.landing and self.mode == 'OFFBOARD'
                     and self.session is not None and self.armed and self.airborne,
                     odom_ok=self.pose is not None and now-self.odom_at <= self.c['odom_timeout_s'],
-                    planner_ok=now-self.planner_at <= self.c['planner_timeout_s'],
+                    planner_ok=self.planner_state(now) == 'ready',
+                    planner_state=self.planner_state(now),
+                    active_task_id=self.active,
+                    hold_ready=self.enabled and self.fresh(now) and not self.manual
+                    and not self.landing and self.mode == 'OFFBOARD' and self.armed,
+                    landed_state=self.landed_state,
+                    landed_state_fresh=now-self.ext_at <= self.c['state_timeout_s'],
                     localization_epoch=self.epoch, manual_takeover=self.manual,
                     error=self.last_error, stopped=self.stopped)
 
     def update_state(self, connected, armed, airborne, mode, now):
-        if self.landing and self.mode == 'AUTO.LAND' and mode != 'AUTO.LAND' and airborne:
+        incoming_ground = (connected and not armed and self.landed_state == 1
+                           and now-self.ext_at <= self.c['state_timeout_s'])
+        if self.landing and self.mode == 'AUTO.LAND' and mode != 'AUTO.LAND' and not incoming_ground:
             self.manual = True
             self.landing = False
             self.fail('manual takeover during landing')
@@ -118,7 +146,19 @@ class FlightCore:
             self.manual = True
         self.connected, self.armed, self.airborne = connected, armed, airborne
         self.mode, self.state_at = mode, now
-        if self.landing and not airborne and not armed:
+        self.complete_landing(now)
+
+    def update_extended_state(self, landed_state, now):
+        self.landed_state, self.ext_at = landed_state, now
+        self.airborne = landed_state == 2
+        self.complete_landing(now)
+
+    def ground_confirmed(self, now):
+        return (self.landed_state == 1 and now-self.ext_at <= self.c['state_timeout_s']
+                and now-self.state_at <= self.c['state_timeout_s'] and self.connected and not self.armed)
+
+    def complete_landing(self, now):
+        if self.landing and self.ground_confirmed(now):
             self.landing = False
             self.enabled = False
             if self.active:
@@ -159,6 +199,9 @@ class FlightCore:
         if not self.active:
             return
         t = self.tasks[self.active]
+        t['diagnostics'] = dict(position_error_cm=float(np.linalg.norm(self.pose[:3]-np.array(t['goal'][:3]))*100),
+            yaw_error_deg=math.degrees(abs(wrap(yaw-t['goal'][3]))),speed_m_s=self.speed,
+            yaw_rate_deg_s=math.degrees(self.yaw_rate),elapsed_s=now-t['started'])
         if t['status'] == 'stopping':
             if self.stopped and self.generation is None and self.enabled and self.mode == 'OFFBOARD':
                 self.finish('cancelled', True)
@@ -188,6 +231,7 @@ class FlightCore:
     def finish(self, status, stopped, error=None):
         if self.active:
             self.tasks[self.active].update(status=status, stopped=stopped)
+            self.tasks[self.active]['timing_s']['terminal'] = max(self.odom_at,self.last_tick or self.odom_at)-self.tasks[self.active]['started']
             if error:
                 self.tasks[self.active]['error'] = error
         self.active = None
@@ -275,7 +319,7 @@ class FlightCore:
             raise Rejected('manual takeover or stale telemetry')
         if op == 'land':
             self.fail('preempted by landing')
-            self.landing = self.airborne or self.armed
+            self.landing = not self.ground_confirmed(now)
             self.enabled = False  # AUTO.LAND, never fight the autopilot with setpoints
         else:
             if not self.initialized or self.active or self.landing:
@@ -304,7 +348,8 @@ class FlightCore:
         self.invalidate()
         self.active = tid
         self.tasks[tid] = dict(task_id=tid,session_id=self.session,status='accepted',stopped=False,
-                               goal=goal,kind=op,started=now)
+                               goal=goal,kind=op,started=now, timing_s={},
+                               planner_required=bool(op == 'navigate' and np.linalg.norm(np.array(goal[:3])-self.pose[:3]) >= 1e-5))
         if op == 'land':
             if not self.landing:
                 self.finish('arrived',True)
@@ -312,6 +357,8 @@ class FlightCore:
             if op == 'takeoff':
                 self.enabled = True
             self.generation = uuid.uuid4().hex
+            self.planner_at = -math.inf
+            self.tasks[tid]['generation'] = self.generation
             self.tasks[tid]['status'] = 'planning'
         return {'ok': True, 'task_id': tid}
 
@@ -320,6 +367,7 @@ class FlightCore:
             return False
         if trajectory.start > stamp + .5 or trajectory.start + trajectory.duration < stamp:
             return False
+        self.tasks[self.active]['timing_s'].setdefault('first_trajectory', now-self.tasks[self.active]['started'])
         self.pending_trajectory = trajectory
         self.last_traj_id = trajectory.id
         self.tasks[self.active]['status'] = 'executing'
@@ -341,7 +389,7 @@ class FlightCore:
             direct = t['kind'] == 'takeoff' or np.linalg.norm(np.array(t['goal'][:3])-self.hold[:3]) < 1e-5
             if now-t['started'] > self.c['task_timeout_s']:
                 self.fail('task timed out')
-            elif not direct and now-self.planner_at > self.c['planner_timeout_s'] and now-t['started'] > self.c['planning_timeout_s']:
+            elif not direct and now-self.planner_at > self.c['planner_timeout_s'] and (t['status'] == 'executing' or now-t['started'] > self.c['planning_timeout_s']):
                 self.fail('planner heartbeat lost')
             elif not direct and self.trajectory is None and now-t['started'] > self.c['planning_timeout_s']:
                 self.fail('planning timed out')

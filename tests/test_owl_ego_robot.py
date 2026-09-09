@@ -8,6 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import urllib.request
 import urllib.error
 import uuid
@@ -16,6 +17,7 @@ import yaml
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'src'),str(ROOT/'ros/owl_nav/src')]
 from owl_nav.core import FlightCore,Polynomial,Rejected
+from owl_nav.planner import PlannerProcess
 from robot.controllers.owl_ego import OwlEgoController,ApiError,enu_pose,public_pose
 from robot.hardware.owl_ego import OwlEgoHardware
 from robot.controllers.owl_ego_observation import interpolate_pose,rotation,transform_sync_error,build_observation,camera_intrinsics,fixed_optical_rotation
@@ -50,6 +52,7 @@ class CoreTest(unittest.TestCase):
     def test_cancel_requires_fresh_stable_stop(self):
         self.nav(); self.cmd('cancel',task_id='a')
         self.assertEqual(self.c.tasks['a']['status'],'stopping')
+        self.assertEqual(self.c.status(self.now)['planner_state'],'not_required')
         for _ in range(8): self.feed(v=(.3,0,0))
         self.assertEqual(self.c.tasks['a']['status'],'stopping')
         self.stable()
@@ -125,6 +128,7 @@ class CoreTest(unittest.TestCase):
         self.nav();self.cmd('land',task_id='land')
         self.assertEqual(self.c.tasks['a']['status'],'failed')
         self.assertIsNone(self.c.generation)
+        self.c.update_extended_state(1,self.now)
         self.c.update_state(True,False,False,'AUTO.LAND',self.now)
         self.assertEqual(self.c.tasks['land']['status'],'arrived')
 
@@ -174,6 +178,7 @@ class CoreTest(unittest.TestCase):
         new=SimpleNamespace(start=self.now+.2,duration=10,id=2,
                             sample=lambda t:(np.array([.3,0,1]),np.zeros(3),np.zeros(3)))
         self.c.trajectory=old
+        self.c.planner_at=self.now
         self.c.trajectory_received(self.c.generation,new,self.now,self.now)
         np.testing.assert_allclose(self.c.tick(self.now,self.now)[0],[.2,0,1])
         np.testing.assert_allclose(self.c.tick(self.now+.2,self.now+.2)[0],[.3,0,1])
@@ -202,6 +207,87 @@ class CoreTest(unittest.TestCase):
         self.assertTrue(self.c.manual)
         self.assertEqual(self.c.tasks['land']['status'],'failed')
         self.assertIsNone(self.c.tick(self.now,self.now))
+
+    def test_startup_grace_and_executing_heartbeat_loss(self):
+        self.nav()
+        json.dumps(self.c.tasks,allow_nan=False)
+        for _ in range(12): self.feed()
+        self.assertEqual(self.c.status(self.now)['planner_state'],'starting')
+        self.assertFalse(self.c.status(self.now)['planner_ok'])
+        self.assertTrue(self.c.status(self.now)['hold_ready'])
+        np.testing.assert_allclose(self.c.tick(self.now,self.now)[0],[0,0,1])
+        self.c.planner_heartbeat(self.c.generation,self.now)
+        self.assertEqual(self.c.status(self.now)['planner_state'],'ready')
+        self.c.tasks['a']['status']='executing'
+        for _ in range(12): self.feed()
+        out=self.c.tick(self.now,self.now)
+        self.assertEqual(self.c.tasks['a']['status'],'failed')
+        self.assertIn('heartbeat lost',self.c.tasks['a']['error'])
+        np.testing.assert_allclose(out[0],[0,0,1])
+
+    def test_startup_timeout_and_old_heartbeat_fence(self):
+        self.nav();old=self.c.generation
+        self.cmd('cancel',task_id='a');self.stable();self.nav('b')
+        self.assertFalse(self.c.planner_heartbeat(old,self.now))
+        self.assertEqual(self.c.planner_state(self.now),'starting')
+        for i in range(102):
+            self.feed()
+            if i%4==0:self.cmd('heartbeat')
+            self.c.tick(self.now,self.now)
+        self.assertEqual(self.c.tasks['b']['status'],'failed')
+        self.assertIn('heartbeat',self.c.tasks['b']['error'])
+
+    def test_land_requires_fresh_explicit_ground_and_disarm(self):
+        self.nav();self.cmd('land',task_id='land')
+        self.c.update_state(True,False,False,'AUTO.LAND',self.now)
+        for value in [0,3,4]:
+            self.c.update_extended_state(value,self.now)
+            self.assertNotEqual(self.c.tasks['land']['status'],'arrived')
+        self.c.update_state(True,True,False,'AUTO.LAND',self.now)
+        self.c.update_extended_state(1,self.now)
+        self.assertNotEqual(self.c.tasks['land']['status'],'arrived')
+        self.now+=2.1
+        self.c.update_state(True,False,False,'AUTO.LAND',self.now)
+        self.assertNotEqual(self.c.tasks['land']['status'],'arrived')
+        self.c.update_extended_state(1,self.now)
+        self.assertEqual(self.c.tasks['land']['status'],'arrived')
+
+    def test_landing_disarm_and_mode_exit_with_explicit_ground(self):
+        self.nav();self.cmd('land',task_id='land')
+        self.c.update_state(True,True,True,'AUTO.LAND',self.now)
+        self.c.update_extended_state(1,self.now)
+        self.c.update_state(True,False,False,'POSCTL',self.now)
+        self.assertEqual(self.c.tasks['land']['status'],'arrived')
+        self.assertFalse(self.c.manual)
+
+    def test_ground_with_stale_disarm_does_not_complete_land(self):
+        self.nav();self.cmd('land',task_id='land')
+        self.c.update_state(True,False,False,'AUTO.LAND',self.now)
+        self.now+=2.1
+        self.c.update_extended_state(1,self.now)
+        self.assertNotEqual(self.c.tasks['land']['status'],'arrived')
+        self.c.update_state(True,False,False,'AUTO.LAND',self.now)
+        self.assertEqual(self.c.tasks['land']['status'],'arrived')
+
+
+class PlannerHandshakeTest(unittest.TestCase):
+    def test_goal_waits_for_observed_fsm_and_map_not_elapsed_sleep(self):
+        planner=PlannerProcess.__new__(PlannerProcess)
+        sent=[];odom=[]
+        planner.goal=[1,0,1,0];planner.sent=False;planner.fsm_ready=False;planner.map_observed=False
+        planner.milestones={};planner.birth=time.monotonic()-100
+        planner.process=SimpleNamespace(poll=lambda:None)
+        planner.goal_pub=SimpleNamespace(get_num_connections=lambda:1,publish=sent.append)
+        planner.odom_pub=SimpleNamespace(get_num_connections=lambda:1,publish=odom.append)
+        planner.data_sub=SimpleNamespace(get_num_connections=lambda:0)
+        with patch.dict(sys.modules,{'quadrotor_msgs.msg':SimpleNamespace(GoalSet=lambda **kw:kw)}):
+            planner.poll();self.assertEqual(sent,[])
+            planner.odometry('sample');self.assertEqual(odom,[])
+            planner.data_sub.get_num_connections=lambda:1
+            planner.odometry('sample');self.assertEqual(odom,['sample'])
+            planner.initialized(None);planner.poll();self.assertEqual(sent,[])
+            planner.map_received(SimpleNamespace(width=0,height=1));planner.poll();planner.poll()
+            self.assertEqual(sent,[dict(drone_id=0,goal=[1,0,1])])
 
 
 class ObservationTest(unittest.TestCase):
@@ -291,6 +377,58 @@ class ObservationTest(unittest.TestCase):
         np.testing.assert_allclose(enu_pose(public_pose(p),30),p)
         with self.assertRaises(ApiError):enu_pose(dict(x=0,y=0,z=math.inf,yaw=0),30)
 
+    def camera_cache(self):
+        hw=OwlEgoHardware(copy.deepcopy(CONFIG))
+        hw.now_s=lambda:1.06
+        def image(t):return SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(to_sec=lambda:t)))
+        hw.image=image(1.04)
+        hw.history.append(dict(stamp=1.033,frame='world',body='base_link',xyz=[0,0,1],q=[0,0,0,1]))
+        return hw,image
+
+    def test_camera_wait_releases_lock_and_recovers(self):
+        hw,_=self.camera_cache()
+        def feed():
+            time.sleep(.02)
+            with hw.camera_changed:
+                hw.history.append(dict(hw.history[-1],stamp=1.066))
+                hw.camera_changed.notify_all()
+        t=threading.Thread(target=feed);t.start()
+        frame,_,hist,_,_=hw.camera_snapshot();t.join()
+        self.assertEqual(frame.header.stamp.to_sec(),1.04)
+        self.assertAlmostEqual(interpolate_pose(hist,1.04,.05)[1],.026)
+        for _ in range(20):self.assertIs(hw.camera_snapshot()[0],frame)
+
+    def test_camera_cached_exposure_and_stale_unavailable(self):
+        hw,image=self.camera_cache()
+        old=image(1.02);hw.images.extend([old,hw.image])
+        hw.history.appendleft(dict(hw.history[0],stamp=1.0))
+        self.assertIs(hw.camera_snapshot()[0],old)
+        hw.now_s=lambda:2.
+        start=time.monotonic()
+        with self.assertRaises(ValueError) as cm:hw.camera_snapshot()
+        self.assertEqual(cm.exception.error_code,'observation_unavailable')
+        self.assertTrue(cm.exception.retryable)
+        self.assertLess(time.monotonic()-start,.15)
+
+    def test_camera_epoch_change_during_wait_is_not_retryable(self):
+        hw,_=self.camera_cache()
+        def reset():
+            time.sleep(.02)
+            with hw.camera_changed:
+                hw.epoch='new';hw.images.clear();hw.history.clear();hw.image=None
+                hw.camera_changed.notify_all()
+        t=threading.Thread(target=reset);t.start()
+        with self.assertRaises(ValueError) as cm:hw.camera_snapshot()
+        t.join()
+        self.assertEqual(cm.exception.error_code,'localization_epoch_changed')
+        self.assertFalse(cm.exception.retryable)
+
+    def test_camera_permanently_missing_odom_is_bounded(self):
+        hw,_=self.camera_cache()
+        for _ in range(2):
+            with self.assertRaises(ValueError) as cm:hw.camera_snapshot()
+            self.assertEqual(cm.exception.code,503)
+
 
 class FakeHardware:
     epoch='e'
@@ -355,6 +493,18 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(self.rpc('POST','/v21/navigation/cancel',self.body(task_id=tid))[0],200)
         self.assertLess(time.monotonic()-started,1)
         t.join(2);self.assertFalse(t.is_alive());self.assertNotEqual(results[0][0],200)
+    def test_observation_retryable_error_is_machine_readable(self):
+        from robot.controllers.owl_ego_observation import ObservationUnavailable, ObservationEpochChanged, InvalidObservation
+        for error,code,retryable in [(ObservationUnavailable('wait'),503,True),
+                                    (ObservationEpochChanged('epoch'),409,False),
+                                    (InvalidObservation('bad calibration'),422,False)]:
+            def fail():raise error
+            self.c.observation=fail
+            status,value=self.rpc('GET','/v21/observation')
+            self.assertEqual(status,code)
+            self.assertEqual(value['retryable'],retryable)
+            self.assertEqual(value['error_code'],error.error_code)
+
     def test_malformed_json_and_mutation_query_do_not_bypass_session(self):
         req=urllib.request.Request(self.url+'/init',data=b'{invalid',method='POST')
         with self.assertRaises(urllib.error.HTTPError) as cm:

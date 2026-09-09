@@ -126,7 +126,7 @@ class OwlEgoController:
                 raise ApiError('unknown task_id',404)
             task = snap['tasks'][tid]
             return {k:v for k,v in dict(ok=True,**task).items()
-                    if k in ('ok','task_id','status','stopped','error')}
+                    if k in ('ok','task_id','status','stopped','error','generation','timing_s','diagnostics')}
         if path == '/v21/session':
             rid = data.get('request_id')
             try:
@@ -206,8 +206,13 @@ class OwlEgoController:
         raise ApiError('motion timed out; stop requested' if path != '/land' else 'landing confirmation timed out',504)
 
     def observation(self):
-        from .owl_ego_observation import build_observation
-        return build_observation(self.hw)
+        from .owl_ego_observation import build_observation, InvalidObservation
+        try:
+            return build_observation(self.hw)
+        except ValueError as e:
+            if hasattr(e,'error_code'):
+                raise
+            raise InvalidObservation(str(e)) from e
 
     def health(self):
         try:
@@ -218,8 +223,10 @@ class OwlEgoController:
         try:
             self.observation()
             h['rgb_ok'] = True
-        except Exception:
+        except Exception as e:
             h['rgb_ok'] = False
+            h['observation_error_code'] = getattr(e,'error_code','invalid_observation')
+            h['observation_retryable'] = getattr(e,'retryable',False)
         return h
 
     def get_pose(self):

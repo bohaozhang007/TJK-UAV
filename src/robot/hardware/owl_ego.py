@@ -16,6 +16,8 @@ class OwlEgoHardware:
         self.c = config
         self.lock = threading.RLock()
         self.history = deque(maxlen=600)
+        self.images = deque(maxlen=12)
+        self.camera_changed = threading.Condition(self.lock)
         self.tf_edges = {}
         self.image = self.info = self.bridge = None
         self.bridge_at = -math.inf
@@ -71,14 +73,18 @@ class OwlEgoHardware:
                     or np.linalg.norm(np.array(value['xyz'])-self.history[-1]['xyz']) > self.c['control']['reset_jump_m']):
                 self.history.clear()
             self.history.append(value)
+            self.camera_changed.notify_all()
 
     def _image(self,m):
         with self.lock:
             self.image = m
+            self.images.append(m)
+            self.camera_changed.notify_all()
 
     def _info(self,m):
         with self.lock:
             self.info = m
+            self.camera_changed.notify_all()
 
     def _status(self,m):
         try:
@@ -96,6 +102,8 @@ class OwlEgoHardware:
             if self.bridge and epoch != self.epoch:
                 self.history.clear()
                 self.image = None
+                self.images.clear()
+                self.camera_changed.notify_all()
             self.epoch = epoch
             self.bridge, self.bridge_at = data,time.monotonic()
 
@@ -129,9 +137,32 @@ class OwlEgoHardware:
         return value
 
     def camera_snapshot(self):
-        with self.lock:
-            return (self.image,self.info,list(self.history),self.epoch,
-                    {key:list(value) if value is not None else None for key,value in self.tf_edges.items()})
+        # Wait releases the sensor lock. Other HTTP requests and flight loops
+        # stay independent. Select an atomic, fresh exposure, never current pose.
+        from ..controllers.owl_ego_observation import ObservationUnavailable, ObservationEpochChanged
+        deadline = time.monotonic()+.08
+        with self.camera_changed:
+            epoch = self.epoch
+            while True:
+                if self.epoch != epoch:
+                    raise ObservationEpochChanged('localization changed while awaiting observation')
+                candidates = list(self.images) or ([self.image] if self.image is not None else [])
+                history = list(self.history)
+                now = self.now_s()
+                for m in reversed(candidates):
+                    stamp = m.header.stamp.to_sec()
+                    if not 0 <= now-stamp <= self.c['hardware']['rgb_max_age_s']:
+                        continue
+                    before = [v for v in history if v['stamp'] <= stamp]
+                    after = [v for v in history if v['stamp'] >= stamp]
+                    if (before and after and max(stamp-before[-1]['stamp'],after[0]['stamp']-stamp)
+                            <= self.c['hardware']['sync_max_s']):
+                        return (m,self.info,history,epoch,
+                            {k:list(v) if v is not None else None for k,v in self.tf_edges.items()})
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    raise ObservationUnavailable('no fresh exposure bracketed by odometry within 80 ms wait')
+                self.camera_changed.wait(remaining)
 
     def current_epoch(self):
         with self.lock:

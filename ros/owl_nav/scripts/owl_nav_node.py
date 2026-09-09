@@ -52,9 +52,18 @@ class Node:
             rospy.Subscriber(topics['vision_pose_reset'],Int32,self.reset,queue_size=1)]
         self.service = rospy.Service(topics['command'],Command,self.command)
         # Wall-clock loops remain live when simulated ROS time pauses.
+        self.workers = []
         for target in (self.control_loop,self.planner_loop,self.audit_loop,self.fcu_loop):
-            threading.Thread(target=target,daemon=True).start()
-        rospy.on_shutdown(self.stop.set)
+            worker = threading.Thread(target=target,daemon=True)
+            self.workers.append(worker)
+            worker.start()
+        rospy.on_shutdown(self.shutdown)
+
+    def shutdown(self):
+        self.stop.set()
+        for worker in self.workers:
+            if worker is not threading.current_thread():
+                worker.join(timeout=3)
 
     def odom(self,m):
         from tf.transformations import quaternion_matrix, euler_from_quaternion
@@ -89,7 +98,7 @@ class Node:
         with self.lock:
             self.ext_at = time.monotonic()
             self.landed = m.landed_state
-            self.core.airborne = m.landed_state == ExtendedState.LANDED_STATE_IN_AIR
+            self.core.update_extended_state(m.landed_state,self.ext_at)
 
     def reset(self,m):
         with self.lock:
@@ -114,8 +123,7 @@ class Node:
         return (c['flight_enabled'] and c['failsafe_validated'] and c['sensors_validated']
                 and not self.conflicts and now-self.conflict_at < 2
                 and now-self.cloud_at < c['cloud_timeout_s']
-                and now-self.ext_at < c['state_timeout_s']
-                and now-self.core.planner_at < c['planner_timeout_s'])
+                and now-self.ext_at < c['state_timeout_s'])
 
     def command(self,req):
         try:
@@ -148,6 +156,7 @@ class Node:
         c = self.core
         h = c.status(now)
         h['control_ready'] = h['control_ready'] and self.authorized(now)
+        h['hold_ready'] = h['hold_ready'] and self.authorized(now)
         h['conflicting_publishers'] = self.conflicts
         self.status_sequence += 1
         data = dict(health=h,session_id=c.session,bridge_id=self.bridge_id,sequence=self.status_sequence,
@@ -209,8 +218,7 @@ class Node:
 
     def heartbeat(self,g):
         with self.lock:
-            if g == self.planner_generation:
-                self.core.planner_at = time.monotonic()
+            self.core.planner_heartbeat(g,time.monotonic())
 
     def planner_loop(self):
         process = None
@@ -229,6 +237,10 @@ class Node:
                             self.planner_generation = g
                         process = PlannerProcess(self.c,g,goal,self.trajectory,self.heartbeat)
                     process.poll()
+                    with self.lock:
+                        if self.core.generation == g and self.core.active:
+                            task = self.core.tasks[self.core.active]
+                            task['timing_s'].update({k:v-task['started'] for k,v in process.milestones.copy().items()})
                 except Exception as e:
                     with self.lock:
                         if self.core.generation == g:
