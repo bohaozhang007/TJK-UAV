@@ -3,8 +3,10 @@ __pycache__/
 *.log
 /.cache/
 
-# Local-only tests and runtime artifacts.
-/tests/
+# Keep existing local tests private; share the v21 offline regression suite.
+/tests/*
+!/tests/test_v21.py
+# Runtime artifacts.
 /logs/
 /captures/
 /test_*/

@@ -8,6 +8,11 @@ set "DA3_ROOT=%SCRIPT_DIR%..\depth-anything-3"
 if not defined DA3_ENV set "DA3_ENV=da3"
 if not defined SAM3_ENV set "SAM3_ENV=sam3"
 if not defined AGENT_ENV set "AGENT_ENV=sam2"
+if not defined TJK_AGENT_VERSION set "TJK_AGENT_VERSION=20"
+if not "%TJK_AGENT_VERSION%"=="20" if not "%TJK_AGENT_VERSION%"=="21" (
+    echo Error: TJK_AGENT_VERSION must be 20 or 21.
+    exit /b 1
+)
 set "MPLCONFIGDIR=%SCRIPT_DIR%.cache\matplotlib"
 set "PYTHONPATH=%SAM2_ROOT%;%DA3_ROOT%\src;%SCRIPT_DIR%src;%PYTHONPATH%"
 set "USE_DA3=0"
@@ -76,6 +81,6 @@ if "%USE_SAM3%"=="1" (
 )
 
 :sam3_ready
-echo [START] Starting Agent v20...
-conda.exe run --no-capture-output -n "%AGENT_ENV%" python "%SCRIPT_DIR%src\agent\tjk\v20.py" !AGENT_ARGS!
+echo [START] Starting Agent v%TJK_AGENT_VERSION%...
+conda.exe run --no-capture-output -n "%AGENT_ENV%" python "%SCRIPT_DIR%src\agent\tjk\v%TJK_AGENT_VERSION%.py" !AGENT_ARGS!
 exit /b %ERRORLEVEL%
