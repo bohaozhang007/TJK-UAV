@@ -1,0 +1,375 @@
+"""ROS-independent flight state machine. Caller serializes calls with a short lock.
+
+Only tick() produces setpoints. Ownership is a UUID namespace per planner process,
+not a receive timestamp. All clocks for watchdogs are monotonic.
+"""
+import math
+import uuid
+import numpy as np
+
+
+class Rejected(ValueError):
+    pass
+
+
+def wrap(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def finite(values):
+    return all(isinstance(v, (float, int)) and not isinstance(v, bool)
+               and math.isfinite(v) for v in values)
+
+
+class Polynomial:
+    def __init__(self, msg):
+        self.start = msg.start_time.to_sec()
+        self.id = msg.traj_id
+        self.durations = np.asarray(msg.duration, dtype=float)
+        self.coeffs = np.asarray([msg.coef_x, msg.coef_y, msg.coef_z], dtype=float)
+        n = len(self.durations)
+        if (msg.order != 5 or not n or self.coeffs.shape != (3, n * 6)
+                or not np.isfinite(self.coeffs).all()
+                or not np.isfinite(self.durations).all()
+                or (self.durations <= 0).any() or not math.isfinite(self.start)):
+            raise Rejected('invalid polynomial')
+        self.duration = float(sum(self.durations))
+
+    def sample(self, stamp):
+        t = max(0., min(stamp - self.start, self.duration))
+        i = 0
+        while i < len(self.durations) - 1 and t > self.durations[i]:
+            t -= self.durations[i]
+            i += 1
+        c = self.coeffs[:, i * 6:(i + 1) * 6]
+        return tuple(np.array([np.polyval(np.polyder(axis, k), t) for axis in c])
+                     for k in range(3))
+
+
+class FlightCore:
+    def __init__(self, config):
+        for key,value in config.items():
+            if key in ('flight_enabled','failsafe_validated','sensors_validated'):
+                if type(value) is not bool:
+                    raise ValueError(key+' must be boolean')
+            elif key != 'world_frame' and (not finite([value]) or value <= 0):
+                raise ValueError(key+' must be finite and positive')
+        if config['control_hz'] < 20 or config['stable_samples'] < 2:
+            raise ValueError('control/stability rates are too low')
+        self.c = config
+        self.epoch = uuid.uuid4().hex
+        self.pose = None
+        self.odom_at = -math.inf
+        self.stamp = None
+        self.frame = None
+        self.state_at = -math.inf
+        self.connected = self.armed = self.airborne = False
+        self.mode = ''
+        self.manual = False
+        self.initialized = False
+        self.enabled = False
+        self.session = None
+        self.retired = set()
+        self.lease_at = -math.inf
+        self.tasks = {}
+        self.active = None
+        self.generation = None
+        self.trajectory = None
+        self.pending_trajectory = None
+        self.last_traj_id = -1
+        self.planner_at = -math.inf
+        self.hold = None
+        self.yaw = None
+        self.stable = 0
+        self.stable_since = None
+        self.stop_samples = 0
+        self.stop_since = None
+        self.stopped = False
+        self.last_error = None
+        self.last_tick = None
+        self.landing = False
+
+    def fresh(self, now):
+        return (self.pose is not None and now - self.odom_at <= self.c['odom_timeout_s']
+                and now - self.state_at <= self.c['state_timeout_s'] and self.connected)
+
+    def status(self, now):
+        return dict(initialized=self.initialized, airborne=self.airborne,
+                    control_ready=self.initialized and self.enabled and self.fresh(now)
+                    and not self.manual and not self.landing and self.mode == 'OFFBOARD'
+                    and self.session is not None and self.armed and self.airborne,
+                    odom_ok=self.pose is not None and now-self.odom_at <= self.c['odom_timeout_s'],
+                    planner_ok=now-self.planner_at <= self.c['planner_timeout_s'],
+                    localization_epoch=self.epoch, manual_takeover=self.manual,
+                    error=self.last_error, stopped=self.stopped)
+
+    def update_state(self, connected, armed, airborne, mode, now):
+        if self.landing and self.mode == 'AUTO.LAND' and mode != 'AUTO.LAND' and airborne:
+            self.manual = True
+            self.landing = False
+            self.fail('manual takeover during landing')
+        if self.enabled and not self.landing and self.mode == 'OFFBOARD' and mode != 'OFFBOARD':
+            self.manual = True
+            self.enabled = False
+            self.fail('manual takeover or PX4 mode change')
+        if self.enabled and self.armed and not armed and not self.landing:
+            self.fail('unexpected disarm')
+            self.enabled = False
+            self.manual = True
+        self.connected, self.armed, self.airborne = connected, armed, airborne
+        self.mode, self.state_at = mode, now
+        if self.landing and not airborne and not armed:
+            self.landing = False
+            self.enabled = False
+            if self.active:
+                self.finish('arrived', True)
+
+    def reset(self, error='localization reset'):
+        self.epoch = uuid.uuid4().hex
+        self.initialized = False
+        self.fail(error)
+        # A hold point in the old world must never be reused.
+        self.hold = None
+        self.enabled = False
+
+    def odometry(self, xyz, yaw, velocity, yaw_rate, stamp, frame, now):
+        if not finite([*xyz, yaw, *velocity, yaw_rate, stamp]) or not frame:
+            self.fail('invalid odometry')
+            return
+        if self.stamp is not None:
+            dt = stamp - self.stamp
+            jump = np.linalg.norm(np.asarray(xyz)-self.pose[:3])
+            if (frame != self.frame or dt < 0 or dt > self.c['odom_timeout_s']
+                    or abs(wrap(yaw-self.pose[3])) > self.c['reset_yaw_rad'] + self.c['yaw_rate_rad_s']*max(0,dt)
+                    or jump > self.c['reset_jump_m'] + self.c['max_speed_m_s'] * max(0,dt)):
+                self.reset()
+            elif dt == 0:
+                return  # repeated cached samples never satisfy stability
+        self.pose = np.array([*xyz, yaw], dtype=float)
+        self.speed = float(np.linalg.norm(velocity))
+        self.yaw_rate = abs(yaw_rate)
+        self.stamp, self.frame, self.odom_at = stamp, frame, now
+        if self.yaw is None:
+            self.yaw = yaw
+        low = self.speed <= self.c['stop_speed_m_s'] and self.yaw_rate <= self.c['stop_yaw_rate_rad_s']
+        self.stop_samples = self.stop_samples + 1 if low else 0
+        self.stop_since = (self.stop_since if self.stop_since is not None else now) if low else None
+        self.stopped = (self.stop_samples >= self.c['stable_samples'] and
+                        self.stop_since is not None and now-self.stop_since >= self.c['stable_duration_s'])
+        if not self.active:
+            return
+        t = self.tasks[self.active]
+        if t['status'] == 'stopping':
+            if self.stopped and self.generation is None and self.enabled and self.mode == 'OFFBOARD':
+                self.finish('cancelled', True)
+            return
+        if t['kind'] == 'land':
+            return
+        good = (self.enabled and self.mode == 'OFFBOARD' and self.armed and self.airborne and low and np.linalg.norm(self.pose[:3]-np.array(t['goal'][:3])) <= self.c['position_tolerance_m']
+                and abs(wrap(yaw-t['goal'][3])) <= self.c['yaw_tolerance_rad'])
+        self.stable = self.stable + 1 if good else 0
+        self.stable_since = (self.stable_since if self.stable_since is not None else now) if good else None
+        if (self.stable >= self.c['stable_samples'] and self.stable_since is not None
+                and now-self.stable_since >= self.c['stable_duration_s']):
+            self.hold = np.array(t['goal'])
+            self.finish('arrived', True)
+
+    def invalidate(self):
+        self.generation = None
+        self.trajectory = None
+        self.pending_trajectory = None
+        self.last_traj_id = -1
+        self.stable = self.stop_samples = 0
+        self.stable_since = self.stop_since = None
+        self.stopped = False
+        if self.pose is not None:
+            self.hold = self.pose.copy()
+
+    def finish(self, status, stopped, error=None):
+        if self.active:
+            self.tasks[self.active].update(status=status, stopped=stopped)
+            if error:
+                self.tasks[self.active]['error'] = error
+        self.active = None
+        self.generation = None
+        self.trajectory = None
+        self.pending_trajectory = None
+
+    def fail(self, error):
+        self.last_error = error
+        self.invalidate()
+        self.finish('failed', False, error)
+
+    def owner(self, session, now):
+        self.watchdog(now)
+        if not session or session != self.session:
+            raise Rejected('invalid or expired session')
+
+    def watchdog(self, now):
+        if self.session and now-self.lease_at >= 5.0:
+            self.retired.add(self.session)
+            self.session = None
+            self.fail('control lease expired')
+        if self.enabled and not self.fresh(now):
+            self.fail('telemetry lost; PX4 offboard-loss failsafe owns recovery')
+            self.enabled = False
+
+    def command(self, op, data, now):
+        self.watchdog(now)
+        if op == 'robot_restart':
+            if self.session:
+                self.retired.add(self.session)
+            self.session = None
+            self.fail('Robot server restarted')
+            self.epoch = uuid.uuid4().hex
+            self.initialized = False
+            return {'ok': True}
+        if op == 'acquire':
+            sid = data['session_id']
+            if sid in self.retired or (self.session and self.session != sid):
+                raise Rejected('session unavailable')
+            if self.active or self.landing or (self.airborne and not self.stopped):
+                raise Rejected('vehicle is not stopped')
+            self.session, self.lease_at = sid, now
+            return {'ok': True}
+        self.owner(data.get('session_id'), now)
+        if op == 'heartbeat':
+            self.lease_at = now
+            return {'ok': True}
+        if op == 'release':
+            self.retired.add(self.session)
+            self.session = None
+            self.fail('session released')
+            return {'ok': True}
+        if op == 'init':
+            if self.active or self.landing:
+                raise Rejected('cannot initialize during active flight task')
+            if not self.fresh(now) or self.manual or not data.get('flight_authorized'):
+                raise Rejected('preflight not ready or manual takeover latched')
+            self.initialized = True
+            self.enabled = True
+            self.hold = self.pose.copy()
+            self.last_error = None
+            return {'ok': True, 'message': 'initialized; no arming performed'}
+        if op == 'cancel':
+            tid = data['task_id']
+            if tid not in self.tasks or self.tasks[tid]['session_id'] != self.session:
+                raise Rejected('unknown task')
+            t = self.tasks[tid]
+            if t['status'] not in ('arrived','cancelled','failed','stopping'):
+                self.invalidate()
+                t.update(status='stopping', stopped=False)
+            return {'ok': True, 'task_id': tid}
+        if op == 'relative':
+            relative = data.get('relative')
+            if not isinstance(relative,list) or len(relative)!=4 or not finite(relative) or self.pose is None:
+                raise Rejected('invalid relative movement')
+            x,y,z,yaw = relative
+            c,s = math.cos(self.pose[3]),math.sin(self.pose[3])
+            data = dict(data,goal=[self.pose[0]+c*x-s*y,self.pose[1]+s*x+c*y,
+                                   self.pose[2]+z,wrap(self.pose[3]+yaw)])
+            op = 'navigate'
+        if op not in ('navigate','takeoff','land'):
+            raise Rejected('unsupported command')
+        if self.manual or not self.fresh(now):
+            raise Rejected('manual takeover or stale telemetry')
+        if op == 'land':
+            self.fail('preempted by landing')
+            self.landing = self.airborne or self.armed
+            self.enabled = False  # AUTO.LAND, never fight the autopilot with setpoints
+        else:
+            if not self.initialized or self.active or self.landing:
+                raise Rejected('not initialized or task busy')
+            if op == 'navigate' and not self.stopped:
+                raise Rejected('previous motion not confirmed stopped')
+            if op == 'navigate' and (not self.enabled or not self.airborne or self.mode != 'OFFBOARD'):
+                raise Rejected('flight not ready')
+            if op == 'takeoff' and self.airborne:
+                if not self.enabled or self.mode != 'OFFBOARD':
+                    raise Rejected('airborne without bridge authority')
+                return {'ok': True, 'message': 'already airborne'}
+            if data.get('localization_epoch') != self.epoch:
+                raise Rejected('localization epoch mismatch')
+        tid = data['task_id']
+        if op == 'takeoff':
+            goal = self.pose.tolist()
+            goal[2] += self.c['takeoff_height_m']
+        else:
+            goal = data.get('goal', self.pose.tolist())
+        if len(goal)!=4 or not finite(goal) or max(abs(v) for v in goal[:3]) > self.c['world_limit_m']:
+            raise Rejected('invalid goal')
+        if op == 'navigate' and goal[2] < 0:
+            raise Rejected('navigation altitude below supported EGO ground')
+        self.last_error = None
+        self.invalidate()
+        self.active = tid
+        self.tasks[tid] = dict(task_id=tid,session_id=self.session,status='accepted',stopped=False,
+                               goal=goal,kind=op,started=now)
+        if op == 'land':
+            if not self.landing:
+                self.finish('arrived',True)
+        else:
+            if op == 'takeoff':
+                self.enabled = True
+            self.generation = uuid.uuid4().hex
+            self.tasks[tid]['status'] = 'planning'
+        return {'ok': True, 'task_id': tid}
+
+    def trajectory_received(self, generation, trajectory, stamp, now):
+        if not self.active or generation != self.generation or trajectory.id <= self.last_traj_id:
+            return False
+        if trajectory.start > stamp + .5 or trajectory.start + trajectory.duration < stamp:
+            return False
+        self.pending_trajectory = trajectory
+        self.last_traj_id = trajectory.id
+        self.tasks[self.active]['status'] = 'executing'
+        return True
+
+    def tick(self, now, stamp):
+        self.watchdog(now)
+        dt = min(.1, max(0., now-(self.last_tick if self.last_tick is not None else now)))
+        self.last_tick = now
+        if not self.enabled or self.manual or self.landing or self.hold is None:
+            return None
+        if self.pending_trajectory is not None and stamp >= self.pending_trajectory.start:
+            self.trajectory = self.pending_trajectory
+            self.pending_trajectory = None
+        target = self.hold
+        vel = acc = np.zeros(3)
+        if self.active and self.generation:
+            t = self.tasks[self.active]
+            direct = t['kind'] == 'takeoff' or np.linalg.norm(np.array(t['goal'][:3])-self.hold[:3]) < 1e-5
+            if now-t['started'] > self.c['task_timeout_s']:
+                self.fail('task timed out')
+            elif not direct and now-self.planner_at > self.c['planner_timeout_s'] and now-t['started'] > self.c['planning_timeout_s']:
+                self.fail('planner heartbeat lost')
+            elif not direct and self.trajectory is None and now-t['started'] > self.c['planning_timeout_s']:
+                self.fail('planning timed out')
+            elif self.trajectory is not None:
+                traj = self.trajectory
+                if stamp > traj.start + traj.duration + self.c['trajectory_grace_s']:
+                    self.fail('trajectory expired before measured arrival')
+                elif stamp >= traj.start:
+                    pos, vel, acc = traj.sample(stamp)
+                    target = np.array([*pos, t['goal'][3]])
+            if self.active and t['kind'] == 'takeoff':
+                target = self.hold.copy()
+                if self.armed and self.mode == 'OFFBOARD':
+                    target[2] = min(t['goal'][2],target[2]+self.c['takeoff_speed_m_s']*dt)
+                    self.hold = target.copy()
+                target[3] = t['goal'][3]
+            # Pure yaw does not need a zero-length EGO polynomial.
+            if self.active and t['kind'] == 'navigate' and np.linalg.norm(np.array(t['goal'][:3])-self.hold[:3]) < 1e-5:
+                target = np.array(t['goal'])
+                t['status'] = 'executing'
+        if self.last_error and not self.active:
+            target, vel, acc = self.hold, np.zeros(3), np.zeros(3)
+        if (not np.isfinite(target).all() or not np.isfinite(vel).all() or not np.isfinite(acc).all()
+                or np.max(np.abs(target[:3])) > self.c['world_limit_m']
+                or np.linalg.norm(vel) > self.c['max_speed_m_s']
+                or np.linalg.norm(acc) > self.c['max_acceleration_m_s2']):
+            self.fail('trajectory exceeds execution limits')
+            target,vel,acc = self.hold,np.zeros(3),np.zeros(3)
+        self.yaw = wrap(self.yaw + np.clip(wrap(target[3]-self.yaw),
+                          -self.c['yaw_rate_rad_s']*dt,self.c['yaw_rate_rad_s']*dt))
+        return (target[:3].copy(), vel, acc, self.yaw)

@@ -1,0 +1,7 @@
+<launch>
+  <arg name="config"/>
+  <!-- Configuration defaults to flight_enabled:false. No vendor services are stopped. -->
+  <node pkg="owl_nav" type="owl_nav_node.py" name="owl_ego_bridge" output="screen" required="true">
+    <param name="config" value="$(arg config)"/>
+  </node>
+</launch>

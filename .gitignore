@@ -6,6 +6,8 @@ __pycache__/
 # Keep existing local tests private; share the v21 offline regression suite.
 /tests/*
 !/tests/test_v21.py
+!/tests/test_owl_ego_robot.py
+!/tests/owl_ego_ros_smoke.py
 # Runtime artifacts.
 /logs/
 /captures/

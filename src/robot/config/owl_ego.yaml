@@ -1,0 +1,66 @@
+controller:
+  motion_timeout_s: 15.0
+  takeoff_timeout_s: 60.0
+  landing_timeout_s: 90.0
+hardware:
+  bridge_timeout_s: 1.0
+  rgb_max_age_s: 0.4
+  sync_max_s: 0.05
+  long_edge_px: 640
+  # User-approved approximate geometry. 90 degrees is an INITIAL ASSUMPTION,
+  # not a measured OWL lens FOV; fx=fy=W/(2*tan(FOV/2)), cx=W/2, cy=H/2.
+  intrinsics_mode: approximate_fov
+  assumed_horizontal_fov_deg: 90.0
+  camera_optical_frame: ''
+  # User requests a horizontal, body-aligned camera approximation.
+  # This models pitch as zero; it does not command the physical gimbal.
+  extrinsics_mode: body_coincident_fixed
+  fixed_camera_pitch_deg: 0.0
+  body_from_camera_optical_rotation: null
+
+control:
+  flight_enabled: false
+  # Set true only after validating PX4 offboard-loss action on this firmware.
+  failsafe_validated: false
+  sensors_validated: false
+  control_hz: 50.0
+  odom_timeout_s: 0.5
+  state_timeout_s: 2.0
+  planner_timeout_s: 1.0
+  planning_timeout_s: 10.0
+  task_timeout_s: 120.0
+  trajectory_grace_s: 2.0
+  reset_jump_m: 0.5
+  reset_yaw_rad: 0.7853981634
+  max_speed_m_s: 2.0
+  max_acceleration_m_s2: 3.0
+  world_limit_m: 30.0
+  position_tolerance_m: 0.15
+  yaw_tolerance_rad: 0.0872664626
+  stop_speed_m_s: 0.10
+  stop_yaw_rate_rad_s: 0.0872664626
+  stable_samples: 5
+  stable_duration_s: 0.5
+  yaw_rate_rad_s: 0.523598776
+  takeoff_height_m: 1.0
+  takeoff_speed_m_s: 0.3
+  cloud_timeout_s: 0.5
+  cloud_sync_max_s: 0.1
+  world_frame: world
+planner:
+  executable: ''
+  sha256: ''
+  parameters: ''
+  commit: 9d85475ea7b9bf5c112cf7c3c3d0d3f9e96d9010
+topics:
+  odom: /mavros/local_position/odom
+  rgb: /visbot_media_g/gimbal_camera/image_raw
+  camera_info: /visbot_media_g/gimbal_camera/camera_info
+  state: /mavros/state
+  extended_state: /mavros/extended_state
+  cloud: /ego_planner_node/grid_map/cloud
+  localization_reset: /owl_ego/localization_reset
+  vision_pose_reset: /mavros/vision_pose/pose_reset
+  bridge_status: /owl_ego/status
+  command: /owl_ego/command
+  setpoint: /mavros/setpoint_raw/local

@@ -213,6 +213,16 @@ class ApiHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
             return {}
+        if getattr(self.controller, "backend", None) == "owl_ego":
+            if content_length > 65536:
+                raise ValueError("JSON body too large")
+            raw = self.rfile.read(content_length)
+            def reject_constant(value):
+                raise ValueError("nonfinite JSON number")
+            data = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+            if not isinstance(data, dict):
+                raise ValueError("JSON body must be an object")
+            return data
         raw = self.rfile.read(content_length)
         try:
             return json.loads(raw.decode("utf-8"))
@@ -238,6 +248,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         body = self._read_json_body() if self.command == "POST" else {}
         params = self._request_params(query, body)
+
+        if getattr(self.controller, "backend", None) == "owl_ego":
+            try:
+                result = self.controller.handle_http(self.command, path, body if self.command == "POST" else params)
+                self._json_response(200 if result.get("ok") else 409, result)
+            except Exception as exc:
+                self._json_response(getattr(exc, "code", 400), {"ok": False, "error": str(exc)})
+            return
 
         if path == "/preview":
             self._html_response(200, self._preview_html())
@@ -340,10 +358,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"ok": False, "error": str(exc)})
 
     def do_GET(self):
-        self._handle()
+        try:
+            self._handle()
+        except (ValueError, TypeError) as exc:
+            self._json_response(400, {"ok": False, "error": str(exc)})
 
     def do_POST(self):
-        self._handle()
+        self.do_GET()
 
 
 def run_http_server(
@@ -515,6 +536,9 @@ def build_controller(
         from .controllers.ue import UEController
 
         return UEController(image_dir=image_dir, config_path=config_path)
+    if robot == "owl_ego":
+        from .controllers.owl_ego import OwlEgoController
+        return OwlEgoController(image_dir=image_dir, config_path=config_path)
     if robot == "owl":
         from .controllers.owl import OwlController
 
@@ -544,7 +568,7 @@ def build_keep_alive(
         )
         keepalive.start()
         return keepalive
-    if robot in {"ue", "owl", "i7"}:
+    if robot in {"ue", "owl", "i7", "owl_ego"}:
         return NullKeepalive()
     raise ValueError(f"unsupported robot: {robot}")
 
@@ -553,7 +577,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Robot Controller")
     parser.add_argument(
         "--robot",
-        choices=("tello", "ue", "owl", "i7"),
+        choices=("tello", "ue", "owl", "i7", "owl_ego"),
         default=None,
         help="controller backend to use (default comes from common config)",
     )
@@ -584,7 +608,7 @@ def main():
     common_config = load_robot_config("common", args.common_config)
     server_config = required_section(common_config, "server")
     robot = args.robot or required_string(server_config, "default_robot")
-    if robot not in {"tello", "ue", "owl", "i7"}:
+    if robot not in {"tello", "ue", "owl", "i7", "owl_ego"}:
         raise ValueError(f"unsupported default Robot backend: {robot}")
     host = (
         args.host
@@ -612,16 +636,26 @@ def main():
     )
 
     print(f"HTTP ready at http://{host}:{port} robot={robot}")
-    print(f"Live preview: http://{host}:{port}/preview")
-    print(
-        "Endpoints: /init /takeoff /get_rgb_meta /get_rgb_byte "
-        "/get_depth_meta /get_depth_np /velocity /move_relative_xyz "
-        "/move_relative_xyz_yaw /rotate /get_pose /motion_tolerances "
-        "/land /close /health /video_feed /preview"
-    )
+    if robot == "owl_ego":
+        print("v21 endpoints: /v21/capabilities /v21/observation /v21/session "
+              "/v21/heartbeat /v21/session/release /v21/navigation "
+              "/v21/navigation/status /v21/navigation/cancel /health /get_pose "
+              "/motion_tolerances /init /takeoff /move_relative_xyz_yaw /land")
+    else:
+        print(f"Live preview: http://{host}:{port}/preview")
+        print(
+            "Endpoints: /init /takeoff /get_rgb_meta /get_rgb_byte "
+            "/get_depth_meta /get_depth_np /velocity /move_relative_xyz "
+            "/move_relative_xyz_yaw /rotate /get_pose /motion_tolerances "
+            "/land /close /health /video_feed /preview"
+        )
 
     try:
-        run_console(controller, keepalive, keyboard_op)
+        if robot == "owl_ego":
+            while True:
+                time.sleep(1)
+        else:
+            run_console(controller, keepalive, keyboard_op)
     finally:
         keepalive.stop_keepalive()
         try:

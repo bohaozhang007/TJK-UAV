@@ -12,6 +12,7 @@ _DEFAULT_CONFIG_PATHS = {
     "common": Path(__file__).resolve().parent / "config" / "common.yaml",
     "tello": Path(__file__).resolve().parent / "config" / "tello.yaml",
     "ue": Path(__file__).resolve().parent / "config" / "ue.yaml",
+    "owl_ego": Path(__file__).resolve().parent / "config" / "owl_ego.yaml",
     "owl": Path(__file__).resolve().parent / "config" / "owl.yaml",
     "i7": _REPOSITORY_ROOT / "ros" / "i7_nav" / "config" / "i7_nav.yaml",
 }

@@ -1,9 +1,8 @@
 # OWL EGO / Agent v21 HTTP contract — protocol version 1
 
 This document and `src/robot_client/owl_ego.py` are the shared source of truth.
-The client is implemented on the Windows Agent computer. **The Robot backend
-described here is not implemented in this checkout yet.** It runs on the OWL
-computer and must not route navigation through Captain. Keep existing `owl`
+The client is implemented on the Windows Agent computer. The Robot backend is
+implemented in this checkout and runs on the OWL computer and must not route navigation through Captain. Keep existing `owl`
 and all v20 behavior available as a separate backend.
 
 ## Coordinates and timestamps
@@ -194,3 +193,61 @@ manual takeover; low-speed/yaw/XYZ convergence; pure yaw/backward motion;
 image/pose/TF alignment and resized K; odometry reset invalidation; takeoff and
 landing preemption. Never let Captain/another bridge simultaneously publish
 competing MAVROS setpoints. Keep camera/VIO/MAVROS launch dependencies alive.
+
+
+## 2026-09-09 user-authorized approximate camera profile
+
+Status: Robot implemented; Agent opt-in handling pending. See
+[`collab/messages/robot-001.md`](collab/messages/robot-001.md). Protocol version
+remains 1; existing flight endpoints, ownership, timing and coordinate fields do
+not change. This optional profile is an explicit exception to the calibrated
+observation requirements above, not a claim that approximate data is calibrated.
+
+The user accepts a camera center coincident with the body position and confirms
+a fixed gimbal angle. By the latest user instruction, Robot models body-relative
+pitch as 0 degrees (horizontal forward), superseding the earlier +20-degree
+model. This is a geometry approximation, not a physical gimbal command. The optical-to-
+body axes conversion is still applied; the transform is not an identity rotation.
+Body attitude remains the full exposure-time interpolated attitude.
+
+In `hardware.intrinsics_mode: approximate_fov`, K is computed as:
+
+```
+fx = fy = width / (2 * tan(horizontal_fov / 2))
+cx = width / 2
+cy = height / 2
+```
+
+Square pixels and a centered principal point are assumptions. Robot's initial
+`assumed_horizontal_fov_deg: 90.0` is an explicit trial value, NOT a measured
+OWL camera specification. K scales with the returned image dimensions. For
+1280x720 source -> 640x360 output, this setting gives fx=fy=320, cx=320, cy=180.
+Width and height alone cannot determine focal length. No D is invented and no
+real lens correction is claimed: raw resized RGB has `rectified:false`.
+
+Observation adds these metadata fields (existing calibrated fields remain):
+
+```json
+{"rectified":false,"calibration_quality":"approximate",
+ "geometry_assumptions":{
+   "intrinsics":"approximate_fov","assumed_horizontal_fov_deg":90.0,
+   "principal_point":"image_center","square_pixels_assumed":true,
+   "distortion":"unknown_not_corrected","extrinsics":"body_coincident_fixed",
+   "camera_translation":"body_coincident_assumption"}}
+```
+
+Calibrated CameraInfo + TF returns `rectified:true`,
+`calibration_quality:"calibrated"`. Calibrated CameraInfo + approximate extrinsics
+returns `rectified:true`, `calibration_quality:"approximate"`; rectification and
+extrinsic quality are independent. All modes still require fresh image/odometry,
+valid rotation, finite positive focal length, matching epoch and stable output size.
+
+Agent MUST retain its strict default. To use the user-authorized approximation,
+Agent needs an explicit opt-in (suggested config `allow_approximate_geometry`),
+validation of this profile/metadata, and preservation of assumptions in mission
+logs. It may then accept `rectified:false` for this profile only. Do not globally
+remove rectification/synchronization validation or relabel raw RGB as rectified.
+The existing Agent client currently rejects this profile before session/takeoff;
+this is expected until the Agent-side adaptation is implemented and verified.
+Target world positions and the 100 cm deduplication rule are approximate under
+this profile; onboard FAST-LIO collision avoidance is unchanged.

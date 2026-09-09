@@ -8,7 +8,7 @@
 
 需要先实现并启动符合 [协议](owl_ego_contract.md) 的无人机端后端。当前旧 `owl`
 Server 不支持 v21；Client 会在取得控制权、起飞前检查能力和同步相机观测。
-[发给无人机端 Codex 的提示词](robot_codex_prompt_v21.md) 与协议文件一起传过去。
+[发给无人机端 Codex 的提示词](collab/messages/agent-001.md) 与协议文件一起传过去。
 
 Agent/SAM2、SAM3、DA3 分别沿用 sam2、sam3、da3 Conda 环境。旧 run_agent.bat
 默认仍运行 v20；新 wrapper 仅在本次调用选择 v21。也可直接在正确环境运行
