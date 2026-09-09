@@ -1,0 +1,35 @@
+{
+  "image": "C:\\Users\\colab999\\Desktop\\project\\TJK-UAV\\assets\\bottle-uav.jpg",
+  "prompt": "box",
+  "confidence_threshold": 0.5,
+  "precision": "bfloat16_amp",
+  "image_size": [
+    1706,
+    1279
+  ],
+  "inference_seconds": 2.3582324999879347,
+  "detections": [
+    {
+      "id": 1,
+      "score": 0.90234375,
+      "bbox_xyxy": [
+        632.7369384765625,
+        521.5833129882812,
+        1098.6502685546875,
+        973.3189086914062
+      ],
+      "mask": "mask_1.png"
+    },
+    {
+      "id": 2,
+      "score": 0.89453125,
+      "bbox_xyxy": [
+        1250.826171875,
+        251.1316680908203,
+        1483.77001953125,
+        477.97418212890625
+      ],
+      "mask": "mask_2.png"
+    }
+  ]
+}

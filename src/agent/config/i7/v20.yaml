@@ -127,6 +127,8 @@ track:
 
 # Circular multi-view scan settings.
 scan:
+  # Skip scanning after tracking and return to the waypoint.
+  skip: false
   # false: 12 points; true: only 12, 3, 6, and 9 o'clock.
   simplified: true
   num_points: 12

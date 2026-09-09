@@ -230,6 +230,7 @@ class TJKAgent:
         select_config = _config_section(config, "select")
         safety_config = _config_section(config, "safety")
         scan_config = _config_section(config, "scan")
+        self.skip_scan = _config_bool({"skip": False, **scan_config}, "skip")
         detectors_config = _config_section(config, "detectors")
         active_detector_config = _config_section(
             detectors_config,
@@ -1003,10 +1004,13 @@ class TJKAgent:
                         else WaypointState.RETURN_WAYPOINT
                     )
                 elif self.state == WaypointState.SCAN:
-                    scan_succeeded = self._run_task_stage(
-                        "scan",
-                        self.scan,
-                    )
+                    if self.skip_scan:
+                        self._log("[SCAN-SKIP] Scan disabled; return to waypoint.")
+                    else:
+                        scan_succeeded = self._run_task_stage(
+                            "scan",
+                            self.scan,
+                        )
                     self.state = WaypointState.RETURN_WAYPOINT
                 elif self.state == WaypointState.RETURN_WAYPOINT:
                     self.return_waypoint()
@@ -1033,13 +1037,14 @@ class TJKAgent:
             search_succeeded
             and select_succeeded
             and track_succeeded
-            and scan_succeeded
+            and (self.skip_scan or scan_succeeded)
         )
         self._log(
             f"[RES] Waypoint task completed; candidates="
             f"{len(self.search_candidates)} target_selected={select_succeeded} "
             f"track_skipped={self.skip_track} "
             f"target_reached={track_succeeded} "
+            f"scan_skipped={self.skip_scan} "
             f"scan_completed={scan_succeeded}."
         )
         self.state = (

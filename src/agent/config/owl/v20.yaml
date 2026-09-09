@@ -26,8 +26,8 @@ mission:
   waypoints:
     - name: waypoint_1
       x_cm: 0.0
-      y_cm: 150.0
-      z_cm: 50.0
+      y_cm: 100.0
+      z_cm: 0.0
       yaw_deg: 0.0
       # true: only verify transit/arrival, then continue to the next waypoint.
       # false: run SEARCH/TRACK/SCAN after arrival.
@@ -36,9 +36,9 @@ mission:
     - name: waypoint_2
       x_cm: 0.0
       y_cm: -150.0
-      z_cm: 50.0
+      z_cm: 0.0
       yaw_deg: 0.0
-      only_arrive: false
+      only_arrive: true
 
 
 # Motion limits and pixel-error conversion used while tracking the target.
@@ -50,7 +50,7 @@ motion:
   reference_height_px: 360
 
   # Forward/backward action.
-  max_fb_step_cm: 50.0
+  max_fb_step_cm: 30.0
   # Visual approach deadband; Server pose tolerance filters final XYZ jointly.
   fb_stop_step_cm: 5.0 # 5.0
   backward_ratio: 0.5
@@ -79,13 +79,13 @@ safety:
 # Search pattern at each waypoint.
 search:
   rotation_step_deg: 30.0 # 30
-  height_offset_cm: 50.0
+  height_offset_cm: 20.0
   # Forward distance sent together with every SEARCH rotation. Values <= 0,
   # such as 0 or -1, disable forward motion.
   forward_cm: 0.0
   # Keep only Z aligned to the first view of each 360-degree SEARCH turn.
   # X/Y are allowed to change with forward motion.
-  align_z_to_first_view: true
+  align_z_to_first_view: false
   # SAM3 search intentionally requests low-threshold debug results, then keeps
   # only the strongest configured number of candidates per view.
   sam3_top_k: 3
@@ -99,7 +99,7 @@ detection:
 # detections that are too close to an image edge.
 select:
   # Preserve the standard v20 behavior of rejecting detections near edges.
-  use_edge_margin_filter: true
+  use_edge_margin_filter: false
   # true: before AREA ranking, discard candidates whose confidence is below
   # the active detector's configured confidence threshold.
   filter_by_detector_confidence: true
@@ -127,6 +127,8 @@ track:
 
 # Circular multi-view scan settings.
 scan:
+  # Skip scanning after tracking and return to the waypoint.
+  skip: false
   # false: 12 points; true: only 12, 3, 6, and 9 o'clock.
   simplified: true
   num_points: 12
