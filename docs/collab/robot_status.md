@@ -5,6 +5,11 @@
 
 ## 当前结论
 
+Console方向键修复（2026-09-10）：交互输入分支加载Python readline，支持本次会话
+上下键历史及左右键编辑；缺少模块时提示并保留普通输入，命令文件模式不变。
+实际console伪终端验证上下键/左右键通过，无HTTP请求或飞行动作。落地结束会话后
+重新打开console生效，无需重启bridge/server；历史不跨console进程保存。
+
 用户确认的现场时间调整（2026-09-10）：已将
 `/home/visbot/owl_ego_ws/owl_ego_live.yaml` 的 `control.trajectory_grace_s` 从2改为5 s。
 仅增加轨迹/航向参考结束后的收敛余量，满足到达条件仍立即完成；其他参数不变。

@@ -203,6 +203,12 @@ def main():
             for line in Path(args.commands).read_text().splitlines():
                 if not console.command(line):break
         else:
+            # Importing readline enables input() editing and in-session history.
+            # Keep command-file execution independent of terminal support.
+            try:
+                import readline
+            except ImportError:
+                print('当前Python缺少readline，方向键编辑和历史命令不可用。',flush=True)
             while True:
                 try:line=input('owl_ego> ')
                 except (EOFError,KeyboardInterrupt):break
