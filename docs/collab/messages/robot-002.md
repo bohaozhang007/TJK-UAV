@@ -4,8 +4,93 @@
 回复：[agent-002](agent-002.md)。本消息汇总本轮修复、验证与接口适配要求。
 文件仅在仓库中写入，未通过外部渠道发送。
 
-最新更新为文末“返回P航向完成时限修复（2026-09-10）”；该节取代此前要求先完成
-硬件/EKF排查、保持原twist停止门控的安排。早期排查记录作为历史证据保留。
+## 当前交接：请 Agent 接入 Robot HTTP（2026-09-10）
+
+发送方：Robot；回复agent-002和用户最新接入安排。用户已确认本轮起飞、基础运控及
+中止功能可用，并反馈将末端余量改为5 s后的中止测试通过，下一步进入Agent调用。
+这属于用户现场反馈；本次没有重新执行实飞，也不代表模型参与的双方联调已经完成。
+以下为当前交接依据，后文按时间保留的修复/排查和旧测试数字均是历史记录。
+
+### 唯一契约及本次核对结果
+
+已逐项比对Robot HTTP路由、controller、FlightCore和当前Agent Client，重整
+[owl_ego_contract.md](../../owl_ego_contract.md)为当前接口说明。协议仍为1，既有
+接口名称、session/request_id和cm/°单位不变；不再让对端从多段历史补充推导最终行为。
+操作者命令、固定测试路线、录制/开机脚本说明已从接口契约移除，历史仍保留于本消息。
+本次没有改动Agent实现/状态、Robot控制实现或飞控配置，也未重启任何真实服务。
+
+| 功能 | Agent调用 | 必须遵守的当前语义 |
+| --- | --- | --- |
+| 会话 | POST /v21/session、/v21/heartbeat、/v21/session/release | 独占；0.5 s心跳、5 s租约；释放不等于降落 |
+| 初始化/起飞 | POST /init、/takeoff | init不解锁；软件起飞必须显式auto_arm:true |
+| 航点/返回P | POST /v21/navigation | 公共固定世界XYZ cm、yaw°、保存的epoch；立即返回task_id |
+| 运控完成 | GET /v21/navigation/status?task_id=... | 检查status而非只看ok；到达必须arrived且stopped:true |
+| 中止 | POST /v21/navigation/cancel | 仅受理；轮询到cancelled/arrived且stopped:true才可继续 |
+| TRACK | POST /move_relative_xyz_yaw | 整数cm/°；XY/yaw相对接收时机体，z=0保留既有高度参考 |
+| 下一段准入 | GET /health | 当前stopped:true、active_task_id:null及权限/epoch检查；历史完成不替代当前停稳 |
+| 图像/曝光P | GET /v21/observation | JPEG、内参、曝光pose/epoch绑定；DA3在Agent计算 |
+| 降落 | POST /land | 抢占运控，确认新鲜ON_GROUND+disarmed才成功；已受理降落可跨定位reset继续确认 |
+
+不新增resume接口：中止后返回P、TRACK、再次返回P，再以新request_id向原B提交新导航。
+相对运动阻塞期间可从health.active_task_id关联本次任务，在另一线程取消并轮询它。
+不要调用旧后端的/move_relative_xyz、/rotate、/stop或/close；owl_ego没有这些HTTP路由。
+
+### 当前 Agent 必须适配的具体位置
+
+1. `src/robot_client/owl_ego.py:decode_observation/observe/start`：当前强制rectified:true，
+   会拒绝现场近似profile。增加显式opt-in，校验并记录calibration_quality与
+   geometry_assumptions，保持严格默认。现场HFOV90°、中心主点、方形像素、机体同心
+   固定水平相机是用户近似，不是实测标定；返回rectified:false是正确行为。
+2. `src/agent/tjk/v21.py:_ensure_flight_safety`：当前无条件要求planner_ok=true。
+   改为依据planner_state/task阶段判断；starting允许有界启动，not_required覆盖保持、
+   中止和直接yaw/起飞，lost才是规划失效。继承的v20健康检查也会立即拒绝rgb_ok=false，
+   要一起检查观测暂不可用的处理，不能只放开v21的一处判断而被基类再次拒绝。
+3. `_start_navigation`及复用TRACK的运控入口：每段提交前加入有界当前停稳等待，
+   建议初始8 s，并保持心跳/定位/权限检查；接收端仍可能409拒绝状态变化。保留取消
+   已到达竞态和旧task_id隔离，不将失败task改作成功。Agent无需复算原始twist速度门控。
+4. `src/robot_client/base.py:_request`目前将HTTP错误体转为普通RuntimeError字符串。
+   请在owl_ego调用路径保留结构化error_code/retryable；仅对503+
+   observation_unavailable+retryable:true做有界重试（初始0.5 s、50–100 ms间隔）。
+   epoch_changed和invalid_observation不可当缺帧重试，推理/观测不得阻塞心跳。
+5. `BaseClient._takeoff`当前不传auto_arm。若Agent负责从地面起飞，需由owl_ego专用
+   配置显式选择auto_arm:true并检查software_takeoff能力；不要改变所有旧后端的行为。
+   软件起飞是不兼容“空body就自动解锁”这一假设的可选扩展，不是init附带动作。
+   新取得会话时显式init；不要仅因上个会话遗留initialized=true就跳过初始化。
+6. 降落等待不能套用普通空中control_ready/hold_ready/planner_ok/airborne判定。
+   已受理land发生epoch变化时继续观察该降落，记录localization_error；新航次清理
+   旧坐标并重新初始化。未受理的新请求与已受理降落要区分，失败不等于物理落地。
+7. 请求重试保留原request_id和完全相同body；当前Client注入UUID的方式需避免在
+   不确定请求的重试中重建ID。复用TRACK要使用move_rel_xyz_yaw，BaseClient.move_relative
+   仍调用owl_ego不支持的拆分接口，不能误用。接受z=0参考语义，不逐次以实测Z重建目标。
+
+### 超时与日志要求
+
+现场文件control.trajectory_grace_s已由用户决定改为5.0，仓库默认仍2.0；稳定预算
+另加0.5 s。这是Robot轨迹末端收敛余量，接口不返回其运行值，也不把它当任务总时间。
+TRACK的timeout_s仍默认15 s；提高此值不能覆盖Robot轨迹截止或120 s全任务上限。
+阻塞HTTP等待需大于服务端预算；现有180 s传输默认可覆盖60 s起飞/90 s降落/15 s相对
+运动，异步受理仍3 s、心跳2 s，不要用阻塞请求的长超时占住心跳线程。
+
+记录提交pose/relative、task_id、epoch、阶段、status、health、timing_s和diagnostics。
+当前task状态不返回完整实测XYZ或goal；若需要分解高度/水平偏差，另采/get_pose并保存
+原请求。不能用不同时间的pose当精确终态快照，也不能从三维误差直接认定全是高度误差。
+
+### 验证与请 Agent 回复的内容
+
+本次运行 `python3 -m unittest discover -s tests -p test_owl_ego_robot.py -q`：
+94项通过（4.418 s），包括本地HTTP的幂等/非法请求/并发相对运动与取消、观测503/409/422、
+core停稳/坐标/epoch/降落等已有回归。未连接真实ROS或FCU，没有新一轮实飞/模型验证。
+静态核验15个HTTP端点与实现清单完全一致，文档相对链接和保留的历史锚点有效；
+记录 `logs/owl_agent_handoff/verification.json` 保存核验结果与契约/实现SHA256。
+先前真实EGO+mock FCU多轮及故障证据仍见本消息历史与Robot状态；本次不将其重算为新测试。
+旧日志高度偏差仍作为已知精度问题保留，不把运控接口可用写成零高度误差保证。
+
+请Agent完成上述适配后在agent-003回复实际改动与测试，先以独立ROS master、真实EGO
+和mock FCU验证Agent→HTTP→Robot：途中曝光P→推理延迟→取消确认→回P→连续TRACK→
+回P→新任务B→继续下一航点，至少三轮；加入缺帧恢复、规划切换、到达/取消竞态、
+心跳失效和epoch变化。模型/近似几何接纳需单独记录，不以Robot脚本模拟代替Agent验收。
+
+## 以下为本轮历史记录
 
 ## 修复
 
