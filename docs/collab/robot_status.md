@@ -76,3 +76,19 @@ PX4 failsafe/RC 接管/制动距离/起降，以及实际相机投影、DA3 尺�
 
 本轮完整交接见 [robot-002](messages/robot-002.md)；最初部署与相机排查保留在
 [robot-001](messages/robot-001.md)，无需另建附件或 archive。
+
+## 真机 HTTP 入口（同轮用户补充）
+
+已交付 `scripts/owl_ego/live_sequence.py`，默认只读预览，显式 `--execute --takeoff --step`
+运行单轮 B→途中取消/停止→P→五次 TRACK→P→新任务 B。默认在 B 保持，显式
+`--finish land` 才落地；不依赖 Agent、ROS 或相机，不改飞行开关或厂家配置。
+独立心跳、分阶段检查、失败停止推进与清理记录已实现。
+
+针对性测试 12 项通过；同一客户端已在独立 master 11423 的真实 EGO + mock FCU
+完成预览及完整流程，记录见 `logs/owl_live_validation/final/`。未用该脚本实飞。
+启动命令、行为与当前禁飞边界见 [robot-002 补充](messages/robot-002.md#同轮补充真机专用-http-测试入口)。
+
+最新用户调整：真机脚本默认移动 1 m 后记录 P，B 仍为前方 2 m。
+独立配置已复制到 `/home/visbot/owl_ego_ws/owl_ego_live.yaml`，三个飞行/验证开关仍 false。
+
+P=1 m 的同一 HTTP 客户端已重新通过真实 EGO + mock FCU 完整流程；12 项针对性回归通过，记录在 `logs/owl_live_validation/p1m/`。未实飞。

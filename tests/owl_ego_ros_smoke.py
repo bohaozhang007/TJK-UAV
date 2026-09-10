@@ -27,6 +27,7 @@ p.add_argument('--config',required=True)
 p.add_argument('--port',type=int,default=11421)
 p.add_argument('--rounds',type=int,default=3)
 p.add_argument('--output',required=True)
+p.add_argument('--live-client',action='store_true',help='Run the actual HTTP-only live_sequence client against this mock fixture')
 p.add_argument('--faults-only',action='store_true',help='Run fault injection scenarios instead of the three route rounds')
 a=p.parse_args()
 if a.rounds < 3:raise SystemExit('At least three interruption rounds are required')
@@ -191,6 +192,14 @@ try:
     assert not obs['rectified'] and obs['calibration_quality']=='approximate'
     assert obs['geometry_assumptions']['intrinsics']=='approximate_fov'
     assert obs['sync_error_s']<=.05 and obs['image_size']==[320,240]
+    if a.live_client:
+        wait(lambda:rpc('GET','/health')['health'].get('stopped'))
+        client=root/'scripts/owl_ego/live_sequence.py'
+        subprocess.run([sys.executable,str(client),'--url',url,'--output',str(temp/'client_preview')],check=True)
+        subprocess.run([sys.executable,str(client),'--url',url,'--execute','--takeoff','--yes',
+                        '--finish','land','--output',str(temp/'client_execute')],check=True)
+        print('PASS: actual HTTP-only live client preview + complete sequence against real EGO/mock FCU',flush=True)
+        raise SystemExit(0)
     sid=rpc('POST','/v21/session',{'request_id':str(uuid.uuid4())})['session_id']
     lease_stop=threading.Event()
     monitor_stop=threading.Event()

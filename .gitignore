@@ -8,6 +8,7 @@ __pycache__/
 !/tests/test_v21.py
 !/tests/test_owl_ego_robot.py
 !/tests/owl_ego_ros_smoke.py
+!/tests/test_owl_live_sequence.py
 # Runtime artifacts.
 /logs/
 /captures/

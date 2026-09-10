@@ -183,3 +183,74 @@ python3 tests/owl_ego_ros_smoke.py --config /home/visbot/owl_ego_ws/owl_ego_appr
 请在 `agent-003.md` 回复适配状态及配置入口，更新 Agent 自己的 status，再安排真实
 Agent→HTTP→EGO/mock FCU 联调。实机控制互斥、世界坐标一致性、PX4 failsafe、RC 接管、
 实际制动/起降、几何投影与 DA3 尺度误差仍属后续实机验证，本轮未开启飞行。
+
+## 同轮补充：真机专用 HTTP 测试入口
+
+按用户后续要求，新增 `scripts/owl_ego/live_sequence.py`。仅使用 Python 标准库和
+Robot HTTP；不依赖 ROS、Agent、视觉模型，不启动 mock，不改参数或厂家服务。
+本入口已在真实 EGO + mock FCU 环境验证，尚未使用它实飞。
+
+默认仅 GET 检查与预览，不获取会话、不初始化、不发运动命令：
+
+```bash
+cd /home/visbot/TJK-UAV
+python3 scripts/owl_ego/live_sequence.py
+```
+
+实际执行示例（仅在 Robot 真机配置已满足实际授权条件时，由操作员手动运行）：
+
+```bash
+python3 scripts/owl_ego/live_sequence.py --execute --takeoff --step
+```
+
+- 默认连接 `http://127.0.0.1:8765`；Wi-Fi 可指定 `--url http://192.168.2.20:8765`。
+- `--execute` 才允许 POST，且需输入 `EXECUTE` 确认；`--yes` 显式跳过初始确认，
+  供模拟自动验证或已审阅的自动运行使用，不会绕过 Robot 的飞行条件。
+- 地面必须显式加 `--takeoff`。脚本调用 Robot `/takeoff`，高度由 Robot 配置决定；
+  飞手仍负责解锁与 OFFBOARD，不含自动解锁/切模式代码。
+- B 取起飞完成后的悬停位姿，沿当时机头方向前方 200 cm，保持高度/yaw。
+  `--b-forward-cm` 可改；不是直接套用旧 epoch 的绝对坐标。
+- 飞行位移达到 100 cm（1 m）时由 `/get_pose` 记录 P，再模拟 0.8 s 延迟且要求继续移动
+  至少 5 cm。P 是该时刻的查询位姿，不是相机曝光位姿；本轮纯控制验证不需要相机。
+- 中途 cancel 后必须确认 `cancelled,stopped:true`；若已自然到达，则本次中断验证失败，
+  不把到达竞态冒充“途中取消成功”。
+- 返回 P 后按当前机体朝向连续执行：前进 30 cm、右移 30 cm、后退 30 cm、
+  纯 yaw +20°、前进 20 cm/左移 20 cm/yaw -20°，各任务仍用 15 s 超时。
+  回 P 后以新 task 再到 B，每次到达核对任务 stopped 和实测位置/yaw 误差。
+- `--step` 仅在起飞完成后的稳定阶段等待 Enter，等待期间心跳继续；不会在
+  “飞往 B → 延迟 → 取消”运动中暂停输入。输入 q 或 Ctrl+C 中止。
+- 默认结束为 `--finish hold`：停在 B 并释放会话，由 Robot bridge 保持，飞手接管降落。
+  显式 `--finish land` 才在 B 调用降落并确认落地，不隐含返回起飞点。
+- 心跳独立每 0.5 s 发送。阻塞 TRACK/起降期间仍检查定位、epoch、接管与权限；
+  失败不继续航线、不自动重新初始化、不自动降落。尝试取消、确认停止后释放会话；
+  网络/接管导致无法确认时记录并提示飞手接管，清理未确认不会记为完整成功。
+- 每次默认新建 `logs/owl_live/<时间>-<随机后缀>/`，保存 events.jsonl 与 result.json。
+  HTTP 超时不自动重发运动指令；机载 5 s 租约保持独立生效。
+
+当前三个飞行开关未改。此前用户已手动解决厂家控制冲突，读取到失联参数
+COM_OF_LOSS_T=1、COM_OBL_RC_ACT=0、COM_RC_OVERRIDE=1、COM_RC_STICK_OV=30，
+用户确认熟悉 POSCTL 切换与急停；这些记录不是实际断流测试已通过的声明。
+默认禁飞配置下 `--execute` 仍会在 `/init` 被 Robot 拒绝，不存在跳过校验的选项。
+
+新增入口针对性测试 12 项通过，包括 GET-only 预览、参数/坐标、epoch/接管退出、
+取消受理与停止确认区分、阻塞期间安全检查、逐步输入期间心跳和失败清理。
+真实 EGO/mock FCU 联调运行的是同一份 live_sequence.py 的预览和完整执行：
+
+```bash
+source /opt/ros/noetic/setup.bash
+source /home/visbot/owl_ego_ws/devel/setup.bash
+python3 -m unittest discover -s tests -p test_owl_live_sequence.py -v
+python3 tests/owl_ego_ros_smoke.py --config /home/visbot/owl_ego_ws/owl_ego_approx.yaml --live-client --port 11423 --output logs/owl_live_validation/reproduce
+```
+
+最终实际运行记录位于 `logs/owl_live_validation/final/`，包括客户端 preview/execute
+子目录、EGO 原始日志和 HTTP/bridge 事件。首次模拟尝试因刚启动、尚未确认稳定而被
+客户端拒绝；fixture 随后增加等待真实 stopped 条件，没有放宽客户端检查。
+
+同轮最新用户调整：P 默认记录阈值由 20 cm 改为 100 cm，B 仍为前方 200 cm，
+之后 0.8 s 延迟、取消、确认停止再回 P 的时序不变。P 是达到阈值时实测记录的位姿，
+不是强制设为理想坐标 x=100。已从 `owl_ego_approx.yaml` 原样复制独立本机配置
+`/home/visbot/owl_ego_ws/owl_ego_live.yaml`，保留三个 false；未把已有只读检查
+当作空间一致性或实际断流回退验证，也未修改正在运行的 bridge/server 配置。
+
+P=1 m 的同一 HTTP 客户端已重新通过真实 EGO + mock FCU 完整流程；12 项针对性回归通过，记录在 `logs/owl_live_validation/p1m/`。未实飞。
