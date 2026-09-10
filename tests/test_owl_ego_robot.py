@@ -1,5 +1,6 @@
 """Offline contract/safety regression tests; never connects to ROS or FCU."""
 import copy
+import io
 import json
 import math
 from pathlib import Path
@@ -23,6 +24,139 @@ from robot.hardware.owl_ego import OwlEgoHardware
 from robot.controllers.owl_ego_observation import interpolate_pose,rotation,transform_sync_error,build_observation,camera_intrinsics,fixed_optical_rotation
 from robot.server import run_http_server,NullKeepalive
 CONFIG=yaml.safe_load((ROOT/'src/robot/config/owl_ego.yaml').read_text())
+
+
+class FramesTest(unittest.TestCase):
+    def test_vendor_transforms_all_setpoint_vectors(self):
+        from owl_nav.frames import Frames
+        f=Frames('owl_vendor_world')
+        for yaw in (0.,.7,-2.,math.pi):
+            p,v,a,y=f.setpoint([1,2,3],[4,5,6],[7,8,9],yaw)
+            np.testing.assert_allclose(p,[-2,1,3])
+            np.testing.assert_allclose(v,[-5,4,6])
+            np.testing.assert_allclose(a,[-8,7,9])
+            self.assertAlmostEqual(math.sin(y-yaw),1.)
+            # Vendor output map->world leaves measured heading unchanged.
+            self.assertAlmostEqual(math.sin(y-math.pi/2-yaw),0.)
+
+    def test_tilted_yaw_rate_accounts_for_vendor_axis_swap(self):
+        from owl_nav.frames import Frames
+        r=.3;p=.2
+        rotation=np.array([[math.cos(p),math.sin(p)*math.sin(r),math.sin(p)*math.cos(r)],
+                           [0,math.cos(r),-math.sin(r)],[-math.sin(p),math.cos(p)*math.sin(r),math.cos(p)*math.cos(r)]])
+        expected=(math.sin(r)*.4+math.cos(r)*.2)/math.cos(p)
+        self.assertAlmostEqual(Frames('standard_enu').yaw_rate(rotation,[.1,.4,.2]),expected)
+        self.assertAlmostEqual(Frames('owl_vendor_world').yaw_rate(rotation,[.4,-.1,.2]),expected)
+
+    def test_vendor_twist_is_already_world(self):
+        from owl_nav.frames import Frames
+        rotation=np.array([[0.,-1,0],[1,0,0],[0,0,1]])
+        np.testing.assert_allclose(Frames('owl_vendor_world').world_velocity(rotation,[1,2,3]),[1,2,3])
+        np.testing.assert_allclose(Frames('standard_enu').world_velocity(rotation,[1,2,3]),[-2,1,3])
+
+    def test_standard_transport_unchanged_and_invalid_rejected(self):
+        from owl_nav.frames import Frames
+        values=([1,2,3],[4,5,6],[7,8,9],.8)
+        self.assertEqual(Frames('standard_enu').setpoint(*values),values)
+        with self.assertRaises(ValueError):Frames('guess')
+
+
+class AlignmentTest(unittest.TestCase):
+    def test_matching_yaw_wrap_and_stale_reference(self):
+        from owl_nav.frames import Alignment
+        a=Alignment();yaw=3.
+        a.add('map',1.,[-2,1,3],(yaw+math.pi/2+math.pi)%(2*math.pi)-math.pi)
+        a.add('lio',1.,[1,2,3],yaw)
+        a.check(1.,[1,2,3],yaw,10.)
+        self.assertTrue(a.ready(10.))
+        self.assertFalse(a.ready(10.6))
+
+    def test_delayed_map_matches_its_own_odom_during_fast_yaw(self):
+        from owl_nav.frames import Alignment
+        a=Alignment()
+        a.check(1.,[0,0,1],0.,10.)
+        a.check(1.04,[0,0,1],.08,10.04)
+        a.add('map',1.,[0,0,1],math.pi/2)
+        a.add('lio',1.04,[0,0,1],.08)
+        a.check(1.04,[0,0,1],.08,10.06)
+        self.assertTrue(a.ready(10.06))
+        # Old matched data cannot keep renewing freshness.
+        a.check(1.04,[0,0,1],.08,10.6)
+        self.assertFalse(a.ready(10.6))
+
+    def test_map_arrives_before_odom_and_real_offset_is_rejected(self):
+        from owl_nav.frames import Alignment
+        a=Alignment();a.add('map',1.,[0,0,1],math.pi/2)
+        a.check(1.,[0,0,1],0.,10.)
+        a.add('map',1.04,[0,0,1],math.pi/2+.3)
+        with self.assertRaises(ValueError):a.check(1.04,[0,0,1],0.,10.04)
+
+    def test_wrong_axes_and_lio_origin_rejected(self):
+        from owl_nav.frames import Alignment
+        a=Alignment();a.add('map',1.,[1,2,3],0.)
+        with self.assertRaises(ValueError):a.check(1.,[1,2,3],0.,10.)
+        a=Alignment();a.add('lio',1.,[2,2,3],0.)
+        with self.assertRaises(ValueError):a.check(1.,[1,2,3],0.,10.)
+
+    def test_unsynchronized_samples_do_not_validate(self):
+        from owl_nav.frames import Alignment
+        a=Alignment();a.add('map',1.,[0,0,1],math.pi/2);a.add('lio',1.,[0,0,1],0.)
+        a.check(1.1,[0,0,1],0.,10.)
+        self.assertFalse(a.ready(10.))
+
+
+class CloudTest(unittest.TestCase):
+    def message(self,xyz):
+        values=np.asarray(xyz,dtype='<f4')
+        return SimpleNamespace(width=len(values),height=1,point_step=12,row_step=12*len(values),
+            data=values.tobytes(),is_bigendian=False,
+            fields=[SimpleNamespace(name=n,offset=i*4,datatype=7,count=1) for i,n in enumerate('xyz')])
+
+    def test_valid_and_partially_nan_cloud(self):
+        from owl_nav.cloud import validate
+        self.assertEqual(validate(self.message([[1,2,3],[float('nan'),0,1]])),1)
+
+    def test_invalid_cloud_rejected(self):
+        from owl_nav.cloud import validate
+        for xyz in ([],[[float('nan')]*3],[[float('inf'),0,0]]):
+            with self.assertRaises(ValueError):validate(self.message(xyz))
+        m=self.message([[1,2,3]]);m.fields[0].datatype=8
+        with self.assertRaises(ValueError):validate(m)
+        m=self.message([[1,2,3]]);m.data=b''
+        with self.assertRaises(ValueError):validate(m)
+
+
+class SoftwareTakeoffTest(unittest.TestCase):
+    def run_prepare(self, failure=None):
+        from owl_nav.software_takeoff import prepare
+        state=dict(mode='POSCTL',armed=False)
+        calls=[];now=[0.];valid=[True]
+        def guard():
+            if not valid[0]:raise RuntimeError('cancelled')
+            return state.copy()
+        def mode():
+            calls.append('mode')
+            if failure=='mode':raise RuntimeError('rejected')
+            if failure!='timeout':state['mode']='OFFBOARD'
+            if failure=='cancel':valid[0]=False
+        def arm():
+            calls.append('arm');state['armed']=True
+            if failure=='late_arm':valid[0]=False
+        def sleep(dt):now[0]+=dt
+        try:
+            prepare(guard,mode,arm,lambda:now[0]>=1.2,lambda:now[0],sleep)
+        except RuntimeError:
+            if failure is None:raise
+        else:
+            self.assertIsNone(failure)
+        self.assertGreaterEqual(now[0],1.2)
+        return calls
+
+    def test_order_and_warmup(self):self.assertEqual(self.run_prepare(),['mode','arm'])
+    def test_mode_rejected_no_arm(self):self.assertEqual(self.run_prepare('mode'),['mode'])
+    def test_cancel_before_arm(self):self.assertEqual(self.run_prepare('cancel'),['mode'])
+    def test_timeout_no_retry(self):self.assertEqual(self.run_prepare('timeout'),['mode'])
+    def test_late_arm_cannot_complete_cancelled_task(self):self.assertEqual(self.run_prepare('late_arm'),['mode','arm'])
 
 
 class CoreTest(unittest.TestCase):
@@ -49,13 +183,134 @@ class CoreTest(unittest.TestCase):
     def stable(self,p=(0,0,1),yaw=0):
         for _ in range(8): self.feed(p,yaw)
 
+    def test_current_stop_is_revoked_after_arrival_and_reports_reason(self):
+        self.nav(goal=(0,0,1,0));self.stable()
+        self.assertEqual(self.c.tasks['a']['status'],'arrived')
+        self.feed(p=(.06,0,1),v=(.12,0,0))
+        h=self.c.status(self.now)
+        self.assertFalse(h['stopped'])
+        self.assertTrue(self.c.tasks['a']['stopped'])
+        self.assertEqual(h['stop_diagnostics']['speed_m_s'],.12)
+        self.assertEqual(h['stop_diagnostics']['stable_samples'],0)
+        with self.assertRaisesRegex(Rejected,'previous motion'):self.nav('b')
+        self.stable();self.nav('b')
+
+    def test_stop_diagnostics_before_odom_is_json_safe(self):
+        h=FlightCore(CONFIG['control']).status(0)
+        self.assertIsNone(h['stop_diagnostics']['speed_m_s'])
+        json.dumps(h,allow_nan=False)
+
+    def test_cancel_accepts_small_pose_jitter_despite_biased_vertical_twist(self):
+        self.nav();self.cmd('cancel',task_id='a')
+        for i in range(30):
+            self.feed(p=(.006*math.sin(i),0,1+.008*math.cos(i)),v=(0,0,-.124),dt=.033)
+        self.assertTrue(self.c.stopped)
+        self.assertEqual(self.c.tasks['a']['status'],'cancelled')
+        self.assertGreater(self.c.status(self.now)['stop_diagnostics']['speed_m_s'],.1)
+
+    def test_level_relative_sequence_does_not_accumulate_altitude_offset(self):
+        self.nav(goal=(0,0,1,0));self.stable((0,0,1.1))
+        for i,relative in enumerate([[.3,0,0,0],[0,-.3,0,0],[-.3,0,0,0],[0,0,0,.35],[.2,.2,0,-.35]]):
+            self.cmd('heartbeat')
+            self.cmd('relative',task_id=str(i),relative=relative,localization_epoch=self.c.epoch)
+            task=self.c.tasks[str(i)];goal=task['goal']
+            self.assertAlmostEqual(goal[2],1.)
+            self.assertAlmostEqual(self.c.hold[2],1.)
+            # Inspect the actual hold/direct-yaw output before a planner exists.
+            self.assertAlmostEqual(self.c.tick(self.now,self.now)[0][2],1.)
+            if i==3:self.assertFalse(task['planner_required'])
+            for _ in range(8):self.feed((goal[0],goal[1],goal[2]+.10),yaw=goal[3],v=(0,0,-.124))
+            self.assertEqual(task['status'],'arrived')
+            self.assertAlmostEqual(self.c.pose[2],1.1)
+            self.assertAlmostEqual(self.c.hold[2],1.)
+
+    def test_explicit_vertical_relative_uses_measured_altitude_then_retains_goal(self):
+        self.stable((0,0,1.1))
+        self.cmd('relative',task_id='up',relative=[0,0,.2,0],localization_epoch=self.c.epoch)
+        self.assertAlmostEqual(self.c.tasks['up']['goal'][2],1.3)
+        self.stable((0,0,1.4))
+        self.cmd('relative',task_id='level',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
+        self.assertAlmostEqual(self.c.tasks['level']['goal'][2],1.3)
+        self.cmd('cancel',task_id='level');self.stable((0,0,1.4))
+        self.assertAlmostEqual(self.c.hold[2],1.4)
+        self.cmd('relative',task_id='after_cancel',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
+        self.assertAlmostEqual(self.c.tasks['after_cancel']['goal'][2],1.4)
+
+    def test_absolute_navigation_keeps_previous_Z_while_planning_and_recaptures_on_cancel(self):
+        self.nav(goal=(0,0,1,0));self.stable((0,0,1.1))
+        self.cmd('navigate',task_id='side',goal=[0,1,1,0],localization_epoch=self.c.epoch)
+        self.assertAlmostEqual(self.c.tick(self.now,self.now)[0][2],1.)
+        self.assertAlmostEqual(self.c.hold[2],1.)
+        self.cmd('cancel',task_id='side');self.stable((0,0,1.1))
+        self.assertAlmostEqual(self.c.hold[2],1.1)
+        self.cmd('navigate',task_id='up',goal=[0,1,1.5,0],localization_epoch=self.c.epoch)
+        self.assertAlmostEqual(self.c.tasks['up']['goal'][2],1.5)
+        self.assertAlmostEqual(self.c.tick(self.now,self.now)[0][2],1.1)
+
+    def test_invalid_relative_does_not_replace_altitude_reference(self):
+        self.stable((0,0,1.1));before=self.c.hold.copy()
+        with self.assertRaises(Rejected):
+            self.cmd('relative',task_id='bad',relative=[.3,0,0,0],localization_epoch='old')
+        np.testing.assert_array_equal(self.c.hold,before)
+        self.c.reset('new origin')
+        self.assertIsNone(self.c.hold)
+        with self.assertRaises(Rejected):
+            self.cmd('relative',task_id='reset',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
+
+    def test_level_relative_excessive_height_error_cannot_complete(self):
+        self.cmd('relative',task_id='level',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
+        self.stable((.3,0,1.2))
+        self.assertNotEqual(self.c.tasks['level']['status'],'arrived')
+        with self.assertRaises(Rejected):
+            self.cmd('relative',task_id='next',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
+
+    def test_position_window_rejects_drift_and_return_swing_even_with_zero_twist(self):
+        self.nav();self.cmd('cancel',task_id='a')
+        for i in range(30):self.feed(p=(i*.02,0,1),dt=.05)
+        self.assertFalse(self.c.stopped)
+        for i in range(30):self.feed(p=(.5+.08*math.sin(i*math.pi/3),0,1),dt=.05)
+        self.assertFalse(self.c.stopped)
+        self.assertEqual(self.c.tasks['a']['status'],'stopping')
+
+    def test_pose_window_handles_yaw_wrap_and_reset_without_old_samples(self):
+        self.stable(yaw=math.pi-.005)
+        for i in range(12):self.feed(yaw=math.pi-.005 if i%2 else -math.pi+.005,dt=.05)
+        self.assertTrue(self.c.stopped)
+        self.c.reset('new origin')
+        self.assertFalse(self.c.stopped)
+        self.assertEqual(len(self.c.pose_window),0)
+        for i in range(3):self.feed(dt=.05)
+        self.assertFalse(self.c.stopped)
+
+    def test_pose_yaw_motion_does_not_count_as_stopped_with_zero_gyro(self):
+        self.nav();self.cmd('cancel',task_id='a')
+        for i in range(20):self.feed(yaw=i*.03,dt=.05)
+        self.assertFalse(self.c.stopped)
+
+    def test_relative_axes_through_public_world_and_vendor_map(self):
+        from owl_nav.frames import Frames
+        for angle in (0.,math.pi/2,-math.pi/2,math.pi-.01):
+            self.setUp();self.stable(yaw=angle)
+            self.cmd('init',flight_authorized=True)
+            origin=self.c.pose.copy()
+            self.cmd('relative',task_id='axes',relative=[.4,-.3,.2,-.35],localization_epoch=self.c.epoch)
+            goal=self.c.tasks['axes']['goal']
+            map_origin=Frames('owl_vendor_world').setpoint(origin[:3],[0]*3,[0]*3,angle)
+            map_goal=Frames('owl_vendor_world').setpoint(goal[:3],[0]*3,[0]*3,goal[3])
+            d=map_goal[0]-map_origin[0];heading=map_origin[3]
+            self.assertAlmostEqual(d[0]*math.cos(heading)+d[1]*math.sin(heading),.4)
+            self.assertAlmostEqual(d[0]*math.sin(heading)-d[1]*math.cos(heading),.3)
+            self.assertAlmostEqual(d[2],.2)
+            self.assertAlmostEqual((map_goal[3]-heading+math.pi)%(2*math.pi)-math.pi,-.35)
+            np.testing.assert_allclose(enu_pose(public_pose(goal),30),goal,atol=1e-12)
+
     def test_cancel_requires_fresh_stable_stop(self):
         self.nav(); self.cmd('cancel',task_id='a')
         self.assertEqual(self.c.tasks['a']['status'],'stopping')
         self.assertEqual(self.c.status(self.now)['planner_state'],'not_required')
-        for _ in range(8): self.feed(v=(.3,0,0))
+        for i in range(1,9): self.feed((.03*i,0,1),v=(.3,0,0))
         self.assertEqual(self.c.tasks['a']['status'],'stopping')
-        self.stable()
+        self.stable((.24,0,1))
         self.assertEqual(self.c.tasks['a']['status'],'cancelled')
         self.assertTrue(self.c.tasks['a']['stopped'])
 
@@ -124,6 +379,107 @@ class CoreTest(unittest.TestCase):
         self.assertIsNone(self.c.tick(self.now,self.now))
         with self.assertRaises(Rejected):self.cmd('land',task_id='land')
 
+    def test_invalid_reference_diagnostics_remain_json_serializable(self):
+        self.nav();self.c.planner_heartbeat(self.c.generation,self.now)
+        t=SimpleNamespace(id=1,start=self.now,duration=5,
+                          sample=lambda stamp:(np.array([float('inf'),0,1]),np.zeros(3),np.zeros(3)))
+        self.c.trajectory_received(self.c.generation,t,self.now,self.now)
+        self.c.tick(self.now,self.now)
+        self.assertEqual(self.c.tasks['a']['status'],'failed')
+        json.dumps(self.c.tasks,allow_nan=False)
+        self.assertIsNone(self.c.tasks['a']['execution_error']['tracking_error_m'])
+
+    def test_discontinuous_position_reference_fails_and_holds(self):
+        self.nav();self.c.planner_heartbeat(self.c.generation,self.now)
+        t=SimpleNamespace(id=1,start=self.now,duration=5,
+                          sample=lambda stamp:(np.array([5.,0,1]),np.zeros(3),np.zeros(3)))
+        self.c.trajectory_received(self.c.generation,t,self.now,self.now)
+        output=self.c.tick(self.now,self.now)
+        self.assertEqual(self.c.tasks['a']['status'],'failed')
+        np.testing.assert_allclose(output[0],self.c.pose[:3])
+
+    def test_land_allowed_outside_navigation_world_limit(self):
+        self.c.pose[0]=self.c.c['world_limit_m']+1
+        self.cmd('land',task_id='land')
+        self.assertTrue(self.c.landing)
+
+    def test_landing_keeps_hold_until_mode_confirmation(self):
+        self.nav();self.cmd('land',task_id='land')
+        self.assertTrue(self.c.landing)
+        np.testing.assert_allclose(self.c.tick(self.now,self.now)[0],self.c.pose[:3])
+        self.c.update_state(True,True,True,'AUTO.LAND',self.now)
+        self.assertIsNone(self.c.tick(self.now,self.now))
+
+    def test_localization_reset_preserves_pending_land_and_revokes_world_output(self):
+        self.nav();self.cmd('land',task_id='land');epoch=self.c.epoch
+        self.c.reset('lio/world mismatch')
+        self.assertNotEqual(self.c.epoch,epoch)
+        self.assertEqual(self.c.active,'land')
+        self.assertTrue(self.c.landing)
+        self.assertNotEqual(self.c.tasks['land']['status'],'failed')
+        self.assertEqual(self.c.tasks['land']['localization_error'],'lio/world mismatch')
+        self.assertIsNone(self.c.hold)
+        self.assertIsNone(self.c.tick(self.now,self.now))
+        self.c.update_state(True,True,True,'AUTO.LAND',self.now)
+        self.c.reset('another localization reset')
+        self.c.update_extended_state(0,self.now)
+        self.c.update_state(True,False,False,'AUTO.LAND',self.now)
+        self.assertNotEqual(self.c.tasks['land']['status'],'arrived')
+        self.c.update_extended_state(1,self.now)
+        self.assertEqual(self.c.tasks['land']['status'],'arrived')
+        self.assertFalse(self.c.initialized)
+
+    def test_reset_during_landing_does_not_bypass_pilot_takeover(self):
+        self.cmd('land',task_id='land');self.c.reset('lio mismatch')
+        self.c.update_state(True,True,True,'POSCTL',self.now)
+        self.assertTrue(self.c.manual)
+        self.assertEqual(self.c.tasks['land']['status'],'failed')
+
+    def test_reset_during_landing_does_not_bypass_lease_expiry(self):
+        self.cmd('land',task_id='land');self.c.reset('lio mismatch')
+        self.c.watchdog(self.now+5.)
+        self.assertEqual(self.c.tasks['land']['status'],'failed')
+        self.assertIsNone(self.c.session)
+
+    def test_pilot_takeover_before_land_ack_is_latched(self):
+        self.nav();self.cmd('land',task_id='land')
+        self.c.update_state(True,True,True,'POSCTL',self.now)
+        self.assertTrue(self.c.manual)
+        self.assertIsNone(self.c.tick(self.now,self.now))
+        self.c.update_state(True,True,True,'AUTO.LAND',self.now)
+        self.assertTrue(self.c.manual)
+
+    def test_landed_session_cannot_restart_takeoff_without_init(self):
+        self.cmd('land',task_id='land')
+        self.c.update_extended_state(1,self.now)
+        self.c.update_state(True,False,False,'AUTO.LAND',self.now)
+        self.assertFalse(self.c.initialized)
+        with self.assertRaises(Rejected):
+            self.cmd('takeoff',task_id='late',localization_epoch=self.c.epoch)
+
+    def test_landing_cannot_be_cancelled_by_navigation(self):
+        self.nav();self.cmd('land',task_id='land')
+        with self.assertRaises(Rejected):self.cmd('cancel',task_id='land')
+        self.assertTrue(self.c.landing)
+
+    def test_invalid_odometry_revokes_output(self):
+        self.nav();old=self.c.epoch
+        self.c.odometry([float('nan'),0,1],0,[0,0,0],0,self.now,'world',self.now)
+        self.assertNotEqual(self.c.epoch,old)
+        self.assertFalse(self.c.fresh(self.now))
+        self.assertIsNone(self.c.tick(self.now,self.now))
+
+    def test_cancel_yaw_holds_measured_heading(self):
+        self.nav(goal=(0,0,1,1.))
+        self.c.yaw=.8
+        self.cmd('cancel',task_id='a')
+        self.assertEqual(self.c.tick(self.now,self.now)[3],self.c.pose[3])
+
+    def test_direct_yaw_rejects_unsolicited_trajectory(self):
+        self.nav(goal=(0,0,1,1.))
+        t=SimpleNamespace(id=1,start=self.now,duration=5)
+        self.assertFalse(self.c.trajectory_received(self.c.generation,t,self.now,self.now))
+
     def test_land_preempts(self):
         self.nav();self.cmd('land',task_id='land')
         self.assertEqual(self.c.tasks['a']['status'],'failed')
@@ -161,6 +517,58 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(self.c.tasks['a']['status'],'failed')
         np.testing.assert_allclose(out[0],[0,0,1])
 
+    def short_position_large_yaw(self):
+        self.nav(goal=(.1,0,1,math.pi/2))
+        trajectory=SimpleNamespace(id=1,start=self.now,duration=1.,
+            sample=lambda stamp:(np.array([.1,0,1]),np.array([.1,0,0]),np.array([.2,0,0])))
+        self.assertTrue(self.c.trajectory_received(self.c.generation,trajectory,self.now,self.now))
+        return self.now
+
+    def test_short_position_path_waits_for_large_yaw_and_holds_endpoint(self):
+        start=self.short_position_large_yaw()
+        for i in range(1,46):
+            self.feed((.1,0,1),yaw=min(math.pi/2,math.radians(24)*i*.1))
+            self.cmd('heartbeat');self.c.planner_heartbeat(self.c.generation,self.now)
+            out=self.c.tick(self.now,self.now)
+            if 1.1<self.now-start<4.:
+                np.testing.assert_allclose(out[0],[.1,0,1])
+                np.testing.assert_array_equal(out[1],np.zeros(3))
+                np.testing.assert_array_equal(out[2],np.zeros(3))
+            if 3.2<self.now-start<3.4:self.assertEqual(self.c.tasks['a']['status'],'executing')
+        self.assertEqual(self.c.tasks['a']['status'],'arrived')
+        self.assertTrue(self.c.tasks['a']['stopped'])
+
+    def test_yaw_allowance_is_bounded_when_heading_never_moves(self):
+        self.short_position_large_yaw()
+        for _ in range(58):
+            self.feed((.1,0,1));self.cmd('heartbeat')
+            self.c.planner_heartbeat(self.c.generation,self.now);self.c.tick(self.now,self.now)
+        self.assertEqual(self.c.tasks['a']['status'],'failed')
+        self.assertEqual(self.c.tasks['a']['error'],'trajectory expired before measured arrival')
+
+    def test_cancellation_during_yaw_allowance_discards_endpoint(self):
+        self.short_position_large_yaw()
+        for _ in range(33):
+            self.feed((.12,0,1),yaw=.7);self.cmd('heartbeat')
+            self.c.planner_heartbeat(self.c.generation,self.now);self.c.tick(self.now,self.now)
+        self.assertEqual(self.c.tasks['a']['status'],'executing')
+        self.cmd('cancel',task_id='a')
+        self.assertIsNone(self.c.trajectory)
+        np.testing.assert_allclose(self.c.tick(self.now,self.now)[0],[.12,0,1])
+        self.stable((.12,0,1),yaw=.7)
+        self.assertEqual(self.c.tasks['a']['status'],'cancelled')
+
+    def test_yaw_budget_wraps_shortest_angle_and_replans_do_not_renew_it(self):
+        self.stable(yaw=math.radians(179));self.cmd('init',flight_authorized=True)
+        self.nav(goal=(.1,0,1,math.radians(-179)))
+        t=SimpleNamespace(id=1,start=self.now,duration=1.)
+        self.assertTrue(self.c.trajectory_received(self.c.generation,t,self.now,self.now))
+        deadline=self.c.tasks['a']['yaw_reference_end_stamp']
+        self.assertAlmostEqual(deadline-self.now,math.radians(2)/CONFIG['control']['yaw_rate_rad_s'])
+        t=SimpleNamespace(id=2,start=self.now+.2,duration=1.)
+        self.assertTrue(self.c.trajectory_received(self.c.generation,t,self.now+.2,self.now+.2))
+        self.assertEqual(self.c.tasks['a']['yaw_reference_end_stamp'],deadline)
+
     def test_init_does_not_reinitialize_active_navigation(self):
         self.nav();generation=self.c.generation
         with self.assertRaises(Rejected):self.cmd('init',flight_authorized=True)
@@ -189,6 +597,36 @@ class CoreTest(unittest.TestCase):
         self.stable();self.nav('b')
         self.assertEqual(self.c.tasks['a']['status'],'failed')
 
+    def delayed_takeoff(self):
+        self.c.update_state(True,False,False,'POSCTL',self.now)
+        self.c.manual=False;self.c.enabled=False
+        self.cmd('init',flight_authorized=True)
+        self.cmd('takeoff',task_id='up',auto_arm=True,localization_epoch=self.c.epoch)
+        self.c.tasks['up']['auto_start_pending']=False
+
+    def test_takeoff_spool_delay_bounds_lead_then_arrives(self):
+        self.delayed_takeoff()
+        for _ in range(80):
+            self.feed(dt=.05);self.cmd('heartbeat')
+            out=self.c.tick(self.now,self.now)
+            self.assertLessEqual(out[0][2]-self.c.pose[2],.200001)
+            self.assertNotEqual(self.c.tasks['up']['status'],'failed')
+        z=1.
+        for _ in range(300):
+            out=self.c.tick(self.now,self.now)
+            z+=min(.015,max(0.,out[0][2]-z)*.4)
+            self.feed(p=(0,0,z),dt=.05);self.cmd('heartbeat')
+            if self.c.tasks['up']['status']=='arrived':break
+        self.assertEqual(self.c.tasks['up']['status'],'arrived')
+
+    def test_takeoff_stall_fails_without_relaxing_tracking_limit(self):
+        self.delayed_takeoff()
+        for _ in range(220):
+            self.feed(dt=.05);self.cmd('heartbeat');self.c.tick(self.now,self.now)
+            if self.c.tasks['up']['status']=='failed':break
+        self.assertEqual(self.c.tasks['up']['error'],'takeoff has no measured upward progress')
+        self.assertEqual(self.c.c['max_tracking_error_m'],.5)
+
     def test_takeoff_waits_for_pilot_and_cancel_cannot_arm(self):
         self.c.update_state(True,False,False,'POSCTL',self.now)
         # A fresh ground bridge, before any OFFBOARD authority was acquired.
@@ -199,6 +637,26 @@ class CoreTest(unittest.TestCase):
         self.cmd('cancel',task_id='up')
         self.assertIsNone(self.c.generation)
         self.assertFalse(self.c.armed)
+
+    def test_init_reseeds_old_yaw_and_reset_discards_it(self):
+        self.c.yaw=-1.5
+        self.cmd('init',flight_authorized=True)
+        self.assertEqual(self.c.yaw,self.c.pose[3])
+        self.c.reset()
+        self.assertIsNone(self.c.yaw)
+
+    def test_software_takeoff_blocks_ascent_until_confirmed(self):
+        self.c.update_state(True,False,False,'POSCTL',self.now)
+        self.c.manual=False;self.c.enabled=False
+        self.cmd('init',flight_authorized=True)
+        self.cmd('takeoff',task_id='up',auto_arm=True,localization_epoch=self.c.epoch)
+        self.c.update_state(True,True,False,'OFFBOARD',self.now)
+        self.c.tick(self.now,self.now)
+        self.now+=.05
+        self.assertEqual(self.c.tick(self.now,self.now)[0][2],1.)
+        self.c.tasks['up']['auto_start_pending']=False
+        self.now+=.05
+        self.assertGreater(self.c.tick(self.now,self.now)[0][2],1.)
 
     def test_manual_takeover_during_landing(self):
         self.nav();self.cmd('land',task_id='land')
@@ -271,8 +729,34 @@ class CoreTest(unittest.TestCase):
 
 
 class PlannerHandshakeTest(unittest.TestCase):
+    def test_private_log_confirmation_requires_exact_state_and_map(self):
+        planner=PlannerProcess.__new__(PlannerProcess)
+        planner.goal=[1,0,1,0];planner.sent=False;planner.fsm_ready=False;planner.map_observed=False
+        planner.state_tail='';planner.milestones={}
+        planner.process=SimpleNamespace(poll=lambda:None)
+        sent=[]
+        planner.goal_pub=SimpleNamespace(get_num_connections=lambda:1,publish=sent.append)
+        planner.state_log=io.StringIO('[FSM]Drone:0, from INIT to WAIT_TARGET\n')
+        with patch.dict(sys.modules,{'quadrotor_msgs.msg':SimpleNamespace(GoalSet=lambda **kw:kw)}):
+            planner.poll();self.assertFalse(planner.fsm_ready)
+            planner.state_tail='';planner.state_log=io.StringIO('[FSM]Drone:0, from WAIT_TARGET to GEN_NEW_TRAJ\n')
+            planner.milestones['first_odom_forwarded']=time.monotonic()
+            planner.poll();self.assertFalse(planner.fsm_ready)
+            planner.state_log=io.StringIO('[FSM]Drone:0, from INIT to WAIT_TARGET\n')
+            planner.poll();self.assertTrue(planner.fsm_ready)
+            self.assertIn('fsm_log_confirmation',planner.milestones)
+            self.assertEqual(sent,[])
+            planner.map_received(None);planner.poll();planner.poll()
+            self.assertEqual(sent,[dict(drone_id=0,goal=[1,0,1])])
+
+    def test_closed_planner_ignores_late_odometry_without_touching_handles(self):
+        planner=PlannerProcess.__new__(PlannerProcess)
+        planner.callback_lock=threading.Lock();planner.closed=True
+        planner.odometry('late sample')
+
     def test_goal_waits_for_observed_fsm_and_map_not_elapsed_sleep(self):
         planner=PlannerProcess.__new__(PlannerProcess)
+        planner.callback_lock=threading.Lock();planner.closed=False;planner.state_log=None
         sent=[];odom=[]
         planner.goal=[1,0,1,0];planner.sent=False;planner.fsm_ready=False;planner.map_observed=False
         planner.milestones={};planner.birth=time.monotonic()-100

@@ -9,6 +9,8 @@ from pathlib import Path
 import signal
 import subprocess
 import time
+import threading
+import tempfile
 import yaml
 
 
@@ -20,6 +22,8 @@ class PlannerProcess:
         from sensor_msgs.msg import PointCloud2
         from quadrotor_msgs.msg import GoalSet
         from std_msgs.msg import Empty
+        self.callback_lock=threading.Lock()
+        self.closed=False
         self.ros = rospy
         self.generation = generation
         self.ns = '/owl_ego/planners/g_'+generation
@@ -60,10 +64,15 @@ class PlannerProcess:
                   '/ground_height_measurement':self.ns+'/ground',
                   '/vins_estimator/extrinsic':self.ns+'/disabled_extrinsic'}
         log_dir = p.get('log_dir')
-        self.log = None
-        if log_dir:
-            Path(log_dir).mkdir(parents=True,exist_ok=True)
-            self.log = open(Path(log_dir)/(generation+'.log'),'w')
+        self.temporary_logs=None
+        if not log_dir:
+            self.temporary_logs=tempfile.TemporaryDirectory(prefix='owl_ego_planner_')
+            log_dir=self.temporary_logs.name
+        Path(log_dir).mkdir(parents=True,exist_ok=True)
+        log_path=Path(log_dir)/(generation+'.log')
+        self.log = open(log_path,'w')
+        self.state_log = open(log_path,'r')
+        self.state_tail=''
         self.process = subprocess.Popen([binary,'__ns:='+self.ns,'__name:=ego',
                           *[a+':='+b for a,b in remaps.items()]],start_new_session=True,
                           stdout=self.log or subprocess.DEVNULL,stderr=subprocess.STDOUT)
@@ -74,9 +83,11 @@ class PlannerProcess:
         # Establish its subscriber BEFORE allowing any odom into the process,
         # otherwise that one-shot acknowledgment can be lost. Goal connections
         # or an arbitrary startup sleep do not prove the FSM has processed odom.
-        if self.data_sub.get_num_connections() and self.odom_pub.get_num_connections():
-            self.milestones.setdefault('first_odom_forwarded',time.monotonic())
-            self.odom_pub.publish(message)
+        with self.callback_lock:
+            if self.closed:return
+            if self.data_sub.get_num_connections() and self.odom_pub.get_num_connections():
+                self.milestones.setdefault('first_odom_forwarded',time.monotonic())
+                self.odom_pub.publish(message)
 
     def initialized(self, message):
         if 'first_odom_forwarded' in self.milestones:
@@ -95,6 +106,16 @@ class PlannerProcess:
         from quadrotor_msgs.msg import GoalSet
         if self.process.poll() is not None:
             raise RuntimeError('EGO process exited: '+str(self.process.returncode))
+        # DataDisp is one-shot and can be lost during ROS connection setup.
+        # The pinned, hash-verified process also flushes its exact INIT transition
+        # to its own private stdout log. This is state evidence, not elapsed time.
+        if self.state_log is not None and not self.fsm_ready:
+            self.state_tail=(self.state_tail+self.state_log.read(16384))[-32768:]
+            if ('first_odom_forwarded' in self.milestones
+                    and '[FSM]Drone:0, from INIT to WAIT_TARGET' in self.state_tail):
+                self.fsm_ready=True
+                self.milestones.setdefault('fsm_initialized',time.monotonic())
+                self.milestones.setdefault('fsm_log_confirmation',time.monotonic())
         if (self.goal is not None and not self.sent and self.fsm_ready and self.map_observed
                 and self.goal_pub.get_num_connections()):
             self.goal_pub.publish(GoalSet(drone_id=0,goal=self.goal[:3]))
@@ -102,8 +123,10 @@ class PlannerProcess:
             self.milestones['goal_sent'] = time.monotonic()
 
     def close(self):
-        for h in self.handles:
-            h.unregister()
+        with self.callback_lock:
+            self.closed=True
+            for h in self.handles:
+                h.unregister()
         if self.process and self.process.poll() is None:
             os.killpg(self.process.pid,signal.SIGINT)
             try:
@@ -113,6 +136,8 @@ class PlannerProcess:
                 self.process.wait(timeout=1)
         if self.log:
             self.log.close()
+        self.state_log.close()
+        if self.temporary_logs:self.temporary_logs.cleanup()
         try:
             self.ros.delete_param(self.ns)
         except KeyError:

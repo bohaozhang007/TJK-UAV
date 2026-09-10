@@ -5,6 +5,7 @@ not a receive timestamp. All clocks for watchdogs are monotonic.
 """
 import math
 import uuid
+from collections import deque
 import numpy as np
 
 
@@ -52,6 +53,9 @@ class FlightCore:
             if key in ('flight_enabled','failsafe_validated','sensors_validated'):
                 if type(value) is not bool:
                     raise ValueError(key+' must be boolean')
+            elif key == 'mavros_frame_profile':
+                if value not in ('standard_enu','owl_vendor_world'):
+                    raise ValueError('invalid mavros_frame_profile')
             elif key != 'world_frame' and (not finite([value]) or value <= 0):
                 raise ValueError(key+' must be finite and positive')
         if config['control_hz'] < 20 or config['stable_samples'] < 2:
@@ -82,11 +86,13 @@ class FlightCore:
         self.planner_at = -math.inf
         self.hold = None
         self.yaw = None
-        self.stable = 0
-        self.stable_since = None
+        self.pose_window = deque()
+        self.position_span = self.heading_span = 0.
         self.stop_samples = 0
         self.stop_since = None
         self.stopped = False
+        self.speed = math.inf
+        self.yaw_rate = math.inf
         self.last_error = None
         self.last_tick = None
         self.landing = False
@@ -127,14 +133,29 @@ class FlightCore:
                     landed_state=self.landed_state,
                     landed_state_fresh=now-self.ext_at <= self.c['state_timeout_s'],
                     localization_epoch=self.epoch, manual_takeover=self.manual,
-                    error=self.last_error, stopped=self.stopped)
+                    error=self.last_error, stopped=self.stopped, landing=self.landing,
+                    stop_diagnostics=dict(
+                        method='pose_window',
+                        position_span_m=self.position_span,
+                        position_limit_m=self.c['stop_speed_m_s']*self.c['stable_duration_s'],
+                        yaw_span_deg=math.degrees(self.heading_span),
+                        yaw_span_limit_deg=math.degrees(self.c['stop_yaw_rate_rad_s']*self.c['stable_duration_s']),
+                        speed_m_s=self.speed if math.isfinite(self.speed) else None,
+                        yaw_rate_deg_s=math.degrees(self.yaw_rate) if math.isfinite(self.yaw_rate) else None,
+                        speed_limit_m_s=self.c['stop_speed_m_s'],
+                        yaw_rate_limit_deg_s=math.degrees(self.c['stop_yaw_rate_rad_s']),
+                        stable_samples=self.stop_samples,required_samples=self.c['stable_samples'],
+                        stable_duration_s=max(0.,self.odom_at-self.stop_since) if self.stop_since is not None else 0.,
+                        required_duration_s=self.c['stable_duration_s']))
 
     def update_state(self, connected, armed, airborne, mode, now):
         incoming_ground = (connected and not armed and self.landed_state == 1
                            and now-self.ext_at <= self.c['state_timeout_s'])
-        if self.landing and self.mode == 'AUTO.LAND' and mode != 'AUTO.LAND' and not incoming_ground:
+        if self.landing and not incoming_ground and (mode not in ('OFFBOARD','AUTO.LAND')
+                or (self.mode == 'AUTO.LAND' and mode != 'AUTO.LAND')):
             self.manual = True
             self.landing = False
+            self.enabled = False
             self.fail('manual takeover during landing')
         if self.enabled and not self.landing and self.mode == 'OFFBOARD' and mode != 'OFFBOARD':
             self.manual = True
@@ -146,6 +167,8 @@ class FlightCore:
             self.manual = True
         self.connected, self.armed, self.airborne = connected, armed, airborne
         self.mode, self.state_at = mode, now
+        if self.landing and mode == 'AUTO.LAND':
+            self.enabled = False
         self.complete_landing(now)
 
     def update_extended_state(self, landed_state, now):
@@ -161,20 +184,32 @@ class FlightCore:
         if self.landing and self.ground_confirmed(now):
             self.landing = False
             self.enabled = False
+            self.initialized = False
             if self.active:
                 self.finish('arrived', True)
 
     def reset(self, error='localization reset'):
         self.epoch = uuid.uuid4().hex
         self.initialized = False
-        self.fail(error)
+        task = self.tasks.get(self.active)
+        if self.landing and task and task['kind'] == 'land':
+            # Explicit AUTO.LAND belongs to the FCU, including an in-flight
+            # mode request. Revoke world-frame output, but keep monitoring the
+            # accepted landing through fresh FCU ground/disarm confirmation.
+            self.last_error = error
+            task['localization_error'] = error
+            self.invalidate()
+        else:
+            self.fail(error)
         # A hold point in the old world must never be reused.
         self.hold = None
+        self.yaw = None
         self.enabled = False
 
     def odometry(self, xyz, yaw, velocity, yaw_rate, stamp, frame, now):
         if not finite([*xyz, yaw, *velocity, yaw_rate, stamp]) or not frame:
-            self.fail('invalid odometry')
+            self.reset('invalid odometry')
+            self.odom_at = -math.inf
             return
         if self.stamp is not None:
             dt = stamp - self.stamp
@@ -191,11 +226,7 @@ class FlightCore:
         self.stamp, self.frame, self.odom_at = stamp, frame, now
         if self.yaw is None:
             self.yaw = yaw
-        low = self.speed <= self.c['stop_speed_m_s'] and self.yaw_rate <= self.c['stop_yaw_rate_rad_s']
-        self.stop_samples = self.stop_samples + 1 if low else 0
-        self.stop_since = (self.stop_since if self.stop_since is not None else now) if low else None
-        self.stopped = (self.stop_samples >= self.c['stable_samples'] and
-                        self.stop_since is not None and now-self.stop_since >= self.c['stable_duration_s'])
+        self.update_stop_window(stamp,now)
         if not self.active:
             return
         t = self.tasks[self.active]
@@ -208,25 +239,43 @@ class FlightCore:
             return
         if t['kind'] == 'land':
             return
-        good = (self.enabled and self.mode == 'OFFBOARD' and self.armed and self.airborne and low and np.linalg.norm(self.pose[:3]-np.array(t['goal'][:3])) <= self.c['position_tolerance_m']
+        good = (self.enabled and self.mode == 'OFFBOARD' and self.armed and self.airborne and self.stopped and np.linalg.norm(self.pose[:3]-np.array(t['goal'][:3])) <= self.c['position_tolerance_m']
                 and abs(wrap(yaw-t['goal'][3])) <= self.c['yaw_tolerance_rad'])
-        self.stable = self.stable + 1 if good else 0
-        self.stable_since = (self.stable_since if self.stable_since is not None else now) if good else None
-        if (self.stable >= self.c['stable_samples'] and self.stable_since is not None
-                and now-self.stable_since >= self.c['stable_duration_s']):
+        if good:
             self.hold = np.array(t['goal'])
             self.finish('arrived', True)
+
+    def update_stop_window(self, stamp, now):
+        # One pose-based stability rule for arrival, cancellation and admission.
+        # Keep the sample just before the window boundary; endpoint-only
+        # differences could mistake a return swing for a stop.
+        duration=self.c['stable_duration_s']
+        self.pose_window.append((stamp,self.pose.copy()))
+        while len(self.pose_window)>2 and self.pose_window[1][0]<=stamp-duration:
+            self.pose_window.popleft()
+        samples=np.array([p for _,p in self.pose_window])
+        span=stamp-self.pose_window[0][0]
+        self.position_span=float(np.linalg.norm(np.ptp(samples[:,:3],axis=0)))
+        self.heading_span=float(np.ptp(np.unwrap(samples[:,3])))
+        quiet=(self.position_span<=self.c['stop_speed_m_s']*duration
+               and self.heading_span<=self.c['stop_yaw_rate_rad_s']*duration)
+        self.stop_samples=len(samples) if quiet else 0
+        self.stop_since=now-span if quiet else None
+        self.stopped=quiet and len(samples)>=self.c['stable_samples'] and span>=duration
 
     def invalidate(self):
         self.generation = None
         self.trajectory = None
         self.pending_trajectory = None
         self.last_traj_id = -1
-        self.stable = self.stop_samples = 0
-        self.stable_since = self.stop_since = None
+        self.pose_window.clear()
+        self.position_span = self.heading_span = 0.
+        self.stop_samples = 0
+        self.stop_since = None
         self.stopped = False
         if self.pose is not None:
             self.hold = self.pose.copy()
+            self.yaw = float(self.pose[3])
 
     def finish(self, status, stopped, error=None):
         if self.active:
@@ -293,6 +342,8 @@ class FlightCore:
             self.initialized = True
             self.enabled = True
             self.hold = self.pose.copy()
+            self.yaw = float(self.pose[3])
+            self.last_tick = now
             self.last_error = None
             return {'ok': True, 'message': 'initialized; no arming performed'}
         if op == 'cancel':
@@ -300,18 +351,25 @@ class FlightCore:
             if tid not in self.tasks or self.tasks[tid]['session_id'] != self.session:
                 raise Rejected('unknown task')
             t = self.tasks[tid]
+            if t['kind'] == 'land' and self.landing:
+                raise Rejected('landing cannot be cancelled by navigation cancel; use pilot takeover')
             if t['status'] not in ('arrived','cancelled','failed','stopping'):
                 self.invalidate()
                 t.update(status='stopping', stopped=False)
             return {'ok': True, 'task_id': tid}
+        retain_altitude = False
         if op == 'relative':
             relative = data.get('relative')
             if not isinstance(relative,list) or len(relative)!=4 or not finite(relative) or self.pose is None:
                 raise Rejected('invalid relative movement')
             x,y,z,yaw = relative
+            # A zero Z command keeps the established hold reference. Rebasing
+            # it on measured altitude accumulates a persistent hover error.
+            retain_altitude = z == 0 and self.hold is not None
+            altitude = float(self.hold[2]) if retain_altitude else self.pose[2]+z
             c,s = math.cos(self.pose[3]),math.sin(self.pose[3])
             data = dict(data,goal=[self.pose[0]+c*x-s*y,self.pose[1]+s*x+c*y,
-                                   self.pose[2]+z,wrap(self.pose[3]+yaw)])
+                                   altitude,wrap(self.pose[3]+yaw)])
             op = 'navigate'
         if op not in ('navigate','takeoff','land'):
             raise Rejected('unsupported command')
@@ -320,7 +378,8 @@ class FlightCore:
         if op == 'land':
             self.fail('preempted by landing')
             self.landing = not self.ground_confirmed(now)
-            self.enabled = False  # AUTO.LAND, never fight the autopilot with setpoints
+            # Keep measured hold while mode service is pending, stop on AUTO.LAND State.
+            self.enabled = self.enabled and self.landing and self.mode == 'OFFBOARD'
         else:
             if not self.initialized or self.active or self.landing:
                 raise Rejected('not initialized or task busy')
@@ -340,16 +399,24 @@ class FlightCore:
             goal[2] += self.c['takeoff_height_m']
         else:
             goal = data.get('goal', self.pose.tolist())
-        if len(goal)!=4 or not finite(goal) or max(abs(v) for v in goal[:3]) > self.c['world_limit_m']:
+        if len(goal)!=4 or not finite(goal) or (op!='land' and max(abs(v) for v in goal[:3]) > self.c['world_limit_m']):
             raise Rejected('invalid goal')
         if op == 'navigate' and goal[2] < 0:
             raise Rejected('navigation altitude below supported EGO ground')
+        previous_altitude = float(self.hold[2]) if op == 'navigate' and self.hold is not None else None
         self.last_error = None
         self.invalidate()
+        if previous_altitude is not None:
+            # Navigation admission must not raise the waiting reference to a
+            # biased measured height. Keep the established Z until EGO starts,
+            # including absolute goals and explicit vertical requests. Cancel
+            # and failure still capture measured hold through invalidate.
+            self.hold[2] = previous_altitude
         self.active = tid
         self.tasks[tid] = dict(task_id=tid,session_id=self.session,status='accepted',stopped=False,
                                goal=goal,kind=op,started=now, timing_s={},
-                               planner_required=bool(op == 'navigate' and np.linalg.norm(np.array(goal[:3])-self.pose[:3]) >= 1e-5))
+                               auto_start_pending=op == 'takeoff' and data.get('auto_arm',False),
+                               planner_required=bool(op == 'navigate' and np.linalg.norm(np.array(goal[:3])-self.hold[:3]) >= 1e-5))
         if op == 'land':
             if not self.landing:
                 self.finish('arrived',True)
@@ -363,11 +430,19 @@ class FlightCore:
         return {'ok': True, 'task_id': tid}
 
     def trajectory_received(self, generation, trajectory, stamp, now):
-        if not self.active or generation != self.generation or trajectory.id <= self.last_traj_id:
+        if (not self.active or not self.tasks[self.active].get('planner_required')
+                or generation != self.generation or trajectory.id <= self.last_traj_id):
             return False
         if trajectory.start > stamp + .5 or trajectory.start + trajectory.duration < stamp:
             return False
-        self.tasks[self.active]['timing_s'].setdefault('first_trajectory', now-self.tasks[self.active]['started'])
+        task = self.tasks[self.active]
+        task['timing_s'].setdefault('first_trajectory', now-task['started'])
+        if 'yaw_reference_end_stamp' not in task:
+            turn_s = abs(wrap(task['goal'][3]-self.yaw))/self.c['yaw_rate_rad_s']
+            # XYZ and the separately rate-limited yaw run concurrently. Budget
+            # the turn once; subsequent replans must not restart this allowance.
+            task['yaw_reference_end_stamp'] = max(stamp,trajectory.start)+turn_s
+            task['timing_s']['yaw_reference_ready'] = now-task['started']+max(0.,trajectory.start-stamp)+turn_s
         self.pending_trajectory = trajectory
         self.last_traj_id = trajectory.id
         self.tasks[self.active]['status'] = 'executing'
@@ -377,7 +452,11 @@ class FlightCore:
         self.watchdog(now)
         dt = min(.1, max(0., now-(self.last_tick if self.last_tick is not None else now)))
         self.last_tick = now
-        if not self.enabled or self.manual or self.landing or self.hold is None:
+        if not self.enabled or self.manual or self.hold is None:
+            return None
+        if self.landing:
+            if self.mode == 'OFFBOARD':
+                return (self.hold[:3].copy(),np.zeros(3),np.zeros(3),float(self.hold[3]))
             return None
         if self.pending_trajectory is not None and stamp >= self.pending_trajectory.start:
             self.trajectory = self.pending_trajectory
@@ -395,16 +474,33 @@ class FlightCore:
                 self.fail('planning timed out')
             elif self.trajectory is not None:
                 traj = self.trajectory
-                if stamp > traj.start + traj.duration + self.c['trajectory_grace_s']:
+                deadline = max(traj.start+traj.duration,
+                               t.get('yaw_reference_end_stamp',traj.start))
+                deadline += self.c['trajectory_grace_s']+self.c['stable_duration_s']
+                if stamp > deadline:
                     self.fail('trajectory expired before measured arrival')
                 elif stamp >= traj.start:
                     pos, vel, acc = traj.sample(stamp)
+                    if stamp >= traj.start+traj.duration:
+                        # Hold the actual polynomial endpoint while yaw catches
+                        # up; do not keep feeding its terminal derivatives.
+                        vel, acc = np.zeros(3),np.zeros(3)
                     target = np.array([*pos, t['goal'][3]])
             if self.active and t['kind'] == 'takeoff':
                 target = self.hold.copy()
-                if self.armed and self.mode == 'OFFBOARD':
-                    target[2] = min(t['goal'][2],target[2]+self.c['takeoff_speed_m_s']*dt)
-                    self.hold = target.copy()
+                if self.armed and self.mode == 'OFFBOARD' and not t.get('auto_start_pending'):
+                    progress=t.setdefault('takeoff_progress',dict(z=float(self.pose[2]),at=now))
+                    if self.pose[2]>=progress['z']+.03:
+                        progress.update(z=float(self.pose[2]),at=now)
+                    lead=min(self.c.get('takeoff_max_lead_m',.2),self.c.get('max_tracking_error_m',.5)/2)
+                    target[2] = min(t['goal'][2],target[2]+self.c['takeoff_speed_m_s']*dt,float(self.pose[2])+lead)
+                    t['takeoff_reference']=dict(z_m=float(target[2]),measured_z_m=float(self.pose[2]),lead_m=float(target[2]-self.pose[2]))
+                    if (t['goal'][2]-self.pose[2]>self.c['position_tolerance_m']
+                            and now-progress['at']>self.c.get('takeoff_progress_timeout_s',10.)):
+                        self.fail('takeoff has no measured upward progress')
+                        target=self.hold.copy()
+                    else:
+                        self.hold = target.copy()
                 target[3] = t['goal'][3]
             # Pure yaw does not need a zero-length EGO polynomial.
             if self.active and t['kind'] == 'navigate' and np.linalg.norm(np.array(t['goal'][:3])-self.hold[:3]) < 1e-5:
@@ -414,9 +510,16 @@ class FlightCore:
             target, vel, acc = self.hold, np.zeros(3), np.zeros(3)
         if (not np.isfinite(target).all() or not np.isfinite(vel).all() or not np.isfinite(acc).all()
                 or np.max(np.abs(target[:3])) > self.c['world_limit_m']
+                or np.linalg.norm(target[:3]-self.pose[:3]) > self.c.get('max_tracking_error_m',.5)
                 or np.linalg.norm(vel) > self.c['max_speed_m_s']
                 or np.linalg.norm(acc) > self.c['max_acceleration_m_s2']):
-            self.fail('trajectory exceeds execution limits')
+            if self.active:
+                safe=lambda value:float(value) if np.isfinite(value) else None
+                self.tasks[self.active]['execution_error']=dict(reference=[safe(v) for v in target],measured=self.pose.tolist(),
+                    tracking_error_m=safe(np.linalg.norm(target[:3]-self.pose[:3])),
+                    tracking_limit_m=self.c.get('max_tracking_error_m',.5),
+                    velocity_m_s=safe(np.linalg.norm(vel)),acceleration_m_s2=safe(np.linalg.norm(acc)))
+            self.fail('trajectory exceeds execution/tracking limits')
             target,vel,acc = self.hold,np.zeros(3),np.zeros(3)
         self.yaw = wrap(self.yaw + np.clip(wrap(target[3]-self.yaw),
                           -self.c['yaw_rate_rad_s']*dt,self.c['yaw_rate_rad_s']*dt))

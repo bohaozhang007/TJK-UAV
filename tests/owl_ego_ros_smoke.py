@@ -27,9 +27,24 @@ p.add_argument('--config',required=True)
 p.add_argument('--port',type=int,default=11421)
 p.add_argument('--rounds',type=int,default=3)
 p.add_argument('--output',required=True)
+p.add_argument('--obstacle-route',action='store_true')
+p.add_argument('--vendor-frames',action='store_true')
+p.add_argument('--takeoff-retry',action='store_true',help='Console repeats takeoff after landing with FCU spool delay and delayed map delivery')
+p.add_argument('--settle-after-takeoff',action='store_true',help='Inject two seconds of drift after takeoff arrival to verify current-stop gating')
+p.add_argument('--record-diagnostics',action='store_true',help='Exercise the read-only recorder and offline bag analysis alongside the mock flight')
+p.add_argument('--biased-vz',action='store_true',help='Add the observed -0.124 m/s vertical twist bias, without changing simulated position')
+p.add_argument('--altitude-offset',action='store_true',help='Mock actual OFFBOARD altitude settles 10 cm above its position setpoint')
+p.add_argument('--yaw-lag',action='store_true',help='Mock yaw response limited to 24 deg/s with a proportional settling tail')
+p.add_argument('--console-client',action='store_true')
+p.add_argument('--console-relative',action='store_true',help='Exercise manual relative console commands instead of test route')
+p.add_argument('--landing-frame-mismatch',action='store_true',help='Inject a persistent LIO mismatch during the pending AUTO.LAND service')
 p.add_argument('--live-client',action='store_true',help='Run the actual HTTP-only live_sequence client against this mock fixture')
 p.add_argument('--faults-only',action='store_true',help='Run fault injection scenarios instead of the three route rounds')
 a=p.parse_args()
+if a.landing_frame_mismatch and (not a.console_client or a.takeoff_retry):
+    p.error('--landing-frame-mismatch requires --console-client without takeoff-retry')
+if a.console_relative and (not a.console_client or a.takeoff_retry or a.settle_after_takeoff):
+    p.error('--console-relative requires --console-client without takeoff-retry/settle-after-takeoff')
 if a.rounds < 3:raise SystemExit('At least three interruption rounds are required')
 if not 1024 <= a.port <= 65535 or a.port==11311:raise SystemExit('Refusing live/invalid ROS port')
 with socket.socket() as probe:
@@ -53,6 +68,7 @@ monitor_errors=[]
 def record(kind,**values):
     with event_lock:events.write(json.dumps(dict(t_s=time.monotonic()-started,phase=phase,event=kind,**values),allow_nan=False)+'\n')
 record('source',git_head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),
+       options=vars(a),
        files={str(f.relative_to(root)):hashlib.sha256(f.read_bytes()).hexdigest() for folder in ['ros/owl_nav','src/robot','tests'] for f in (root/folder).rglob('*.py')})
 try:
     master=subprocess.Popen(['roscore','-p',str(a.port)],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT,start_new_session=True)
@@ -65,16 +81,16 @@ try:
     else:raise RuntimeError('isolated master did not start')
     import rospy
     from nav_msgs.msg import Odometry
-    from geometry_msgs.msg import TransformStamped
+    from geometry_msgs.msg import TransformStamped,PoseStamped
     from mavros_msgs.msg import State,ExtendedState,PositionTarget
-    from mavros_msgs.srv import SetMode,SetModeResponse
+    from mavros_msgs.srv import SetMode,SetModeResponse,CommandBool,CommandBoolResponse
     from sensor_msgs.msg import Image,CameraInfo,PointCloud2
     from sensor_msgs import point_cloud2
     from std_msgs.msg import Header, String, Empty
     import tf2_ros
     rospy.init_node('owl_mock_fcu',disable_signals=True)
     cfg=yaml.safe_load(Path(a.config).read_text())
-    cfg['control'].update(flight_enabled=True,failsafe_validated=True,sensors_validated=True)
+    cfg['control'].update(mavros_frame_profile='owl_vendor_world' if (a.console_client or a.vendor_frames) else 'standard_enu',flight_enabled=True,failsafe_validated=True,sensors_validated=True)
     assert cfg['control']['planning_timeout_s']==10.
     assert cfg['controller']['motion_timeout_s']==15.
     cfg['topics'].update(cloud='/mock/cloud')
@@ -83,11 +99,20 @@ try:
                            fixed_camera_pitch_deg=0.,assumed_horizontal_fov_deg=90.,body_from_camera_optical_rotation=None)
     cfg['hardware']['camera_optical_frame']='mock_camera_optical'
     config=temp/'config.yaml';config.write_text(yaml.safe_dump(cfg))
+    diagnostics_process=None
+    if a.record_diagnostics:
+        diagnostics_log=(temp/'diagnostic_recorder.log').open('w')
+        diagnostics_process=subprocess.Popen([sys.executable,str(root/'scripts/owl_ego/record.py'),
+            '--config',str(config),'--output',str(temp/'diagnostics')],stdout=diagnostics_log,
+            stderr=subprocess.STDOUT,start_new_session=True)
+        processes.append(diagnostics_process)
     output=(temp/'bridge.log').open('w')
     bridge=subprocess.Popen(['rosrun','owl_nav','owl_nav_node.py','_config:='+str(config)],stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
     processes.append(bridge)
     topics=cfg['topics']
     odom_pub=rospy.Publisher(topics['odom'],Odometry,queue_size=5)
+    map_pub=rospy.Publisher('/mavros/local_position/pose',PoseStamped,queue_size=5)
+    lio_pub=rospy.Publisher('/mavros/vision_pose/pose',PoseStamped,queue_size=5)
     state_pub=rospy.Publisher(topics['state'],State,queue_size=5)
     ext_pub=rospy.Publisher(topics['extended_state'],ExtendedState,queue_size=5)
     cloud_pub=rospy.Publisher(topics['cloud'],PointCloud2,queue_size=1)
@@ -95,7 +120,14 @@ try:
     info_pub=rospy.Publisher(topics['camera_info'],CameraInfo,queue_size=1)
     mock_lock=threading.Lock()
     xyz=np.zeros(3);yaw=0.;target=np.zeros(3);target_yaw=0.;mode='OFFBOARD';armed=True
+    if a.console_client:mode='POSCTL';armed=False;yaw=.7;target_yaw=.7
+    fcu_calls=[]
+    arm_at=-float('inf')
     landed_override=None;ext_enabled=True
+    cloud_enabled=True;lio_offset=0.
+    obstacle_points=[(4.5,4.5,1.),(-4.5,-4.5,1.),(4.5,-4.5,1.)]
+    if a.obstacle_route:obstacle_points=[(.9,float(y),float(z)) for y in np.arange(-.35,.36,.1) for z in np.arange(.3,1.81,.1)]
+    measured_positions=[]
     setpoint_times=[]
     bridge_snap={}
     def bridge_status(m):
@@ -107,14 +139,51 @@ try:
         global target,target_yaw
         with mock_lock:
             target=np.array([m.position.x,m.position.y,m.position.z]);target_yaw=m.yaw
+            if cfg['control']['mavros_frame_profile']=='owl_vendor_world':
+                # Inverse of vendor transport, independently expressed as map->world.
+                target=np.array([m.position.y,-m.position.x,m.position.z])
+                target_yaw=(m.yaw-math.pi/2+math.pi)%(2*math.pi)-math.pi
             setpoint_times.append(time.monotonic())
             record('setpoint',position=target.tolist(),yaw=target_yaw)
     rospy.Subscriber(topics['setpoint'],PositionTarget,setpoint,queue_size=1)
     def setmode(req):
-        global mode
-        with mock_lock:mode=req.custom_mode
+        global mode,lio_offset
+        if a.console_client and req.custom_mode=='AUTO.LAND':
+            begin=time.monotonic()
+            if a.landing_frame_mismatch:
+                lio_offset=1.
+                record('landing_frame_mismatch_injected')
+            time.sleep(.7)
+            recent=[t for t in setpoint_times if t>=begin]
+            if a.landing_frame_mismatch:
+                active=bridge_snap.get('health',{}).get('active_task_id')
+                task=bridge_snap.get('tasks',{}).get(active,{})
+                assert task.get('kind')=='land' and task.get('localization_error'),task
+                assert not bridge_snap['health']['control_ready']
+                assert not any(t>begin+.3 for t in recent),recent
+                record('landing_survives_reset_with_world_output_revoked',task_id=active)
+            else:
+                assert len(recent)>10 and max(np.diff(recent))<.15, recent
+                record('landing_pending_hold_verified',samples=len(recent),max_gap_s=max(np.diff(recent)))
+        with mock_lock:
+            if a.console_client and req.custom_mode=='OFFBOARD':
+                assert len(setpoint_times)>20 and setpoint_times[-1]-setpoint_times[0]>=1.0
+                assert abs(xyz[2])<.01 and not armed
+                assert abs((target_yaw-yaw+math.pi)%(2*math.pi)-math.pi)<.01
+            mode=req.custom_mode
+            fcu_calls.append(mode)
+            record('mock_mode',mode=mode)
         return SetModeResponse(mode_sent=True)
     rospy.Service('/mavros/set_mode',SetMode,setmode)
+    def arm(req):
+        global armed,arm_at
+        with mock_lock:
+            assert req.value and mode=='OFFBOARD' and not armed and abs(xyz[2])<.01
+            armed=True;arm_at=time.monotonic()
+            fcu_calls.append('ARM')
+            record('mock_arm',armed=True)
+        return CommandBoolResponse(success=True,result=0)
+    rospy.Service('/mavros/cmd/arming',CommandBool,arm)
     static=tf2_ros.StaticTransformBroadcaster()
     tf=TransformStamped();tf.header.stamp=rospy.Time.now();tf.header.frame_id='base_link'
     tf.child_frame_id='mock_camera_optical';tf.transform.translation.x=.10
@@ -124,18 +193,33 @@ try:
     static.sendTransform(tf)
     def sensors():
         global xyz,yaw,armed
-        seq=0
+        seq=0;pending_maps=[];drift_at=None
         while not stop.wait(.02):
             with mock_lock:
                 vel=np.clip((target-xyz)*4,-.6,.6)
+                if a.altitude_offset and mode=='OFFBOARD' and armed and target[2]>.05:
+                    vel[2]=np.clip((target[2]+.10-xyz[2])*4,-.6,.6)
+                if a.console_client and (not armed or mode!='OFFBOARD'):vel=np.zeros(3)
+                if a.takeoff_retry and mode=='OFFBOARD' and time.monotonic()-arm_at<2.5:vel=np.zeros(3)
+                if a.settle_after_takeoff and mode=='OFFBOARD' and armed:
+                    if drift_at is None and any(t.get('kind')=='takeoff' and t.get('status')=='arrived' for t in bridge_snap.get('tasks',{}).values()):
+                        drift_at=time.monotonic()
+                        record('post_takeoff_drift',speed_m_s=.12,duration_s=2.)
+                    if drift_at is not None and time.monotonic()-drift_at<2.:
+                        vel[0]=.12
                 if mode=='AUTO.LAND':vel=np.array([0,0,-.4 if xyz[2]>.01 else 0])
                 xyz+=vel*.02
                 xyz[2]=max(0.,xyz[2])
                 if mode=='AUTO.LAND' and xyz[2]<.02:armed=False
                 dy=(target_yaw-yaw+math.pi)%(2*math.pi)-math.pi
                 yaw_step=float(np.clip(dy,-.6*.02,.6*.02))
+                if a.yaw_lag:
+                    yaw_step=float(np.clip(dy*3,-np.deg2rad(24),np.deg2rad(24))*.02)
+                if a.takeoff_retry and mode=='AUTO.LAND' and armed:yaw_step=1.5*.02
+                if a.console_client and not armed:yaw_step=0.
                 yaw+=yaw_step
                 pos=xyz.copy();angle=yaw;current_mode=mode;is_armed=armed
+                measured_positions.append(pos.tolist())
             stamp=rospy.Time.now();header=Header(seq=seq,stamp=stamp,frame_id='world')
             odom=Odometry(header=header,child_frame_id='base_link')
             odom.pose.pose.position.x,odom.pose.pose.position.y,odom.pose.pose.position.z=pos
@@ -144,13 +228,28 @@ try:
             odom.twist.twist.linear.x=math.cos(angle)*vel[0]+math.sin(angle)*vel[1]
             odom.twist.twist.linear.y=-math.sin(angle)*vel[0]+math.cos(angle)*vel[1]
             odom.twist.twist.linear.z=vel[2]
+            if a.biased_vz:odom.twist.twist.linear.z-=.124
+            if cfg['control']['mavros_frame_profile']=='owl_vendor_world':
+                odom.twist.twist.linear.x,odom.twist.twist.linear.y=vel[:2]
             odom.twist.twist.angular.z=yaw_step/.02
+            if cfg['control']['mavros_frame_profile']=='owl_vendor_world':
+                lio=PoseStamped(header=header)
+                import copy
+                lio.pose=copy.deepcopy(odom.pose.pose);lio.pose.position.x+=lio_offset
+                lio_pub.publish(lio)
+                map_pose=PoseStamped(header=Header(stamp=stamp,frame_id='map'))
+                map_pose.pose.position.x,map_pose.pose.position.y,map_pose.pose.position.z=-pos[1],pos[0],pos[2]
+                map_pose.pose.orientation.z=math.sin((angle+math.pi/2)/2)
+                map_pose.pose.orientation.w=math.cos((angle+math.pi/2)/2)
+                if a.takeoff_retry:pending_maps.append((time.monotonic()+.06,map_pose))
+                else:map_pub.publish(map_pose)
             odom_pub.publish(odom)
+            while pending_maps and pending_maps[0][0]<=time.monotonic():map_pub.publish(pending_maps.pop(0)[1])
             state_pub.publish(State(header=header,connected=True,armed=is_armed,mode=current_mode))
             if ext_enabled:
                 ext_pub.publish(ExtendedState(header=header,landed_state=landed_override if landed_override is not None else (2 if pos[2]>.05 else 1)))
             if seq%5==0:
-                cloud_pub.publish(point_cloud2.create_cloud_xyz32(header,[(4.5,4.5,1.),(-4.5,-4.5,1.),(4.5,-4.5,1.)]))
+                if cloud_enabled:cloud_pub.publish(point_cloud2.create_cloud_xyz32(header,obstacle_points))
                 # RGB deliberately leads the latest odom by 7 ms.
                 h=Header(seq=seq,stamp=rospy.Time.from_sec(stamp.to_sec()+.007),frame_id='mock_camera_optical')
                 info_pub.publish(CameraInfo(header=h,width=320,height=240,distortion_model='plumb_bob',D=[0.]*5,
@@ -192,6 +291,60 @@ try:
     assert not obs['rectified'] and obs['calibration_quality']=='approximate'
     assert obs['geometry_assumptions']['intrinsics']=='approximate_fov'
     assert obs['sync_error_s']<=.05 and obs['image_size']==[320,240]
+    if a.console_client:
+        wait(lambda:rpc('GET','/health')['health'].get('stopped'))
+        commands=temp/'commands.txt'
+        if a.console_relative:
+            commands.write_text('init\ntakeoff\nwait\nmove_rel_xyz_yaw 50 0 0 0\nwait\n'
+                'move_rel_xyz 0 50 0\nwait\nmove_relative_xyz_yaw 0 -50 0 0\nwait\n'
+                'move_rel_xyz_yaw 0 0 0 30\nwait\nmove_rel_xyz_yaw 0 0 0 -30\nwait\nland\nwait\nquit\n')
+        else:
+            commands.write_text('init\ntakeoff\nwait\ntest\nwait\nland\nwait\n'+('init\ntakeoff\nwait\nland\nwait\n' if a.takeoff_retry else '')+'quit\n')
+        console_args=[sys.executable,str(root/'scripts/owl_ego/console.py'),'--url',url,'--output',str(temp/'console')]
+        if a.settle_after_takeoff:
+            # Submit test only after fresh telemetry has observed the injected
+            # post-arrival drift, reproducing an operator's delayed command.
+            client=subprocess.Popen(console_args,stdin=subprocess.PIPE,text=True,start_new_session=True)
+            processes.append(client)
+            client.stdin.write('init\ntakeoff\nwait\n');client.stdin.flush()
+            wait(lambda:any(t.get('kind')=='takeoff' and t.get('status')=='arrived' for t in bridge_snap.get('tasks',{}).values())
+                 and bridge_snap.get('health',{}).get('stopped') is False)
+            client.communicate(commands.read_text().split('wait\n',1)[1],timeout=180)
+            assert client.returncode==0,client.returncode
+        else:
+            subprocess.run(console_args+['--commands',str(commands)],check=True,timeout=180)
+        assert fcu_calls==['OFFBOARD','ARM','AUTO.LAND']*(2 if a.takeoff_retry else 1),fcu_calls
+        assert not armed and xyz[2]<.02
+        if a.landing_frame_mismatch:
+            assert any(t.get('kind')=='land' and t.get('status')=='arrived' and t.get('localization_error')
+                       for t in bridge_snap.get('tasks',{}).values()),bridge_snap
+            record('landing_frame_mismatch_verified')
+        if not a.takeoff_retry:assert abs((yaw-.7+math.pi)%(2*math.pi)-math.pi)<math.radians(5)
+        if a.settle_after_takeoff:
+            client_events=[json.loads(line) for line in (temp/'console/events.jsonl').open()]
+            assert any(r['event']=='waiting_for_stop' for r in client_events)
+            assert any(r['event']=='motion_ready' for r in client_events)
+        if diagnostics_process is not None:
+            os.killpg(diagnostics_process.pid,signal.SIGINT)
+            assert diagnostics_process.wait(timeout=20)==0
+            diagnostics_log.close()
+            subprocess.run([sys.executable,str(root/'scripts/owl_ego/analyze_recording.py'),str(temp/'diagnostics')],check=True,timeout=30)
+            client_events=[json.loads(line) for line in (temp/'console/events.jsonl').open()]
+            expected_path='/move_relative_xyz_yaw' if a.console_relative else '/v21/navigation'
+            assert any(r['event']=='http_request' and r.get('path')==expected_path for r in client_events)
+            if not a.console_relative:assert any(r['event']=='stop_wait_progress' for r in client_events)
+            record('diagnostic_recording_verified',folder=str(temp/'diagnostics'))
+        if a.console_relative:
+            client_events=[json.loads(line) for line in (temp/'console/events.jsonl').open()]
+            summaries=[e for e in client_events if e['event']=='relative_motion_summary']
+            assert len(summaries)==5 and all(e['completed'] and e['sample_count']>2 for e in summaries)
+            requests=[e['request'] for e in client_events if e['event']=='http_request' and e['path']=='/move_relative_xyz_yaw']
+            assert [[e[k] for k in ('x','y','z','yaw')] for e in requests]==[[50,0,0,0],[0,50,0,0],[0,-50,0,0],[0,0,0,30],[0,0,0,-30]]
+            assert all('on_poll' not in e for e in requests)
+            record('console_relative_verified',summaries=summaries)
+        record('console_verified',fcu_calls=fcu_calls,landed=True)
+        print('PASS: actual console software takeoff + complete EGO sequence + landing, mock FCU',flush=True)
+        raise SystemExit(0)
     if a.live_client:
         wait(lambda:rpc('GET','/health')['health'].get('stopped'))
         client=root/'scripts/owl_ego/live_sequence.py'
@@ -260,19 +413,34 @@ try:
         assert error<=15 and yaw_error<=5,(error,yaw_error)
         record('arrival',task_id=tid,goal=pose,actual=actual,position_error_cm=error,yaw_error_deg=yaw_error,task=value)
         return value
+    if a.obstacle_route:
+        begin=len(measured_positions)
+        goal=dict(x=200,y=0,z=100,yaw=0)
+        tid=navigate(goal)
+        reached(goal,tid)
+        positions=np.asarray(measured_positions[begin:]);obstacles=np.asarray(obstacle_points)
+        distances=np.linalg.norm(positions[:,None,:]-obstacles[None,:,:],axis=2).min(axis=1)
+        assert distances.min()>.25,float(distances.min())
+        record('obstacle_route_verified',min_clearance_m=float(distances.min()),
+               max_sideways_m=float(np.abs(positions[:,1]).max()),task_id=tid)
+        (temp/'obstacle_positions.json').write_text(json.dumps(positions.tolist()))
+        rpc('POST','/land',body());rpc('POST','/v21/session/release',{'session_id':sid})
+        lease_stop.set();monitor_stop.set()
+        print('PASS: real EGO avoids injected wall, minimum measured clearance '+str(distances.min()),flush=True)
+        raise SystemExit(0)
     def ego_pid(generation):
         needle='__ns:=/owl_ego/planners/g_'+generation
         for line in subprocess.check_output(['ps','-eo','pid,args'],text=True).splitlines():
             if needle in line:return int(line.split()[0])
         return None
     def restart_fixture():
-        global server,controller,bridge,xyz,yaw,target,target_yaw,mode,armed,sid,obs,lease_stop,landed_override,ext_enabled
+        global server,controller,bridge,xyz,yaw,target,target_yaw,mode,armed,sid,obs,lease_stop,landed_override,ext_enabled,cloud_enabled,lio_offset
         server.shutdown();server.server_close();controller.close()
         if bridge.poll() is None:
             os.killpg(bridge.pid,signal.SIGTERM);bridge.wait(timeout=8)
         with mock_lock:
             xyz=np.zeros(3);yaw=0.;target=np.zeros(3);target_yaw=0.;mode='OFFBOARD';armed=True
-            landed_override=None;ext_enabled=True
+            landed_override=None;ext_enabled=True;cloud_enabled=True;lio_offset=0.
         bridge=subprocess.Popen(['rosrun','owl_nav','owl_nav_node.py','_config:='+str(config)],
             stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
         processes.append(bridge)
@@ -300,10 +468,11 @@ try:
         if wait_executing:wait(lambda:status(tid)['status']=='executing')
         return tid,worker,result
     def exec_faults():
-        global phase,mode,armed,landed_override,ext_enabled
+        global phase,mode,armed,landed_override,ext_enabled,cloud_enabled,lio_offset
         from traj_utils.msg import PolyTraj
         reset_pub=rospy.Publisher(topics['localization_reset'],Empty,queue_size=1)
-        for case in ['startup-hold','startup-timeout','execution-heartbeat-loss','lease-expiry','epoch-reset','manual-takeover','landing-confirmation']:
+        for case in ['startup-hold','startup-timeout','execution-heartbeat-loss','lease-expiry','epoch-reset','manual-takeover','cloud-loss','frame-mismatch','landing-confirmation']:
+            if case=='frame-mismatch' and not a.vendor_frames:continue
             phase='fault'
             hb_worker=restart_fixture()
             begin=time.monotonic()
@@ -356,12 +525,18 @@ try:
                     reset_pub.publish(Empty())
                 elif case=='manual-takeover':
                     with mock_lock:mode='POSCTL'
+                elif case=='cloud-loss':
+                    cloud_enabled=False
+                elif case=='frame-mismatch':
+                    assert a.vendor_frames, 'frame mismatch scenario requires --vendor-frames'
+                    lio_offset=1.
                 else:
                     # An old ON_GROUND sample while still armed cannot later
                     # combine with disarm after it has expired.
                     with mock_lock:landed_override=1
                     time.sleep(.12)
                     ext_enabled=False
+                    cloud_enabled=False  # landing must not fail when obstacle feed disappears
                     landing_result=[]
                     def land_call():
                         try:landing_result.append(rpc('POST','/land',body()))
@@ -382,12 +557,12 @@ try:
                 assert not track_worker.is_alive() and track_result and isinstance(track_result[0],str),track_result
                 time.sleep(.25)
                 output_count=len(setpoint_times)
-                if case in ('manual-takeover','epoch-reset'):
+                if case in ('manual-takeover','epoch-reset','frame-mismatch'):
                     if case=='manual-takeover':
                         with mock_lock:mode='OFFBOARD'
                     time.sleep(.4)
                     assert len(setpoint_times)==output_count
-                elif case in ('startup-timeout','execution-heartbeat-loss','lease-expiry'):
+                elif case in ('startup-timeout','execution-heartbeat-loss','lease-expiry','cloud-loss'):
                     wait(lambda:rpc('GET','/health')['health']['stopped'])
                     with mock_lock:held=target.copy()
                     time.sleep(.2)
@@ -417,7 +592,8 @@ try:
         tid=navigate(B)
         def moving():
             task=status(tid)
-            with mock_lock:speed=float(np.linalg.norm((target-xyz)*4))
+            # A vertical tracking offset is not outbound motion toward B.
+            with mock_lock:speed=float(np.linalg.norm((target-xyz)[:2]*4))
             return task['status']=='executing' and speed>.18 and distance(current(),B)>100
         wait(moving,timeout=20)
         exposure=rpc('GET','/v21/observation');P=exposure['pose']
@@ -445,7 +621,7 @@ try:
             before=current();angle=math.radians(before['yaw'])
             expected=dict(x=before['x']+math.cos(angle)*x-math.sin(angle)*y,
                           y=before['y']+math.sin(angle)*x+math.cos(angle)*y,
-                          z=before['z']+z,yaw=(before['yaw']+dyaw+180)%360-180)
+                          z=P['z'],yaw=(before['yaw']+dyaw+180)%360-180)
             begin=time.monotonic()
             result=rpc('POST','/move_relative_xyz_yaw',body(x=x,y=y,z=z,yaw=dyaw,timeout_s=15),timeout=18)
             duration=time.monotonic()-begin

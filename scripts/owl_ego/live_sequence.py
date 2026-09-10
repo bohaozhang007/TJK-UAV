@@ -12,6 +12,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+TRACK_ACTIONS = ((0,-100,0,0), (0,100,0,0), (0,0,0,90))
+
 
 class Failure(RuntimeError):
     pass
@@ -52,6 +54,8 @@ class Runner:
         if method != 'GET' and not self.a.execute:
             raise Failure('Preview cannot send POST')
         begin = time.monotonic()
+        if method=='POST' and path!='/v21/heartbeat':
+            self.record('http_request',method=method,path=path,request=data)
         req = urllib.request.Request(self.a.url.rstrip('/')+path, method=method,
             data=json.dumps(data).encode() if data is not None else None,
             headers={'Content-Type': 'application/json'})
@@ -74,16 +78,18 @@ class Runner:
     def post(self, path, **data):
         return self.rpc('POST', path, dict(session_id=self.sid, request_id=str(uuid.uuid4()), **data))
 
-    def health(self, flight=True):
+    def health(self, flight=True, require_localization=True):
         h = self.rpc('GET', '/health')['health']
         if self.hb_error:
             raise Failure('Heartbeat failed: '+self.hb_error)
-        if self.epoch and h.get('localization_epoch') != self.epoch:
+        if require_localization and self.epoch and h.get('localization_epoch') != self.epoch:
             raise Failure('Localization epoch changed')
-        if not h.get('odom_ok') or h.get('manual_takeover') or h.get('conflicting_publishers'):
+        if (require_localization and not h.get('odom_ok')) or h.get('manual_takeover') or h.get('conflicting_publishers'):
             raise Failure('Localization/control unavailable: '+str(h))
         if flight:
-            if not all(h.get(k) for k in ('initialized', 'airborne', 'control_ready', 'hold_ready')) or h.get('error'):
+            if h.get('error'):
+                raise Failure('Robot motion failed: '+str(h['error']))
+            if not all(h.get(k) for k in ('initialized', 'airborne', 'control_ready', 'hold_ready')):
                 raise Failure('Flight authority unavailable: '+str(h))
             if h.get('planner_state') not in ('starting', 'ready', 'not_required'):
                 raise Failure('Planner unhealthy: '+str(h))
@@ -125,20 +131,64 @@ class Runner:
         return self.rpc('GET', '/v21/navigation/status?'+urllib.parse.urlencode({'task_id': tid}))
 
     def wait_task(self, tid, allowed=('arrived',), cleanup=False):
-        deadline = time.monotonic()+(8 if cleanup else self.a.nav_timeout_s)
+        started=time.monotonic();budget=8 if cleanup or 'cancelled' in allowed else self.a.nav_timeout_s
+        deadline = started+budget
+        next_report=started
         while time.monotonic() < deadline:
+            h={}
             if not cleanup:
-                self.health()
+                h=self.health()
             task = self.task(tid)
             if task['status'] in ('failed', 'arrived', 'cancelled'):
                 if task['status'] in allowed and task.get('stopped') is True:
                     return task
                 raise Failure('Task did not complete successfully: '+str(task))
+            if task['status']=='stopping' and time.monotonic()>=next_report:
+                self.report_stop_wait(h,task,time.monotonic()-started,budget)
+                next_report=time.monotonic()+2
             time.sleep(.1)
         raise Failure('Task/stop confirmation timed out: '+tid)
 
+    def report_stop_wait(self, health, task, elapsed, budget):
+        d=(health or {}).get('stop_diagnostics') or task.get('diagnostics',{})
+        def number(key):
+            v=d.get(key)
+            return '未知' if v is None else '%.3f'%v
+        self.record('stop_wait_progress',elapsed_s=elapsed,budget_s=budget,
+                    task_id=task.get('task_id'),diagnostics=d)
+        if d.get('method')=='pose_window':
+            print('停止确认 %.1f/%.0f s：位置范围 %s/%s m，航向范围 %s/%s°，稳定窗口 %s s（报告速度 %s m/s）。'%(
+                elapsed,budget,number('position_span_m'),number('position_limit_m'),number('yaw_span_deg'),
+                number('yaw_span_limit_deg'),number('stable_duration_s'),number('speed_m_s')),flush=True)
+        else:
+            print('停止确认 %.1f/%.0f s：速度 %s m/s，偏航 %s °/s，连续低速 %s s；尚未发送下一段运动。'%(
+                elapsed,budget,number('speed_m_s'),number('yaw_rate_deg_s'),number('stable_duration_s')),flush=True)
+
+    def wait_motion_ready(self, timeout=8.):
+        deadline=time.monotonic()+timeout
+        waiting=False
+        next_report=0.
+        while True:
+            h=self.health()
+            if h.get('active_task_id') or h.get('landing'):
+                raise Failure('Previous task still active; refusing to queue a new motion')
+            if h.get('stopped') is True:
+                if waiting:self.record('motion_ready',health=h)
+                return
+            if not waiting:
+                self.record('waiting_for_stop',health=h)
+                print('等待实测停止确认（最多 %.0f 秒，心跳持续）…'%timeout,flush=True)
+                waiting=True
+            if time.monotonic()>=next_report:
+                self.report_stop_wait(h,{},timeout-(deadline-time.monotonic()),timeout)
+                next_report=time.monotonic()+2
+            if time.monotonic()>=deadline:
+                self.record('stop_wait_timeout',health=h)
+                raise Failure('等待停止超时，未发送运动指令：'+str(h.get('stop_diagnostics',h)))
+            time.sleep(.1)
+
     def navigate(self, goal):
-        self.health()
+        self.wait_motion_ready()
         return self.post('/v21/navigation', pose=goal, localization_epoch=self.epoch)['task_id']
 
     def arrive(self, goal):
@@ -151,23 +201,37 @@ class Runner:
         self.record('arrival', goal=goal, actual=actual, task=task)
         return tid
 
-    def blocking(self, path, timeout, flight=True, **data):
+    def blocking(self, path, timeout, flight=True, on_poll=None, **data):
+        if path=='/move_relative_xyz_yaw':
+            self.wait_motion_ready()
         # Worker owns the blocking HTTP call; foreground remains cancellable.
         result = queue.Queue()
         payload = dict(session_id=self.sid, request_id=str(uuid.uuid4()), **data)
+        cancel_event = getattr(self,'abort',None)
         def call():
             try:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise Failure('Operation cancelled before HTTP submission')
                 result.put(self.rpc('POST', path, payload, timeout=timeout))
             except Exception as e:
                 result.put(e)
         threading.Thread(target=call, daemon=True).start()
         deadline = time.monotonic()+timeout
         while time.monotonic() < deadline:
-            self.health(flight=flight)
+            if path=='/land':
+                self.health(flight=False,require_localization=False)
+            else:
+                self.health(flight=flight)
+            if on_poll is not None:
+                on_poll()
             try:
                 value = result.get(timeout=.1)
                 if isinstance(value, Exception):
                     raise value
+                if path=='/land':
+                    # A successful landing may span a localization reset. A
+                    # later init must acquire the current ground epoch afresh.
+                    self.epoch=None
                 return value
             except queue.Empty:
                 pass
@@ -182,6 +246,8 @@ class Runner:
         # issue automatic landing or reinitialize after failure/manual takeover.
         try:
             h = self.rpc('GET', '/health')['health']
+            if h.get('landing'):
+                raise Failure('AUTO.LAND still pending; cannot confirm stop or cancel landing')
             if h.get('active_task_id') and not h.get('manual_takeover'):
                 tid = h['active_task_id']
                 self.post('/v21/navigation/cancel', task_id=tid)
@@ -210,6 +276,72 @@ class Runner:
         self.record('cleanup_complete', confirmed=confirmed)
         return confirmed
 
+    def sequence(self):
+        self.wait_motion_ready()
+        origin = self.pose()
+        B = offset(origin, x=self.a.b_forward_cm)
+        self.record('waypoint', B=B, origin=origin)
+        self.stage('outbound-to-B')
+        tid = self.navigate(B)
+        deadline = time.monotonic()+self.a.nav_timeout_s
+        while True:
+            self.health()
+            task = self.task(tid)
+            current = self.pose()
+            if task['status'] in ('failed','arrived','cancelled') or time.monotonic() > deadline:
+                raise Failure('Outbound ended before moving capture')
+            if task['status']=='executing' and distance(current, origin)>=self.a.capture_after_cm:
+                P = current
+                break
+            time.sleep(.1)
+        self.record('capture_P', P=P, epoch=self.epoch, source='get_pose (not camera exposure)')
+        deadline = time.monotonic()+self.a.delay_s
+        while time.monotonic() < deadline:
+            self.health()
+            if self.task(tid)['status'] != 'executing':
+                raise Failure('Outbound ended during simulated detection delay')
+            time.sleep(.1)
+        if distance(self.pose(), P)<5:
+            raise Failure('Insufficient movement after P to validate interruption')
+        self.phase = 'cancel-and-confirm-stop'  # Never pause for input while still moving.
+        self.post('/v21/navigation/cancel', task_id=tid)
+        self.wait_task(tid, ('cancelled',))
+        self.record('cancelled', P=P, stop_pose=self.pose(), task=self.task(tid))
+        self.stage('return-to-P')
+        self.arrive(P)
+        self.track(P)
+        self.stage('return-to-P-after-TRACK')
+        self.arrive(P)
+        self.stage('resume-B-with-new-task')
+        resumed = self.arrive(B)
+        if resumed == tid:
+            raise Failure('Robot reused old navigation task')
+        return dict(P=P,B=B,original_task=tid,resumed_task=resumed)
+
+    def track(self, P):
+        for n, values in enumerate(TRACK_ACTIONS, 1):
+            self.stage('TRACK-%d'%n)
+            self.wait_motion_ready()
+            before = self.pose()
+            # Left/right are destinations relative to saved P, including its
+            # heading. From P-left to P-right the travel is approximately 2 m.
+            reference = P if n <= 2 else before
+            goal = offset(reference, *values)
+            goal['z'] = P['z']
+            if n <= 2:
+                task = self.wait_task(self.navigate(goal))
+            else:
+                value = self.blocking('/move_relative_xyz_yaw', 18,
+                    **dict(zip(('x','y','z','yaw'), values)), timeout_s=15)
+                task = self.wait_task(value['task_id'])
+            actual = self.pose()
+            if (distance(actual, goal)>self.tolerances['position_tolerance_cm'] or
+                    abs((actual['yaw']-goal['yaw']+180)%360-180)>self.tolerances['yaw_tolerance_deg']):
+                raise Failure('TRACK arrival error exceeds tolerances')
+            self.record('track_complete', relative=values, reference=reference,
+                        reference_frame='saved_P' if n <= 2 else 'current_body',
+                        start=before, goal=goal, actual=actual, task=task)
+
     def run(self):
         failed = False
         try:
@@ -226,7 +358,7 @@ class Runner:
             preview = dict(mode='execute' if self.a.execute else 'preview', start=start,
                 B_relative_body_cm=self.a.b_forward_cm, capture_after_cm=self.a.capture_after_cm,
                 delay_s=self.a.delay_s, takeoff=self.a.takeoff, finish=self.a.finish,
-                track=[[30,0,0,0],[0,30,0,0],[-30,0,0,0],[0,0,0,20],[20,-20,0,-20]])
+                track=TRACK_ACTIONS, track_reference_frames=['saved_P','saved_P','current_body'])
             self.record('plan', **preview)
             print(json.dumps(preview, ensure_ascii=False, indent=2), flush=True)
             if not self.a.execute:
@@ -250,59 +382,12 @@ class Runner:
                 print('等待飞手按既有流程进入 OFFBOARD 并解锁；起飞高度由 Robot 配置决定。', flush=True)
                 self.blocking('/takeoff', 65, flight=False)
             self.health()
-            origin = self.pose()
-            B = offset(origin, x=self.a.b_forward_cm)
-            self.record('waypoint', B=B, origin=origin)
-            self.stage('outbound-to-B')
-            tid = self.navigate(B)
-            deadline = time.monotonic()+self.a.nav_timeout_s
-            while True:
-                self.health()
-                task = self.task(tid)
-                current = self.pose()
-                if task['status'] in ('failed','arrived','cancelled') or time.monotonic() > deadline:
-                    raise Failure('Outbound ended before moving capture')
-                if task['status']=='executing' and distance(current, origin)>=self.a.capture_after_cm:
-                    P = current
-                    break
-                time.sleep(.1)
-            self.record('capture_P', P=P, epoch=self.epoch, source='get_pose (not camera exposure)')
-            deadline = time.monotonic()+self.a.delay_s
-            while time.monotonic() < deadline:
-                self.health()
-                if self.task(tid)['status'] != 'executing':
-                    raise Failure('Outbound ended during simulated detection delay')
-                time.sleep(.1)
-            if distance(self.pose(), P)<5:
-                raise Failure('Insufficient movement after P to validate interruption')
-            self.phase = 'cancel-and-confirm-stop'  # Never pause for input while still moving.
-            self.post('/v21/navigation/cancel', task_id=tid)
-            self.wait_task(tid, ('cancelled',))
-            self.record('cancelled', P=P, stop_pose=self.pose(), task=self.task(tid))
-            self.stage('return-to-P')
-            self.arrive(P)
-            for n, values in enumerate(preview['track'], 1):
-                self.stage('TRACK-%d'%n)
-                before = self.pose()
-                goal = offset(before, *values)
-                value = self.blocking('/move_relative_xyz_yaw', 18,
-                    **dict(zip(('x','y','z','yaw'), values)), timeout_s=15)
-                task = self.wait_task(value['task_id'])
-                actual = self.pose()
-                if (distance(actual, goal)>self.tolerances['position_tolerance_cm'] or
-                        abs((actual['yaw']-goal['yaw']+180)%360-180)>self.tolerances['yaw_tolerance_deg']):
-                    raise Failure('TRACK arrival error exceeds tolerances')
-                self.record('track_complete', relative=values, start=before, goal=goal, actual=actual, task=task)
-            self.stage('return-to-P-after-TRACK')
-            self.arrive(P)
-            self.stage('resume-B-with-new-task')
-            resumed = self.arrive(B)
-            if resumed == tid:
-                raise Failure('Robot reused old navigation task')
+            sequence = self.sequence()
+            P,B,tid,resumed = (sequence[k] for k in ('P','B','original_task','resumed_task'))
             if self.a.finish == 'land':
                 self.stage('land-at-B')
                 self.blocking('/land', 95, flight=False)
-                h = self.health(flight=False)
+                h = self.health(flight=False,require_localization=False)
                 if h.get('airborne') or h.get('landed_state')!=1 or not h.get('landed_state_fresh'):
                     raise Failure('Landing not confirmed')
             self.summary.write_text(json.dumps(dict(ok=True, executed=True, P=P, B=B,
@@ -335,10 +420,10 @@ def parse_args(argv=None):
     p.add_argument('--finish', choices=('hold','land'), default='hold', help='Hold at B (default), or land at B')
     p.add_argument('--step', action='store_true', help='Pause only at stable stages; heartbeat remains active')
     p.add_argument('--yes', action='store_true', help='Skip the initial interactive EXECUTE confirmation')
-    p.add_argument('--b-forward-cm', type=float, default=200)
+    p.add_argument('--b-forward-cm', type=float, default=400)
     p.add_argument('--capture-after-cm', type=float, default=100,
                    help='Record P after this displacement from initial hover (default 100 cm)')
-    p.add_argument('--delay-s', type=float, default=.8)
+    p.add_argument('--delay-s', type=float, default=1.0)
     p.add_argument('--nav-timeout-s', type=float, default=45)
     p.add_argument('--output', default='logs/owl_live/'+time.strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:6])
     a = p.parse_args(argv)

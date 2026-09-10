@@ -22,6 +22,9 @@ a=p.parse_args()
 with open(a.config) as f:c=yaml.safe_load(f)
 rospy.init_node('owl_ego_readonly_preflight',anonymous=True,disable_signals=True)
 report={'ros_master':os.environ.get('ROS_MASTER_URI'),'errors':[],'warnings':[],'sensors':{}}
+report['mavros_frame_profile']=c['control'].get('mavros_frame_profile','standard_enu')
+if report['mavros_frame_profile'] not in ('standard_enu','owl_vendor_world'):
+ report['errors'].append('invalid mavros_frame_profile')
 pubs,_,_=rosgraph.Master(rospy.get_name()).getSystemState()
 report['motion_publishers']={t:n for t,n in pubs if t.startswith('/mavros/setpoint_') and
  t not in ('/mavros/setpoint_raw/target_local','/mavros/setpoint_raw/target_global',
@@ -50,7 +53,7 @@ elif mode=='body_coincident_fixed':
  except ValueError as e:report['errors'].append(str(e))
 elif mode!='tf':
  report['errors'].append('unknown extrinsics mode')
-if c['hardware'].get('intrinsics_mode')=='approximate_fov':
+if c['hardware'].get('intrinsics_mode')=='approximate_fov' and 'rgb' in report['sensors']:
  try:
   rgb=report['sensors']['rgb']
   k,_,_,assumptions=camera_intrinsics(c['hardware'],SimpleNamespace(width=rgb['width'],height=rgb['height']),None)

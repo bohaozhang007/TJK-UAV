@@ -19,6 +19,8 @@ hardware:
   body_from_camera_optical_rotation: null
 
 control:
+  # Vendor world odometry -> map setpoint rotation; not a camera offset.
+  mavros_frame_profile: owl_vendor_world
   flight_enabled: false
   # Set true only after validating PX4 offboard-loss action on this firmware.
   failsafe_validated: false
@@ -34,15 +36,20 @@ control:
   reset_yaw_rad: 0.7853981634
   max_speed_m_s: 2.0
   max_acceleration_m_s2: 3.0
+  max_tracking_error_m: 0.5
   world_limit_m: 30.0
   position_tolerance_m: 0.15
   yaw_tolerance_rad: 0.0872664626
+  # Pose stability: allowed XYZ/yaw span = these rates * stable_duration_s.
+  # Raw odometry twist remains diagnostic; it does not gate stopped.
   stop_speed_m_s: 0.10
   stop_yaw_rate_rad_s: 0.0872664626
   stable_samples: 5
   stable_duration_s: 0.5
   yaw_rate_rad_s: 0.523598776
   takeoff_height_m: 1.0
+  takeoff_max_lead_m: 0.2
+  takeoff_progress_timeout_s: 10.0
   takeoff_speed_m_s: 0.3
   cloud_timeout_s: 0.5
   cloud_sync_max_s: 0.1

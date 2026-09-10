@@ -105,7 +105,7 @@ class OwlEgoController:
             if path == '/v21/capabilities':
                 return dict(ok=True,backend='owl_ego',protocol_version=1,async_navigation=True,
                             cancel_and_hold=True,synchronized_observation=True,
-                            control_lease=True,relative_xyz_yaw=True)
+                            control_lease=True,relative_xyz_yaw=True,software_takeoff=True)
             if path == '/v21/observation':
                 result = self.observation()
                 with self.lock:
@@ -126,7 +126,7 @@ class OwlEgoController:
                 raise ApiError('unknown task_id',404)
             task = snap['tasks'][tid]
             return {k:v for k,v in dict(ok=True,**task).items()
-                    if k in ('ok','task_id','status','stopped','error','generation','timing_s','diagnostics')}
+                    if k in ('ok','task_id','status','stopped','error','generation','timing_s','diagnostics','execution_error','takeoff_reference','localization_error')}
         if path == '/v21/session':
             rid = data.get('request_id')
             try:
@@ -186,7 +186,10 @@ class OwlEgoController:
             goal = list(snap['pose'])
             goal[2] += self.config['control']['takeoff_height_m']
             timeout = self.config['controller']['takeoff_timeout_s']
-            result = self._command('takeoff',session_id=sid,task_id=tid,goal=goal,localization_epoch=epoch)
+            auto_arm = data.get('auto_arm',False)
+            if type(auto_arm) is not bool:
+                raise ApiError('auto_arm must be boolean',400)
+            result = self._command('takeoff',session_id=sid,task_id=tid,goal=goal,localization_epoch=epoch,auto_arm=auto_arm)
         else:
             timeout = self.config['controller']['landing_timeout_s']
             result = self._command('land',session_id=sid,task_id=tid)
@@ -199,7 +202,10 @@ class OwlEgoController:
             if task and task['status'] in ('arrived','failed','cancelled'):
                 if task['status'] == 'arrived' and task['stopped']:
                     return dict(ok=True,message='motion completed',task_id=tid)
-                raise ApiError(task.get('error',task['status']))
+                detail=task.get('error',task['status'])
+                if task.get('execution_error'):
+                    detail+='; '+json.dumps(task['execution_error'],allow_nan=False)
+                raise ApiError(detail)
             time.sleep(.04)
         if path != '/land':
             self._command('cancel',session_id=sid,task_id=tid)

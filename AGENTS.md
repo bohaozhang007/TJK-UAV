@@ -47,5 +47,9 @@
   定位 epoch、人工接管与 PX4 failsafe 不因视觉近似而削弱。
 - 默认只读检查；测试使用 mock 或独立 ROS master。未经用户明确授权不实飞、
   不自动停厂家服务、不自动解锁。不把 mock FCU/真实 EGO 联调称为 PX4 SITL。
+- 用户已授权换电池重启后的脚本控制权交接：`run_owl_ego.sh prepare` 和 `bridge`
+  可在新鲜状态确认 connected、disarmed、ON_GROUND 后自动停止 `/captain` 与
+  `/mavros_controller`，再复查发布者。该授权不包含停止其他厂家节点、修改开机项或
+  自动解锁/实飞；`check` 继续只读。该已授权流程不必每次另行询问。
 - 按改动运行针对性测试并记录实际结果；不把此前测试当作新增路径已经验证。
 - 文件回复不等于已经发送给对端，不自动通过外部消息工具发送或发布。
