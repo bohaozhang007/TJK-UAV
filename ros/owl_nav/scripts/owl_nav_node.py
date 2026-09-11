@@ -50,12 +50,14 @@ class Node:
         self.status_sequence = 0
         self.bridge_id = uuid.uuid4().hex
         self.last_odom = None
+        self.last_world_velocity = None
         self.setpoint_pub = None
         self.pending_fcu = None
         self.fcu_busy = False
         self.fcu_uncertain = False
         self.stream_since = None
         self.last_output_at = -math.inf
+        self.last_control_sample = None
         topics = self.c['topics']
         self.status_pub = rospy.Publisher(topics['bridge_status'],String,queue_size=1)
         self.odom_pub = rospy.Publisher('/owl_ego/planner_odom',Odometry,queue_size=5)
@@ -114,6 +116,7 @@ class Node:
             self.core.odometry([p.x,p.y,p.z],euler_from_quaternion(quat)[2],world_v,yaw_rate,
                                m.header.stamp.to_sec(),m.header.frame_id,time.monotonic())
             self.last_odom = m
+            self.last_world_velocity = world_v.copy()
             if self.frames.vendor:
                 try:
                     self.alignment.check(m.header.stamp.to_sec(),[p.x,p.y,p.z],self.core.pose[3],time.monotonic())
@@ -234,6 +237,9 @@ class Node:
         self.status_sequence += 1
         data = dict(health=h,session_id=c.session,bridge_id=self.bridge_id,sequence=self.status_sequence,
                     pose=c.pose.tolist() if c.pose is not None else None,tasks=copy.deepcopy(c.tasks))
+        data['control_sample'] = copy.deepcopy(self.last_control_sample)
+        data['control_sample_age_s'] = (now-self.last_control_sample['monotonic_s']
+                                       if self.last_control_sample is not None else None)
         self.status_pub.publish(String(data=json.dumps(data,allow_nan=False)))
         return data
 
@@ -272,6 +278,19 @@ class Node:
                         m.acceleration_or_force.x,m.acceleration_or_force.y,m.acceleration_or_force.z = a
                         m.yaw = y
                         self.setpoint_pub.publish(m)
+                        sample = c.output_diagnostics(now,m.header.stamp.to_sec(),output)
+                        sample.update(mavros_profile=self.frames.profile,
+                                      mavros_frame_id=m.header.frame_id,
+                                      mavros_coordinate_frame=int(m.coordinate_frame),
+                                      mavros_type_mask=int(m.type_mask),
+                                      published_z_m=float(m.position.z),
+                                      published_vz_m_s=float(m.velocity.z),
+                                      published_az_m_s2=float(m.acceleration_or_force.z),
+                                      measured_vz_world_m_s=(float(self.last_world_velocity[2])
+                                          if self.last_world_velocity is not None else None),
+                                      conflicting_publishers=list(self.conflicts),
+                                      publisher_audit_age_s=now-self.conflict_at)
+                        self.last_control_sample = sample
                         if now-self.last_output_at > .15:
                             self.stream_since = now
                         self.last_output_at = now

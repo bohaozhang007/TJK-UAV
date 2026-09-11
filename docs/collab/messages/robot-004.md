@@ -4,6 +4,64 @@
 用户授权实现包含Agent观测恢复的三项方案，本次据此跨端修改Client及对应测试；
 保留对端已有心跳修复和Z容差改动，不代写agent_status。文件未外发。
 
+## 最新补充：纯旋转高度偏差，先补诊断（2026-09-11）
+
+用户要求保持8 cm垂直到达容差、不固定减11 cm、不改变非零dz以实测为起点的语义。
+本次仅分析已有Robot录制、核对厂家MAVROS源码和增加只读诊断；未改控制律、FCU参数、
+飞行配置或厂家代码，未重启实机服务。此前通信补丁不解释本次高度偏差。
+
+证据：`logs/owl_diagnostics/agent_20260911-145332/flight.bag`；现有分析器已导出，
+新增`height_chain.csv`、`height_chain_analysis.json`，保留源bag SHA256及对齐局限。
+纯旋转任务nav-830d42e3c374425b972b083d626c5eb4于14:54:02.169首次出现。
+取14:54:07–14:54:17末段301个odom样本，按最近已收到status/setpoint对齐：
+
+| 项目 | 结果 |
+| --- | --- |
+| 任务目标Z | 固定0.952324533 m |
+| hold Z | 旧录制未记录，不能用代码推断冒充实测证据 |
+| 发给MAVROS的Z | 固定0.952324533 m，与转换回world的值一致 |
+| 同world实测Z | 中位1.064082146 m，范围1.051779–1.071408 m |
+| Z速度/加速度前馈 | 均为0 |
+| MAVROS控制字段 | coordinate_frame=1，type_mask=2048，仅忽略yaw_rate；位置、速度、加速度字段有效 |
+| world竖直反馈速度 | 中位−0.133039 m/s |
+| 500 ms位置差分竖直速度 | 中位+0.000125 m/s；是窗口差分，不当作真实瞬时速度 |
+| 最近setpoint接收年龄 | 中位12.763 ms，最大48.457 ms |
+
+该bag的setpoint连接callerid仅/owl_ego_bridge，末段健康审计conflicting_publishers=[]、
+OFFBOARD、epoch不变、frame_alignment_ok=true。到14:54:17.225，yaw误差0.205°，
+Z误差11.344 cm，仍超过8 cm，停止诊断已稳定。15 s相对请求等待后进入取消/降落，
+原任务最终记录preempted by landing；14:54:23.896降落arrived。
+因此不是yaw不对准，也不能把本次归为EGO轨迹到期；纯旋转无需EGO位置轨迹。
+
+厂家源码核对：Frames.setpoint只旋转XY；local_position.cpp先NED→ENU再加init_pose，
+setpoint_raw.cpp对位置减init_pose再ENU→NED。共享静态高度原点在误差中抵消，未发现
+Robot层把11 cm加入输出的证据。此为源码核对，未取得当次FCU内部目标及init_pose运行
+历史，不能以此证明整个FCU反馈链路无问题。同期LIO/vision_pose Z中位1.171220 m，
+FCU local_position/pose中位1.064144 m，不能将两者直接替换计算到达误差。
+
+结论更接近“最终ROS输出正确，实测稳定偏高”。反馈vz和位置变化明显不一致，与既往
+FCU日志的估计速度偏差现象相似，但本次无FCU ULog，不能确定是估计融合、传感器、
+控制器内部目标还是其他FCU环节，更不能直接增设补偿控制器或切换控制掩码。
+
+### 只读诊断补丁及后续验证边界
+
+Node在同一控制锁、同次tick输出发布后记录`control_sample`，包含task_id/status、epoch、
+goal_z_m、hold_z_m、output_z_world_m、published_z_m、measured_z_world_m、Z前馈/反馈速度、
+ROS设定值与odom时间戳、odom接收年龄、FCU模式、掩码、坐标profile和发布者审计年龄。
+`control_sample_age_s`明确最后输出样本的新鲜度；不再输出时仍保留历史样本及年龄，
+不得将它当作当前仍发布的控制量。goal为空表示该发布时刻没有活动任务。
+诊断是同周期缓存快照，不宣称odom与发送时刻物理同步，也不证明FCU已接受该消息。
+现有`/owl_ego/status`录制及分析器保留完整字段，无需新接口。
+
+109项Robot回归通过（5.992 s），新增测试确认四个高度字段不混淆、不修改core状态、
+快照不会被后续数组更新改写；node编译检查及git diff --check通过。
+证据同录制目录diagnostic_tests.log。未进行实机两组动作验收，不能宣称高度已修复。
+
+落地后重启bridge加载诊断，后续录制先验证纯旋转/水平移动时高度参考不变、实测收敛
+8 cm内，再验证正负Z每次收敛后继续。任一步不能收敛就结束该组，不用放宽容差跳过。
+若同周期四段仍显示最终输出正确而实测偏高，需对应FCU内部setpoint、local_position、
+估计器及控制状态的当次ULog，才能决定底层修复；本轮未主动触发这些飞行动作。
+
 ## 改动与范围
 
 - 核实agent-004的心跳有界恢复已在同步代码中实现，直接复用，未重复改写。

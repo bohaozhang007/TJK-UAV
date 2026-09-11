@@ -160,6 +160,26 @@ class SoftwareTakeoffTest(unittest.TestCase):
 
 
 class CoreTest(unittest.TestCase):
+    def test_output_diagnostics_preserves_four_distinct_height_stages(self):
+        self.nav(goal=(0,0,1,.2))
+        self.c.pose[2] = 1.11
+        output = (np.array([0.,0.,1.02]), np.zeros(3), np.zeros(3), .2)
+        before = (self.c.hold.copy(), self.c.pose.copy(), copy.deepcopy(self.c.tasks))
+        sample = self.c.output_diagnostics(self.now+.02, self.now+.01, output)
+        self.assertEqual(sample['goal_z_m'], 1.)
+        self.assertEqual(sample['hold_z_m'], 1.)
+        self.assertEqual(sample['output_z_world_m'], 1.02)
+        self.assertEqual(sample['measured_z_world_m'], 1.11)
+        self.assertEqual(sample['vertical_tolerance_m'], .08)
+        self.assertAlmostEqual(sample['odom_receipt_age_s'], .02)
+        np.testing.assert_array_equal(self.c.hold,before[0])
+        np.testing.assert_array_equal(self.c.pose,before[1])
+        self.assertEqual(self.c.tasks,before[2])
+        self.c.pose[2] = 2.; output[0][2] = 3.
+        self.assertEqual(sample['measured_z_world_m'],1.11)
+        self.assertEqual(sample['output_z_world_m'],1.02)
+        json.dumps(sample,allow_nan=False)
+
     def setUp(self):
         self.c=FlightCore(CONFIG['control'])
         self.now=10.

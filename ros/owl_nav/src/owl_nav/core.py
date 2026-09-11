@@ -182,6 +182,22 @@ class FlightCore:
         self.airborne = landed_state == 2
         self.complete_landing(now)
 
+    def output_diagnostics(self, now, stamp, output):
+        """Read-only snapshot taken under the node lock for one published output."""
+        task = self.tasks.get(self.active)
+        return dict(monotonic_s=now, setpoint_stamp_ros_s=stamp,
+                    localization_epoch=self.epoch, world_frame=self.frame,
+                    task_id=self.active, task_status=task['status'] if task else None,
+                    goal_z_m=float(task['goal'][2]) if task else None,
+                    hold_z_m=float(self.hold[2]) if self.hold is not None else None,
+                    output_z_world_m=float(output[0][2]),
+                    output_vz_world_m_s=float(output[1][2]),
+                    output_az_world_m_s2=float(output[2][2]),
+                    measured_z_world_m=float(self.pose[2]) if self.pose is not None else None,
+                    odom_stamp_ros_s=self.stamp,
+                    odom_receipt_age_s=now-self.odom_at if math.isfinite(self.odom_at) else None,
+                    mode=self.mode, vertical_tolerance_m=self.c['vertical_tolerance_m'])
+
     def ground_confirmed(self, now):
         return (self.landed_state == 1 and now-self.ext_at <= self.c['state_timeout_s']
                 and now-self.state_at <= self.c['state_timeout_s'] and self.connected and not self.armed)
