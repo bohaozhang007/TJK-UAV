@@ -75,6 +75,9 @@ class FlightCore:
         self.initialized = False
         self.enabled = False
         self.session = None
+        self.operator_token = None
+        self.operator_session = None
+        self.operator_land_requests = {}
         self.retired = set()
         self.lease_at = -math.inf
         self.tasks = {}
@@ -128,6 +131,8 @@ class FlightCore:
                     planner_ok=self.planner_state(now) == 'ready',
                     planner_state=self.planner_state(now),
                     active_task_id=self.active,
+                    control_owner=('operator' if self.session == self.operator_session else 'agent') if self.session else 'none',
+                    operator_supervised=self.operator_token is not None,
                     hold_ready=self.enabled and self.fresh(now) and not self.manual
                     and not self.landing and self.mode == 'OFFBOARD' and self.armed,
                     landed_state=self.landed_state,
@@ -313,23 +318,75 @@ class FlightCore:
             if self.session:
                 self.retired.add(self.session)
             self.session = None
+            self.operator_token = self.operator_session = None
+            self.operator_land_requests.clear()
             self.fail('Robot server restarted')
             self.epoch = uuid.uuid4().hex
             self.initialized = False
             return {'ok': True}
         if op == 'acquire':
             sid = data['session_id']
-            if sid in self.retired or (self.session and self.session != sid):
+            transfer = (self.operator_token is not None and self.session == self.operator_session
+                        and not data.get('operator_token') and self.initialized and self.enabled
+                        and self.fresh(now) and self.armed and self.airborne
+                        and self.mode == 'OFFBOARD' and not self.manual
+                        and self.last_error is None and data.get('flight_authorized'))
+            if sid in self.retired or (self.session and self.session != sid and not transfer):
                 raise Rejected('session unavailable')
+            if self.operator_token is not None and not transfer:
+                raise Rejected('operator supervision requires operator recovery')
             if self.active or self.landing or (self.airborne and not self.stopped):
                 raise Rejected('vehicle is not stopped')
+            if transfer:
+                self.retired.add(self.session)
+            if data.get('operator_token'):
+                self.operator_token = data['operator_token']
+                self.operator_session = sid
             self.session, self.lease_at = sid, now
             return {'ok': True}
+        if op in ('operator_heartbeat','operator_land'):
+            if not self.operator_token or data.get('operator_token') != self.operator_token:
+                raise Rejected('invalid operator token')
+            if op == 'operator_heartbeat':
+                if self.session != self.operator_session:
+                    # An operator must never keep a delegated Agent lease alive.
+                    return {'ok': True, 'delegated': True}
+                self.lease_at = now
+                return {'ok': True}
+            sid,tid = data['session_id'],data['task_id']
+            if tid in self.operator_land_requests:
+                result = self.operator_land_requests[tid]
+                if result['session_id'] != sid:
+                    raise Rejected('operator request identity mismatch')
+                return result.copy()
+            if tid in self.tasks:
+                if self.tasks[tid]['session_id'] != sid:
+                    raise Rejected('operator request identity mismatch')
+                return {'ok': True,'session_id':sid,'task_id':tid}
+            if self.manual or not self.fresh(now):
+                raise Rejected('manual takeover or stale telemetry')
+            if sid in self.retired:
+                raise Rejected('retired operator session')
+            if self.session and self.session != sid:
+                self.retired.add(self.session)
+            self.session = self.operator_session = sid
+            self.lease_at = now
+            if self.landing and self.active and self.tasks[self.active]['kind'] == 'land':
+                # Adopt an already accepted AUTO.LAND without resending the mode request.
+                self.tasks[self.active]['session_id'] = sid
+                result = {'ok': True,'session_id':sid,'task_id':self.active}
+            else:
+                result = dict(self.command('land',data,now),session_id=sid)
+            self.operator_land_requests[tid] = result
+            return result.copy()
         self.owner(data.get('session_id'), now)
         if op == 'heartbeat':
             self.lease_at = now
             return {'ok': True}
         if op == 'release':
+            if self.session == self.operator_session:
+                self.operator_token = self.operator_session = None
+                self.operator_land_requests.clear()
             self.retired.add(self.session)
             self.session = None
             self.fail('session released')
@@ -339,6 +396,10 @@ class FlightCore:
                 raise Rejected('cannot initialize during active flight task')
             if not self.fresh(now) or self.manual or not data.get('flight_authorized'):
                 raise Rejected('preflight not ready or manual takeover latched')
+            if self.operator_token and self.session != self.operator_session:
+                if not self.initialized:
+                    raise Rejected('operator initialization required')
+                return {'ok': True, 'message': 'existing operator initialization retained'}
             self.initialized = True
             self.enabled = True
             self.hold = self.pose.copy()
@@ -373,6 +434,8 @@ class FlightCore:
             op = 'navigate'
         if op not in ('navigate','takeoff','land'):
             raise Rejected('unsupported command')
+        if op == 'takeoff' and self.operator_token and self.session != self.operator_session:
+            raise Rejected('takeoff reserved for operator')
         if self.manual or not self.fresh(now):
             raise Rejected('manual takeover or stale telemetry')
         if op == 'land':

@@ -43,6 +43,9 @@ class OwlEgoController:
         self.requests = {}
         self.session = None
         self.session_requests = {}
+        self.operator_token = None
+        self.operator_session = None
+        self.operator_requests = {}
         self.frame_size = None
         self.hw.start()  # passive observations before session/init
 
@@ -91,12 +94,12 @@ class OwlEgoController:
             raise entry['error']
         return copy.deepcopy(entry['result'])
 
-    def handle_http(self, method, path, data):
+    def handle_http(self, method, path, data, *, local_operator=False):
         gets = {'/v21/capabilities','/v21/observation','/v21/navigation/status',
                 '/health','/get_pose','/motion_tolerances'}
         posts = {'/v21/session','/v21/heartbeat','/v21/session/release',
                  '/v21/navigation','/v21/navigation/cancel','/init','/takeoff',
-                 '/move_relative_xyz_yaw','/land'}
+                 '/move_relative_xyz_yaw','/land','/v21/operator/land'}
         if path not in gets | posts:
             raise ApiError('unsupported owl_ego endpoint',404)
         if (method == 'GET') != (path in gets):
@@ -105,7 +108,7 @@ class OwlEgoController:
             if path == '/v21/capabilities':
                 return dict(ok=True,backend='owl_ego',protocol_version=1,async_navigation=True,
                             cancel_and_hold=True,synchronized_observation=True,
-                            control_lease=True,relative_xyz_yaw=True,software_takeoff=True)
+                            control_lease=True,relative_xyz_yaw=True,software_takeoff=True,operator_override=True)
             if path == '/v21/observation':
                 result = self.observation()
                 with self.lock:
@@ -127,7 +130,14 @@ class OwlEgoController:
             task = snap['tasks'][tid]
             return {k:v for k,v in dict(ok=True,**task).items()
                     if k in ('ok','task_id','status','stopped','error','generation','timing_s','diagnostics','execution_error','takeoff_reference','localization_error')}
+        if path == '/v21/operator/land':
+            return self._operator_land(data,local_operator)
         if path == '/v21/session':
+            operator = data.get('operator',False)
+            if type(operator) is not bool:
+                raise ApiError('operator must be boolean',400)
+            if operator and not local_operator:
+                raise ApiError('operator access requires loopback connection',403)
             rid = data.get('request_id')
             try:
                 uuid.UUID(rid)
@@ -142,20 +152,56 @@ class OwlEgoController:
                         raise ApiError('session has expired; request cannot revive it')
                     return result.copy()
                 sid = uuid.uuid4().hex
-                self._command('acquire',session_id=sid)
+                token = uuid.uuid4().hex if operator else None
+                self._command('acquire',session_id=sid,**({'operator_token':token} if operator else {}))
                 self.session = sid
                 self.frame_size = None
                 result = dict(ok=True,session_id=sid)
+                if operator:
+                    self.operator_token,self.operator_session = token,sid
+                    result['operator_token'] = token
                 self.session_requests[rid] = (copy.deepcopy(data),result)
                 event = threading.Event()
                 event.set()
                 self.requests[(sid,rid)] = dict(body=json.dumps([path,data],sort_keys=True),result=result,event=event)
                 return result
         if path in ('/v21/heartbeat','/v21/session/release'):
+            if path.endswith('heartbeat') and self.operator_token and data.get('session_id') == self.operator_session:
+                return self._command('operator_heartbeat',operator_token=self.operator_token)
             self._owner(data)
             op = 'heartbeat' if path.endswith('heartbeat') else 'release'
-            return self._command(op,session_id=self.session)
+            # Use the request's owner, never a new owner installed by a concurrent override.
+            result = self._command(op,session_id=data['session_id'])
+            if op == 'release' and data['session_id'] == self.operator_session:
+                self.operator_token = self.operator_session = None
+            return result
         return self._idempotent(path,data,lambda:self._mutate(path,data))
+
+    def _operator_land(self,data,local_operator):
+        if not local_operator:
+            raise ApiError('operator access requires loopback connection',403)
+        rid = data.get('request_id')
+        try: uuid.UUID(rid)
+        except (ValueError,TypeError,AttributeError):
+            raise ApiError('request_id must be UUID',400)
+        with self.lock:
+            if not self.operator_token or data.get('operator_token') != self.operator_token:
+                raise ApiError('invalid operator token',403)
+            key = (self.operator_token,rid)
+            body = json.dumps(data,sort_keys=True,allow_nan=False)
+            entry = self.operator_requests.get(key)
+            if entry and entry['body'] != body:
+                raise ApiError('request_id reused with different body')
+            if entry is None:
+                entry = dict(body=body,session_id=uuid.uuid4().hex,task_id='nav-'+uuid.uuid4().hex)
+                self.operator_requests[key] = entry
+            if 'result' not in entry:
+                result = self._command('operator_land',operator_token=self.operator_token,
+                    session_id=entry['session_id'],task_id=entry['task_id'])
+                if self.hw.snapshot().get('session_id') == result['session_id']:
+                    self.session = self.operator_session = result['session_id']
+                entry['result'] = result
+            return copy.deepcopy(entry['result'])
 
     def _mutate(self, path, data):
         sid = data['session_id']

@@ -1,9 +1,44 @@
 # Robot 端状态
 
-维护方：OWL Robot 端。更新：2026-09-10。
+维护方：OWL Robot 端。更新：2026-09-11。
 最新回复：[robot-002](messages/robot-002.md)，对应 [agent-002](messages/agent-002.md)。
 
 ## 当前结论
+
+**最新实飞日志复核（2026-09-11 09:44–09:47）：接入/中止可用，降落任务因租约过期失败。**
+用户提供运行场景；本轮只读分析现有录制，未发飞行指令或修改运行配置。
+09:46:13控制拥有者由operator变为agent；前向导航被取消并确认停止，随后返回类导航及
+六次运动均arrived。09:46:44.421 Agent会话的land受理，任务0.893 s后因
+`control lease expired`失败；原始FCU记录09:46:45.347为AUTO.LAND，09:46:49.754
+ON_GROUND，09:46:52.345 disarmed，实际已落地。缺少Windows Agent心跳/异常日志，
+只能确认5 s内没有成功续租，不能确定是客户端提前停心跳、阻塞还是网络原因。
+Agent须在阻塞land及落地等待期间持续独立心跳，确认完成后再close/release。
+TRACK期间目标Z并非固定：99.53→117.33→129.77→138.24→141.31→136.90 cm，
+降落前实测最高152.26 cm。非零相对Z按实测起点计算，叠加高度跟踪正偏差会使后续
+目标继续升高；仍需结合Agent原始动作及视觉日志分析，不能宣称底层高度偏差已修复。
+未观察到TRACK后返回P/继续B的任务，不能认定完整路线通过。
+证据：`logs/owl_diagnostics/agent_20260911-094506/joint_flight_analysis.json`，
+详细时间线及对端待查项见[robot-002](messages/robot-002.md)。录制已证明新接入能力实际运行，
+下面“未重启/未实飞”仅为当时实现验证的范围，不再代表当前部署状态。
+
+**最新联合调试模式（2026-09-11）：console起飞，Agent自动接入，本机land抢占。**
+用户不需要显式交接：console init/takeoff后保持打开，Agent在起飞停稳且无任务、
+当前权限/传感器正常时用原POST /v21/session取得独立运控租约。保留高度参考和epoch，
+console旧心跳结束且不替Agent续租；Agent失联5 s仍停止。本机console land通过受限
+操作员接口原子撤销Agent会话，抢占导航/阻塞相对运动并复用AUTO.LAND；旧请求不能
+取消降落或释放新租约。遥控接管/新鲜遥测要求及实际落地判定保留。
+
+Robot实现与接口契约已更新，Agent实现/状态未改。Agent需按已起飞模式接入，跳过
+自身起飞，但保留正常任务结束或明确恢复时的/land；用户已确认两端均可降落。
+Agent降落须保持会话/心跳至确认落地再release。识别operator_supervised/control_owner及降落抢占，
+停止任务、不自动重新获取会话；具体见robot-002最新开头。尚未重启真实bridge/server
+或实飞；落地后重启bridge、HTTP server、console才能加载这次两端协作能力。
+
+本次验证：105项Robot、38项客户端/console回归通过；独立master11428真实EGO＋mock
+FCU三轮自动接入/操作员降落全部通过，覆盖导航抢占、Agent断心跳后降落、阻塞相对
+运动抢占。master11429九类故障回归通过，monitor_errors=[]。最终运行代码哈希与
+三轮记录一致，16个HTTP端点清单与实现一致。证据 `logs/owl_operator_agent/verification.json`。
+这些是实际console＋HTTP Agent模拟器，不冒充Windows Agent/模型联调或本次实飞。
 
 **当前阶段：Robot运控接口交接完成，进入Agent适配与联调（2026-09-10）。**
 用户确认起飞、基础运控和中止已可用，并反馈末端余量改为5 s后的中止测试通过；

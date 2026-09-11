@@ -208,11 +208,14 @@ class Node:
                          (data['relative'][2] if op=='relative' else self.c['control']['takeoff_height_m']))
                     if not (op=='takeoff' and self.core.airborne) and not 0 <= z < self.ceiling:
                         raise Rejected('target altitude outside planner ground/ceiling bounds')
+                was_landing = self.core.landing
                 result = self.core.command(op,data,now)
                 if op == 'takeoff' and data.get('auto_arm') and self.core.active == data['task_id']:
                     self.pending_fcu = ('takeoff',data['task_id'],now)
                 if op == 'land' and self.core.landing:
                     self.pending_fcu = ('land',data['task_id'],now)
+                if op == 'operator_land' and not was_landing and self.core.landing and self.core.active == result['task_id']:
+                    self.pending_fcu = ('land',result['task_id'],now)
                 # Publish ownership immediately so session acquisition is observable.
                 result['_snapshot'] = self.publish_status(now)
                 return CommandResponse(json=json.dumps(result))

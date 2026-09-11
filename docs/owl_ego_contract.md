@@ -1,6 +1,6 @@
 # OWL EGO / Agent v21 HTTP contract — protocol version 1
 
-Updated: 2026-09-10. This is the shared interface specification for the current
+Updated: 2026-09-11. This is the shared interface specification for the current
 Robot implementation. It consolidates the earlier amendments; implementation
 history and test evidence remain in [robot-002](collab/messages/robot-002.md).
 The Agent client in `src/robot_client/owl_ego.py` still needs the adaptations
@@ -10,8 +10,9 @@ Robot availability does not mean the current Agent is already compatible.
 Robot runs on OWL; Agent runs on the Windows computer and calls Robot over Wi-Fi.
 Agent owns route decisions, detection/TRACK and DA3 depth. Robot owns FAST-LIO
 obstacle input, EGO, flight execution, cancellation and control authority.
-Only one client may own a control session; there is no API for transferring a
-live session between clients.
+Only one motion session is valid at a time. Optional local operator supervision
+allows automatic initial transfer to Agent and a separate landing override,
+without sharing or extending the Agent's lease. See the operator section below.
 
 ## Endpoint inventory
 
@@ -25,7 +26,7 @@ for example `http://192.168.2.20:8765` if that remains its configured address.
 | GET | /get_pose | None | `{ok:true,pose:{x,y,z,yaw},localization_epoch}` |
 | GET | /motion_tolerances | None | `{ok:true,motion_tolerances:{...}}` |
 | GET | /v21/observation | None | Synchronized JPEG, exposure pose and geometry |
-| POST | /v21/session | `{request_id}` | `{ok:true,session_id}`; does not arm |
+| POST | /v21/session | `{request_id,operator?}` | `{ok:true,session_id}`; optional local operator_token; does not arm |
 | POST | /v21/heartbeat | `{session_id}` | `{ok:true}` |
 | POST | /v21/session/release | `{session_id}` | `{ok:true}`; revoke session, request hold |
 | POST | /init | `{session_id,request_id}` | `{ok:true,message}`; initialize without arming |
@@ -35,13 +36,14 @@ for example `http://192.168.2.20:8765` if that remains its configured address.
 | POST | /v21/navigation/cancel | `{session_id,request_id,task_id}` | Immediate acceptance: `{ok:true,task_id}` |
 | POST | /move_relative_xyz_yaw | `{session_id,request_id,x,y,z,yaw,timeout_s?}` | Blocking flight completion or error |
 | POST | /land | `{session_id,request_id}` | Preempt motion; block for confirmed landing or error |
+| POST | /v21/operator/land | Local only: `{operator_token,request_id}` | Immediate `{ok:true,session_id,task_id}`; retire Agent authority and monitor landing under new operator lease |
 
 Capabilities:
 ~~~json
 {"ok":true,"backend":"owl_ego","protocol_version":1,
  "async_navigation":true,"cancel_and_hold":true,
  "synchronized_observation":true,"control_lease":true,
- "relative_xyz_yaw":true,"software_takeoff":true}
+ "relative_xyz_yaw":true,"software_takeoff":true,"operator_override":true}
 ~~~
 
 No owl_ego HTTP aliases exist for `/move_relative_xyz`, `/rotate`, `/stop`,
@@ -51,8 +53,9 @@ endpoint, task cancellation, session release, and synchronized observation.
 ## Ownership, retries and time budgets
 
 - Every mutation except session acquisition requires the current session.
-  Acquisition rejects another live owner, active tasks or landing; when airborne
-  it also requires measured stopping.
+  Acquisition rejects another live Agent owner, active tasks or landing; when
+  airborne it also requires measured stopping. The operator-to-Agent transition
+  below is the only exception to rejecting an existing live owner.
 - `request_id` must be a UUID. For init/takeoff/navigation/cancel/relative/land,
   keep the same ID and identical body when retrying the same uncertain request.
   Robot caches results/errors within the session. Reusing an ID with a different
@@ -87,6 +90,71 @@ endpoint, task cancellation, session release, and synchronized observation.
   its endpoint with zero velocity/acceleration feedforward while yaw settles.
   Complete as soon as arrival is confirmed; never extrapolate or wait a fixed
   number of seconds to declare success.
+
+## 2026-09-11 local operator supervision and automatic Agent access
+
+The user-selected workflow is local operator initialization/takeoff, followed by
+Agent navigation/TRACK; the operator can request landing at any time. There is
+no extra user handoff command and no shared heartbeat/session between clients.
+
+When operator_override is advertised, a local client may acquire with
+`{request_id,operator:true}`. Robot returns an additional opaque operator_token.
+Operator acquisition and /v21/operator/land require an actual loopback connection
+(127.0.0.1 or ::1), not a forwarded header. The override also requires the token;
+an arbitrary local client cannot invoke it without that token. Normal Wi-Fi
+Agent requests omit operator and never receive the operator token.
+
+The operator initially owns the ordinary motion session and heartbeats it. Once
+initialized, armed OFFBOARD, airborne, fresh, stopped, without an active task or
+landing/manual takeover, Agent's ordinary POST /v21/session atomically acquires
+a new session and retires the operator's motion session. Hold height, yaw,
+initialization, epoch and stopping evidence are preserved. A second Agent is
+rejected. A concurrent operator movement and Agent acquisition are serialized;
+they cannot both obtain motion authority.
+
+The old operator heartbeat returns `{ok:true,delegated:true}` without renewing
+the Agent's lease; the local client stops that heartbeat. Agent must send its
+own 0.5 s heartbeats. Its loss still expires after 5 s and stops motion even if
+the operator application remains open. Expiry/release does not automatically
+return navigation authority or reopen acquisition; operator recovery is required.
+
+After acquiring, Agent may call /init to acknowledge existing initialization;
+in supervised mode this preserves the established references. Agent must not
+initiate takeoff: it is already airborne, and supervised Agent takeoff requests
+are rejected. If initialization has been lost, Agent cannot reinitialize it by
+itself. Agent may use its owned /land for normal mission completion or explicit
+recovery. The user confirmed that takeoff belongs to the operator, but both
+operator and Agent may initiate landing. Keep Agent heartbeat active until
+landing confirmation, then release its session; do not release before requesting
+Agent-owned landing. This supersedes the earlier recommendation to skip Agent's
+normal final landing. The operator's landing override remains available.
+
+POST /v21/operator/land atomically retires the Agent session, fails its active
+movement with `preempted by landing`, fences old trajectory ownership, and reuses
+the ordinary AUTO.LAND execution. It returns a new operator session_id and the
+landing task_id immediately. The operator heartbeats that new session and polls
+the landing task; new requests from the retired Agent cannot move, cancel the
+landing or release its lease. If landing was already underway, adopt its task
+without issuing a second AUTO.LAND request. Repeating the same request_id/body
+returns the original result, including after an uncertain transport outcome.
+
+The token grants only local landing override, not concurrent navigation or a
+pilot bypass. Fresh telemetry and the existing manual takeover checks apply.
+Accepted landing still survives localization reset and requires fresh actual
+ON_GROUND/disarmed confirmation. Robot server/bridge restart revokes the token;
+release of the operator's own session revokes supervision. Closing the local
+application after delegation does not cancel Agent motion or keep its lease alive.
+
+Optional health fields: `operator_supervised` (boolean) and `control_owner`
+(`operator`, `agent`, `none`). They describe current ownership, not a new grant.
+Agent should identify operator landing/preemption using these fields plus task
+status/landing, end its current mission, and tolerate rejection of old-session
+cleanup. Do not reacquire, send another takeoff, or fight the operator's landing.
+No operator endpoint or token needs to be implemented in the Agent client.
+
+Absent operator:true, existing exclusive sessions and Agent-operated takeoff
+retain their earlier behavior. This is an optional protocol-1 extension, with
+Robot tests recorded in robot-002; actual Agent adaptation is still pending.
 
 ## Coordinates and altitude reference
 
@@ -191,6 +259,7 @@ not physically zero velocity. Repeated polls do not accumulate stable time.
 | odom_ok | Fresh control odometry |
 | rgb_ok | A valid synchronized observation can currently be assembled |
 | active_task_id | Current active task or null |
+| operator_supervised / control_owner | Optional local supervision / current owner operator, agent or none |
 | planner_state | starting / ready / lost / not_required, as below |
 | planner_ok | True only for ready; false is expected for starting and not_required |
 | stopped | Current measured pose-window stability, distinct from historical task stopped |
@@ -251,6 +320,9 @@ Check `software_takeoff:true` before using it. Absent/false `auto_arm` preserves
 pilot-controlled mode/arming and cannot provide unattended ground startup.
 Current Agent BaseClient._takeoff sends an empty body before lease injection;
 it must be adapted if software takeoff is wanted.
+This ground-start option does not apply to the user's operator-supervised flow:
+Agent attaches after takeoff and must skip its own takeoff; normal final landing
+by Agent remains supported and authorized by the user.
 
 Robot performs bounded hold preparation, OFFBOARD selection and ordinary arming,
 then direct +1 m takeoff at configured reference speed/lead limits. Preserve
@@ -335,6 +407,7 @@ than reducing them to an opaque exception string.
 | HTTP | Meaning | Action |
 | --- | --- | --- |
 | 400 | Invalid request types/numbers/UUID | Correct request; do not retry as sensor absence |
+| 403 | Nonlocal operator request or invalid operator token | Operator-only facility; Agent must not use it |
 | 404 / 405 | Unknown endpoint/task or wrong method | Correct caller |
 | 409 | Ownership, readiness, epoch, busy, motion failure or request-ID conflict | Inspect error/task/health; not blanket retryable |
 | 503 | Bridge unavailable, pending duplicate or temporary observation absence | Retry observations only with the explicit code below |
@@ -354,9 +427,11 @@ ends the attempt; epoch changes and invalid geometry are not missing-frame retri
 ## Agent integration sequence and outstanding adaptation
 
 1. Validate capabilities, motion tolerances, geometry opt-in and DA3 on observation
-   before acquiring authority. Ensure no other client owns the session.
-2. Acquire a session, heartbeat independently, init and explicitly select software
-   takeoff if required. Wait for flight completion and current stop confirmation.
+   before acquiring authority. In supervised mode wait for the operator's completed
+   takeoff and current stop; do not compete with another Agent session.
+2. Acquire a session and heartbeat independently. For supervised attachment,
+   retain/acknowledge initialization and skip takeoff. For a separately configured
+   Agent-operated ground start, init and explicitly select software takeoff.
 3. Convert B into public world coordinates, submit navigation with saved epoch,
    retain task_id, and capture/infer concurrently with health/task polling.
 4. Save exposure P including yaw/epoch/frame_id. On detection, cancel B and wait
@@ -365,7 +440,10 @@ ends the attempt; epoch changes and invalid geometry are not missing-frame retri
    the combined relative endpoint, waiting for each completion/current stop.
 6. Return to the same full P, then submit a new navigation to the unfinished B.
    Route index, target identity/deduplication and detection-result age belong to Agent.
-7. Land when intended, confirm completion, then release the session.
+7. Agent may land on mission completion: keep its lease, POST /land, confirm
+   completion, then release. If leaving landing to the operator, finish/cancel
+   work and confirm stopping before release. If the operator preempts, stop the
+   mission without reacquiring or attempting another landing with the retired lease.
 
 The current Agent checkout still requires:
 - explicit approximate-geometry decoding/metadata logging;
@@ -375,6 +453,8 @@ The current Agent checkout still requires:
 - accepted-landing handling across epoch changes and fresh mission initialization;
 - retry IDs preserved for uncertain requests; use only supported motion endpoints;
 - acceptance of zero-Z reference semantics and logging sufficient for XYZ diagnosis.
+- supervised airborne attachment and recognition of operator landing/retired lease,
+  without automatic takeoff or reacquisition; retain Agent's normal final landing.
 
 Compared with the original contract, endpoint shapes and units are retained.
 Additive capabilities/status/error metadata and software takeoff are backward

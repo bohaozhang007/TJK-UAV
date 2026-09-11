@@ -728,6 +728,112 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(self.c.tasks['land']['status'],'arrived')
 
 
+class OperatorCoreTest(unittest.TestCase):
+    def setUp(self):
+        self.c=FlightCore(CONFIG['control']);self.now=1.
+        for _ in range(8):self.feed()
+        self.call('acquire',session_id='console',operator_token='secret')
+        self.call('init',session_id='console',flight_authorized=True)
+
+    def feed(self):
+        self.now+=.1
+        self.c.update_extended_state(2,self.now)
+        self.c.update_state(True,True,True,'OFFBOARD',self.now)
+        self.c.odometry([0,0,1],.3,[0,0,-.124],0,self.now,'world',self.now)
+
+    def call(self,op,**data):return self.c.command(op,data,self.now)
+
+    def agent(self):self.call('acquire',session_id='agent',flight_authorized=True)
+
+    def navigate(self):
+        return self.call('navigate',session_id='agent',task_id='move',goal=[1,0,1,.3],localization_epoch=self.c.epoch)
+
+    def land(self,tid='landing',sid='landing-owner'):
+        return self.call('operator_land',operator_token='secret',session_id=sid,task_id=tid)
+
+    def test_automatic_transfer_preserves_height_and_epoch(self):
+        self.c.hold[2]=.9;hold=self.c.hold.copy();epoch=self.c.epoch
+        self.agent()
+        self.call('init',session_id='agent',flight_authorized=True)
+        np.testing.assert_equal(self.c.hold,hold);self.assertEqual(self.c.epoch,epoch)
+        self.assertEqual(self.c.status(self.now)['control_owner'],'agent')
+        with self.assertRaises(Rejected):self.call('acquire',session_id='second-agent')
+        with self.assertRaises(Rejected):self.call('takeoff',session_id='agent')
+        with self.assertRaises(Rejected):self.call('release',session_id='console')
+
+    def test_no_transfer_on_ground_busy_or_unstable(self):
+        with self.assertRaises(Rejected):self.call('acquire',session_id='agent',flight_authorized=False)
+        self.c.last_error='motion failed'
+        with self.assertRaises(Rejected):self.agent()
+        self.c.last_error=None
+        self.c.airborne=False
+        with self.assertRaises(Rejected):self.agent()
+        self.c.airborne=True;self.c.stopped=False
+        with self.assertRaises(Rejected):self.agent()
+        self.c.stopped=True;self.c.active='busy'
+        with self.assertRaises(Rejected):self.agent()
+        self.assertEqual(self.c.session,'console')
+
+    def test_operator_heartbeat_never_extends_agent_lease(self):
+        self.agent();self.navigate();lease=self.c.lease_at
+        for _ in range(52):
+            self.feed()
+            self.assertTrue(self.call('operator_heartbeat',operator_token='secret')['delegated'])
+        self.assertEqual(self.c.lease_at,lease)
+        self.assertIsNone(self.c.session)
+        self.assertEqual(self.c.tasks['move']['error'],'control lease expired')
+        with self.assertRaises(Rejected):self.call('acquire',session_id='replacement')
+        self.assertEqual(self.land()['task_id'],'landing')
+
+    def test_override_fences_agent_and_old_trajectory(self):
+        self.agent();self.navigate();generation=self.c.generation
+        result=self.land()
+        self.assertEqual(self.c.tasks['move']['status'],'failed')
+        self.assertEqual(self.c.session,'landing-owner');self.assertTrue(self.c.landing)
+        for op,data in [('heartbeat',{}),('release',{}),('cancel',{'task_id':'move'})]:
+            with self.assertRaises(Rejected):self.call(op,session_id='agent',**data)
+        self.assertFalse(self.c.trajectory_received(generation,SimpleNamespace(id=1),self.now,self.now))
+        self.assertEqual(self.land(),result)
+        self.assertEqual(len(self.c.tasks),2)
+        with self.assertRaises(Rejected):self.call('cancel',session_id='landing-owner',task_id='landing')
+
+    def test_adopt_existing_land_and_replay_without_new_task(self):
+        self.agent();self.call('land',session_id='agent',task_id='agent-land')
+        result=self.land();self.assertEqual(result['task_id'],'agent-land')
+        self.assertEqual(self.land(),result)
+        self.assertEqual(len(self.c.tasks),1)
+        self.c.update_extended_state(1,self.now)
+        self.c.update_state(True,False,False,'AUTO.LAND',self.now)
+        self.assertEqual(self.land(),result)
+        self.assertEqual(len(self.c.tasks),1)
+
+    def test_override_respects_pilot_stale_state_and_token(self):
+        self.agent();self.navigate()
+        for mutation in ['manual','stale','token']:
+            self.c.manual=mutation=='manual'
+            self.c.state_at=self.now-3 if mutation=='stale' else self.now
+            with self.assertRaises(Rejected):
+                self.call('operator_land',operator_token='bad' if mutation=='token' else 'secret',session_id='new',task_id='land')
+            self.assertEqual(self.c.session,'agent');self.assertNotIn('land',self.c.tasks)
+
+    def test_landing_reset_and_operator_release(self):
+        self.agent();self.navigate();self.land()
+        self.c.reset('simulated mismatch')
+        self.assertTrue(self.c.landing);self.assertIsNone(self.c.hold)
+        self.c.update_extended_state(0,self.now)
+        self.c.update_state(True,False,False,'AUTO.LAND',self.now)
+        self.assertNotEqual(self.c.tasks['landing']['status'],'arrived')
+        self.c.update_extended_state(1,self.now)
+        self.assertEqual(self.c.tasks['landing']['status'],'arrived')
+        self.call('release',session_id='landing-owner')
+        self.assertIsNone(self.c.operator_token)
+        with self.assertRaises(Rejected):self.land()
+
+    def test_restart_revokes_operator_token(self):
+        self.call('robot_restart')
+        with self.assertRaises(Rejected):self.land()
+
+
 class PlannerHandshakeTest(unittest.TestCase):
     def test_private_log_confirmation_requires_exact_state_and_map(self):
         planner=PlannerProcess.__new__(PlannerProcess)
@@ -930,6 +1036,10 @@ class FakeHardware:
             if self.session:return dict(ok=False,error='busy')
             self.session=data['session_id']
         if op=='release':self.session=None
+        if op=='operator_land':
+            self.session=data['session_id']
+            self.tasks[data['task_id']]=dict(task_id=data['task_id'],status='executing',stopped=False)
+            return dict(ok=True,session_id=self.session,task_id=data['task_id'])
         if op in ('navigate','relative'):self.tasks[data['task_id']]=dict(task_id=data['task_id'],status='executing',stopped=False)
         if op=='cancel':self.tasks[data['task_id']].update(status='cancelled',stopped=True)
         return dict(ok=True,**({'task_id':data['task_id']} if 'task_id' in data else {}))
@@ -953,6 +1063,35 @@ class HttpTest(unittest.TestCase):
         self.assertNotEqual(self.rpc('GET','/v21/observation')[0],200)
         self.assertEqual(self.rpc('GET','/takeoff')[0],405)
         self.assertEqual(self.rpc('POST','/velocity',{})[0],404)
+
+    def test_operator_access_requires_actual_loopback_and_token(self):
+        for path,body in [('/v21/session',dict(operator=True,request_id=str(uuid.uuid4()))),
+                          ('/v21/operator/land',dict(operator_token='bad',request_id=str(uuid.uuid4())))]:
+            with self.assertRaises(ApiError) as error:
+                self.c.handle_http('POST',path,body,local_operator=False)
+            self.assertEqual(error.exception.code,403)
+        self.assertEqual(self.rpc('POST','/v21/operator/land',dict(operator_token='bad',request_id=str(uuid.uuid4())))[0],403)
+
+    def test_late_release_uses_original_request_session(self):
+        original=self.c._owner
+        def checked_then_overridden(data):
+            original(data)
+            self.c.session='operator-landing'
+        with patch.object(self.c,'_owner',side_effect=checked_then_overridden):
+            self.rpc('POST','/v21/session/release',dict(session_id=self.sid))
+        self.assertEqual(self.hw.commands[-1],('release',dict(session_id=self.sid)))
+
+    def test_operator_land_http_duplicate_does_not_preempt_twice(self):
+        self.c.operator_token='secret';self.c.operator_session='old-operator'
+        body=dict(operator_token='secret',request_id=str(uuid.uuid4()))
+        first=self.rpc('POST','/v21/operator/land',body)
+        self.assertEqual(first[0],200)
+        self.assertEqual(first,self.rpc('POST','/v21/operator/land',body))
+        self.assertEqual(sum(op=='operator_land' for op,_ in self.hw.commands),1)
+        body['extra']='changed'
+        self.assertEqual(self.rpc('POST','/v21/operator/land',body)[0],409)
+        self.assertEqual(self.rpc('POST','/v21/session/release',dict(session_id=self.sid))[0],409)
+        self.assertEqual(self.hw.session,first[1]['session_id'])
     def test_idempotency_and_mismatch(self):
         body=self.body(localization_epoch='e',pose=dict(x=0,y=100,z=100,yaw=0))
         a=self.rpc('POST','/v21/navigation',body)
