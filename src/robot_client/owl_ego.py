@@ -147,6 +147,9 @@ class OwlEgoClient(BaseClient):
         self._checked_recovery_version = 0
         self._last_task_id = None
         self._motion_failure = None
+        self._observation_ready = threading.Event()
+        self._observation_ready.set()
+        self._observation_error = None
 
     def rpc(self, method, path, payload=None, *, timeout_s=3.0):
         result = self._request_json(method, path, payload, timeout_s=timeout_s)
@@ -254,6 +257,8 @@ class OwlEgoClient(BaseClient):
         self._lease_recovering = False
         self._lease_failures = self._recovery_version = self._checked_recovery_version = 0
         self._last_task_id = self._motion_failure = None
+        self._observation_error = None
+        self._observation_ready.set()
         self._rgb_unavailable_since = self._starting_task = self._starting_since = None
         if not math.isfinite(self.timeout_s) or self.timeout_s <= 90:
             raise ValueError("Transport timeout must exceed the 90 s landing budget")
@@ -288,6 +293,7 @@ class OwlEgoClient(BaseClient):
 
     def _request_json(self, method, path, payload=None, **kwargs):
         if method == "POST" and path in {"/init", "/takeoff", "/v21/navigation", "/move_relative_xyz_yaw"}:
+            self._wait_observation_recovery()
             self.check_lease()
             if self._motion_failure is not None:
                 raise RuntimeError(f"Motion failure latched: {self._motion_failure}")
@@ -467,19 +473,57 @@ class OwlEgoClient(BaseClient):
         self.event("landed", result=result)
         return result
 
+    def _wait_observation_recovery(self):
+        while not self._observation_ready.wait(0.05):
+            self.check_lease()
+        if self._observation_error is not None:
+            raise RuntimeError(f"Observation recovery failed: {self._observation_error}")
+
     def observe(self):
+        try:
+            obs = self._observe_with_recovery()
+        except Exception as exc:
+            self._observation_error = exc
+            self.event("observation_failed", error=str(exc))
+            raise
+        else:
+            if not self._observation_ready.is_set():
+                self.event("observation_recovered", frame_id=obs.frame_id)
+            return obs
+        finally:
+            # Failure remains latched for motion; cancellation/landing bypass it.
+            self._observation_ready.set()
+
+    def _observe_with_recovery(self):
         self.check_lease()
-        deadline = time.monotonic() + self.observation_retry_s
+        began = time.monotonic()
+        deadline = began + self.observation_retry_s
+        network_deadline = began + 2.0
+        attempts = 0
         while True:
             self.check_lease()
             started = time.monotonic()
+            if started >= deadline:
+                raise TimeoutError("Observation recovery budget exhausted")
+            attempts += 1
             try:
-                data = self.rpc("GET", "/v21/observation", timeout_s=max(0.001, deadline-started))
+                data = self.rpc("GET", "/v21/observation",
+                                timeout_s=min(0.5, deadline-started))
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Observation response exceeded recovery budget")
                 break
-            except RobotHTTPError as exc:
-                if not (exc.status == 503 and exc.error_code == "observation_unavailable"
-                        and exc.retryable and time.monotonic() + 0.05 < deadline):
+            except Exception as exc:
+                transport = self._transport_failure(exc)
+                transient = (isinstance(exc, RobotHTTPError) and exc.status == 503
+                             and exc.error_code == "observation_unavailable" and exc.retryable)
+                if transport:
+                    deadline = network_deadline
+                if not (transport or transient) or time.monotonic() + 0.05 >= deadline:
                     raise
+                self._observation_ready.clear()
+                self.event("observation_retry", attempt=attempts, error=str(exc),
+                           elapsed_s=time.monotonic()-began,
+                           remaining_s=deadline-time.monotonic())
                 time.sleep(0.05)
         obs = decode_observation(data,
                                  max_age_s=self.observation_max_age_s,

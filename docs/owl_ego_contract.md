@@ -455,6 +455,21 @@ Observation-specific responses:
 Retry must not block heartbeat, cancellation or flight checks. Persistent absence
 ends the attempt; epoch changes and invalid geometry are not missing-frame retries.
 
+Minimal transport recovery (2026-09-11, user-authorized cross-end patch): the
+Agent observation GET may retry recognized connection/time-out errors within
+2 s measured from the original observation attempt, with per-request timeout
+at most 0.5 s and 50 ms spacing. No request is issued after the remaining budget
+is exhausted; lease validation still takes precedence. Structured 503-only
+recovery retains observation_retry_s (default 0.5 s); a transport failure uses
+the fixed 2 s window. New motion waits during observation recovery, whereas
+heartbeat, status, cancellation and landing remain available. Only a freshly
+validated observation releases the temporary gate; final failure latches the
+motion gate until explicit new-session initialization. No motion is replayed.
+Image age/geometry/epoch checks are unchanged. Robot HTTP listener queue is 64;
+this absorbs connection bursts, not wireless outages. Existing Agent heartbeat
+recovery from agent-004 is retained. Offline verification is in robot-004;
+these changes require process reload and have not been flight-validated.
+
 ## Agent integration sequence and outstanding adaptation
 
 1. Validate capabilities, motion tolerances, geometry opt-in and DA3 on observation

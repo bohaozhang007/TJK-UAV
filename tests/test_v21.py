@@ -616,6 +616,91 @@ class CurrentContractTests(unittest.TestCase):
         self.assertIsNone(client.session_id)
 
 
+class ObservationNetworkRecoveryTests(unittest.TestCase):
+    def test_loopback_disconnect_then_observation_with_robot_server(self):
+        import socket
+        from robot.server import RobotHTTPServer
+        requests = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append(self.path)
+                if len(requests) == 1:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    return
+                body = json.dumps(wire_observation()).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+            def log_message(self, *args): pass
+        server = RobotHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            client = OwlEgoClient(port=server.server_port)
+            client.observe()
+            self.assertEqual(requests, ["/v21/observation"] * 2)
+            self.assertIsNone(client._observation_error)
+            self.assertEqual(server.request_queue_size, 64)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(2)
+
+    def test_timeout_then_fresh_observation(self):
+        client = OwlEgoClient()
+        client.rpc = Mock(side_effect=[TimeoutError("connect"), wire_observation()])
+        client.event = Mock()
+        result = client.observe()
+        self.assertEqual(result.frame_id, wire_observation()["frame_id"])
+        self.assertEqual(client.rpc.call_count, 2)
+        self.assertIsNone(client._observation_error)
+        self.assertTrue(client._observation_ready.is_set())
+        self.assertIn("observation_recovered", [c.args[0] for c in client.event.call_args_list])
+
+    def test_persistent_timeout_is_bounded_and_latched(self):
+        client = OwlEgoClient()
+        now = [100.]
+        def fail(*args, timeout_s, **kwargs):
+            self.assertLessEqual(timeout_s, .5)
+            now[0] += timeout_s
+            raise TimeoutError("connect")
+        client.rpc = Mock(side_effect=fail)
+        with patch("robot_client.owl_ego.time.monotonic", side_effect=lambda: now[0]), \
+             patch("robot_client.owl_ego.time.sleep", side_effect=lambda n: now.__setitem__(0, now[0]+n)):
+            with self.assertRaises(TimeoutError): client.observe()
+        self.assertLessEqual(now[0], 102.000001)
+        self.assertLessEqual(client.rpc.call_count, 4)
+        with self.assertRaisesRegex(RuntimeError, "Observation recovery failed"):
+            client._wait_observation_recovery()
+
+    def test_invalid_or_stale_observation_never_recovers(self):
+        for failure in (RobotHTTPError(409, "/v21/observation", "epoch changed"), ValueError("bad JSON")):
+            client = OwlEgoClient(); client.rpc = Mock(side_effect=failure)
+            with self.assertRaises(type(failure)): client.observe()
+            client.rpc.assert_called_once()
+        client = OwlEgoClient()
+        stale = wire_observation(); stale["age_s"] = 2.
+        client.rpc = Mock(side_effect=[TimeoutError("connect"), stale])
+        with self.assertRaises(ValueError): client.observe()
+        self.assertIsNotNone(client._observation_error)
+
+    def test_recovery_blocks_motion_but_not_cancel_or_land(self):
+        client = OwlEgoClient(); client._observation_ready.clear()
+        with patch.object(BaseClient, "_request_json", return_value={"ok": True}) as send:
+            done = threading.Event()
+            thread = threading.Thread(target=lambda: (
+                client._request_json("POST", "/v21/navigation", {}), done.set()))
+            thread.start()
+            try:
+                self.assertFalse(done.wait(.08)); send.assert_not_called()
+                client._request_json("POST", "/v21/navigation/cancel", {})
+                client._request_json("POST", "/land", {})
+                self.assertEqual(send.call_count, 2)
+            finally:
+                client._observation_ready.set(); thread.join(2)
+            self.assertTrue(done.is_set())
+            self.assertEqual(send.call_count, 3)
+
+
 class LeaseRecoveryTests(unittest.TestCase):
     def client(self):
         client=OwlEgoClient()

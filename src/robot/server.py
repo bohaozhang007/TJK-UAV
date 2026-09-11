@@ -21,6 +21,11 @@ from .config_loader import (
 from .keyboard_op import KeyboardOp, VelocityController
 
 
+class RobotHTTPServer(ThreadingHTTPServer):
+    # Allow bursts of observation, health and heartbeat TCP connections.
+    request_queue_size = 64
+
+
 class RobotController(VelocityController, Protocol):
     def init(self) -> dict[str, Any]: ...
 
@@ -395,7 +400,7 @@ def run_http_server(
         "video_stream_max_fps",
         minimum=ApiHandler.video_stream_min_fps,
     )
-    server = ThreadingHTTPServer((host, port), ApiHandler)
+    server = RobotHTTPServer((host, port), ApiHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
