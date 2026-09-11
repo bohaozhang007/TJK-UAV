@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Generate reviewable passive config from pinned upstream parameters, no ROS writes."""
+"""Build planner parameters and refresh repository artifact paths, no ROS writes."""
 import argparse
 import hashlib
+import re
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import yaml
@@ -26,9 +27,17 @@ params.update({'fsm/realworld_experiment':True,'fsm/fail_safe':False,
                'optimization/record_opt':False})
 # Depth topics are private and unused; fx/fy above are never observation calibration.
 (ws/'planner.yaml').write_text(yaml.safe_dump(params,sort_keys=True))
-c=yaml.safe_load((root/'src/robot/config/owl_ego.yaml').read_text())
+config_path=root/'src/robot/config/owl_ego.yaml'
+config_text=config_path.read_text()
+c=yaml.safe_load(config_text)
 binary=ws/'devel/lib/ego_planner/ego_planner_node'
 c['planner'].update(executable=str(binary),sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                     parameters=str(ws/'planner.yaml'))
-(ws/'owl_ego.yaml').write_text(yaml.safe_dump(c,sort_keys=False))
-print('Passive configuration:',ws/'owl_ego.yaml')
+# Preserve user control settings and comments; never generate a second Robot config.
+planner_block=yaml.safe_dump({'planner':c['planner']},sort_keys=False)
+updated,count=re.subn(r'^planner:\n.*?(?=^[^\s#]|\Z)',lambda _:planner_block,
+                      config_text,flags=re.MULTILINE|re.DOTALL)
+if count != 1:
+    raise RuntimeError('Expected one top-level planner section in Robot config')
+config_path.write_text(updated)
+print('Robot configuration (planner artifacts refreshed):',config_path)

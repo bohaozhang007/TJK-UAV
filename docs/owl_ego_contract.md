@@ -18,6 +18,17 @@ without sharing or extending the Agent's lease. See the operator section below.
 
 ## Endpoint inventory
 
+Robot configuration source (2026-09-11): `run_owl_ego.sh` defaults to repository
+`src/robot/config/owl_ego.yaml` for bridge, HTTP, checks and recording, and prints
+the resolved path on stderr. Explicit `OWL_EGO_CONFIG` still overrides it, with
+a notice that repository YAML changes will not apply. Unset old overrides to use
+the repository. `owl_ego_ws` stores compiled EGO artifacts and planner parameters;
+`configure.py` refreshes only the repository YAML's planner section, preserving
+control settings. It no longer generates a second Robot YAML. Pulling updated
+configuration requires restarting bridge and HTTP while grounded; no hot reload.
+Repository flight gates remain false until explicitly configured for deployment.
+No Agent HTTP adaptation is needed.
+
 HTTP JSON, port 8765 by default. Base URL is the Robot's reachable Wi-Fi address,
 for example `http://192.168.2.20:8765` if that remains its configured address.
 

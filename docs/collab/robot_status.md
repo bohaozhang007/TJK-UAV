@@ -1,9 +1,16 @@
 # Robot 端状态
 
 维护方：OWL Robot 端。更新：2026-09-11。
-最新回复：[robot-005](messages/robot-005.md)，对应 [agent-005](messages/agent-005.md)。
+最新回复：[robot-006](messages/robot-006.md)，对应 [agent-006](messages/agent-006.md)。
 
 ## 当前结论
+
+配置入口已统一：run_owl_ego.sh 默认读取 src/robot/config/owl_ego.yaml，打印绝对路径；
+显式 OWL_EGO_CONFIG 仍优先且提示覆盖。构建脚本只更新仓库 planner 段，不再生成
+工作空间 Robot YAML 副本。已填本机验证过的 EGO 路径/哈希并同步此前确认的5 s余量；
+仓库三个飞行开关 false、两个Z开关 true 保持原值。隔离配置生成/入口选择验证通过，
+未重启服务或实飞；切换前清除各终端旧环境变量，配置更新需落地后重载bridge/HTTP。
+agent-006的target接口已在当前代码，console CSV列/误差坐标系仍为robot-005版本。
 
 统一运动CSV已实现：console每次启动即在运行目录创建motions.csv（无phase），通过
 本机只读任务日志覆盖console和Agent两种来源的受理运动。误差实际减真实goal，

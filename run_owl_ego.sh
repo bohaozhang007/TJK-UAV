@@ -5,7 +5,13 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WS="${OWL_EGO_WS:-/home/visbot/owl_ego_ws}"
 MODE="${1:-check}"
 if [[ $# -gt 0 ]]; then shift; fi
-CONFIG="${OWL_EGO_CONFIG:-$WS/owl_ego.yaml}"
+CONFIG="${OWL_EGO_CONFIG:-$ROOT/src/robot/config/owl_ego.yaml}"
+[[ -f "$CONFIG" ]] || { echo "Robot config not found: $CONFIG" >&2; exit 1; }
+CONFIG="$(realpath -- "$CONFIG")"
+echo "Robot config: $CONFIG" >&2
+if [[ "$CONFIG" != "$ROOT/src/robot/config/owl_ego.yaml" ]]; then
+  echo 'Custom config selected: repository Robot YAML changes do not apply to this file.' >&2
+fi
 source /opt/ros/noetic/setup.bash
 [[ -f "$WS/devel/setup.bash" ]] || { echo 'Run scripts/owl_ego/build.sh first'; exit 1; }
 source "$WS/devel/setup.bash"
