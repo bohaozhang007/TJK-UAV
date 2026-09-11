@@ -10,6 +10,32 @@
 
 #### 对应FCU ULog已核实
 
+后续输入/时间戳审计（2026-09-11）：继续只读检查厂家FAST_LIO/MAVROS源码，并下载
+ULog固件hash对应的PX4源码至本录制`fcu/source/`，未改工作空间/飞控代码。
+FAST_LIO的publish_pose使用lidar_end_time；MAVROS vision_cb按world→map旋转XY，
+发送VISION_POSITION_ESTIMATE时保留header.stamp，Z仅ENU/NED翻转。708条ULog
+vehicle_visual_odometry与bag原始LIO高度逐条匹配，误差最大5.96e-8 m，没有高度比例
+或额外偏移。证据脚本audit_ev_timing.py、ev_timing.csv、ev_timing_summary.json。
+
+发现可复核的采样时间问题：原始采集到FCU收到中位37.910 ms、P95 63.633 ms、
+最大77.366 ms；但ULog timestamp_sample与接收timestamp仅差中位2.146微秒。
+采集时间在FCU侧被近似接收时间取代。对应源码Timesync::sync_stamp未收敛时返回
+hrt_absolute_time，和本日志一致；已收敛时应转换原始采集时间。
+ULog三路MAV_n_MODE均为0，Normal默认流不包含TIMESYNC；Onboard默认包含10 Hz。
+MAVROS主动请求只能证明本机对FCU时钟的估计，不能证明FCU侧同步已收敛。
+当前地面只读收到/mavros/timesync_status，RTT约3.136 ms，但FCU为另一次启动，
+不将其用作历史飞行同步证据。ULog没有当次每链路同步状态/运行流配置，故Normal配置
+是很强的线索，仍需核对对应链路是否存在运行时覆盖。
+
+优先可验证的修正方向：只在正确的机载MAVLink链路启用FCU主动TIMESYNC流，地面验证
+timestamp_sample恢复原采样时间，而非直接切换整套MAVLink模式或填固定EV_DELAY。
+本轮未发送改变流频率的命令或改参数；没有擅自执行此修正。完成地面时间验证之后，
+还需确认位置/速度不一致是否改善，38 ms延迟本身不足以解释静态10 cm平衡偏差。
+EV/气压/惯性融合仍保留为待查来源，不能直接断言关闭气压或启用不存在的EV速度可修复。
+源码：[接收路径](https://github.com/PX4/PX4-Autopilot/blob/80171359656faf881dc643022f61ebde734d7cb6/src/modules/mavlink/mavlink_receiver.cpp)、
+[同步回退](https://github.com/PX4/PX4-Autopilot/blob/80171359656faf881dc643022f61ebde734d7cb6/src/lib/timesync/Timesync.cpp)、
+[默认流](https://github.com/PX4/PX4-Autopilot/blob/80171359656faf881dc643022f61ebde734d7cb6/src/modules/mavlink/mavlink_main.cpp)。
+
 用户提供`logs/log_162_2026-9-11-15-11-04.ulg`，时长70.774 s，SHA256
 `a6d4d17d6b2c7efa10f6131e212ac45ba8d1e01507856eac06b1db8c7570d9c8`。
 复用既有本地pyulog依赖，无安装或实机操作。分析脚本及CSV/JSON位于上述录制目录的
