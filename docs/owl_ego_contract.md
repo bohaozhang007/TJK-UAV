@@ -49,6 +49,7 @@ for example `http://192.168.2.20:8765` if that remains its configured address.
 | POST | /v21/navigation/cancel | `{session_id,request_id,task_id}` | Immediate acceptance: `{ok:true,task_id}` |
 | POST | /move_relative_xyz_yaw | `{session_id,request_id,x,y,z,yaw,timeout_s?}` | Blocking flight completion or error |
 | POST | /land | `{session_id,request_id}` | Preempt motion; block for confirmed landing or error |
+| POST | /v21/operator/stop | Local only: `{operator_token,request_id}` | Immediate `{ok:true,session_id,task_id,operation}`; task_id may be null; poll health for actual stopped |
 | POST | /v21/operator/land | Local only: `{operator_token,request_id}` | Immediate `{ok:true,session_id,task_id}`; retire Agent authority and monitor landing under new operator lease |
 
 Capabilities:
@@ -126,7 +127,7 @@ no extra user handoff command and no shared heartbeat/session between clients.
 
 When operator_override is advertised, a local client may acquire with
 `{request_id,operator:true}`. Robot returns an additional opaque operator_token.
-Operator acquisition and /v21/operator/land require an actual loopback connection
+Operator acquisition and /v21/operator/land or /v21/operator/stop require an actual loopback connection
 (127.0.0.1 or ::1), not a forwarded header. The override also requires the token;
 an arbitrary local client cannot invoke it without that token. Normal Wi-Fi
 Agent requests omit operator and never receive the operator token.
@@ -575,3 +576,28 @@ moving on to Agent integration. Earlier logs still show altitude tracking offset
 a successful API action is not a guarantee of zero altitude error. Agent/Robot
 joint model-driven mission validation remains pending. Do not substitute the
 Robot's standalone test route for an actual Agent integration run.
+
+## Operator stop override (2026-09-11)
+
+Previously only console land could preempt the Agent. Robot now advertises
+`operator_stop:true` and accepts loopback-only POST `/v21/operator/stop` with the
+existing operator token and a UUID request_id. It atomically retires the current
+motion lease, installs a fresh operator lease, invalidates the trajectory and
+captures measured pose as hold. An active task transitions to stopping then
+cancelled only after actual stable observations; its original owner/goal remain
+in the task log. No active task yields task_id:null. Acceptance is not stopped
+confirmation: console polls health until stopped:true and active_task_id:null,
+with an 8 s wait budget and independent heartbeats. Timeout does not auto-land.
+
+Stop requires fresh, authorized, initialized, armed airborne OFFBOARD hold
+conditions and no manual takeover; it cannot interrupt an accepted landing.
+The same request is idempotent; reusing an ID across stop/land is rejected.
+After stop, automatic Agent attachment is latched off for this operator session,
+including after measured stop. Console can continue explicit movement or land;
+to start a new supervised mission, land and reinitialize. Retired Agent heartbeats,
+motion and release cannot affect the new owner. Agent must end the interrupted
+mission, with no automatic reacquisition or replay. No new Agent call is required;
+actual Agent reaction to this new override still needs joint verification.
+
+Implemented with Robot 117 and console 39 offline tests; no live deployment or
+flight validation. Restart bridge, HTTP and console while grounded to load it.

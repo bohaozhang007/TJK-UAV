@@ -279,6 +279,20 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(requests[0][1],'/v21/operator/land')
         self.assertEqual(requests[0][2]['operator_token'],'secret')
 
+    def test_operator_stop_reclaims_session_and_waits_for_measured_stop(self):
+        c=self.console;r=c.r;c.operator_token='secret';r.sid='old';r.delegated=True
+        requests=[]
+        def rpc(method,path,data=None,timeout=2):
+            requests.append(path)
+            if path=='/v21/operator/stop':return dict(ok=True,session_id='stop-owner',task_id='move')
+            raise AssertionError(path)
+        with patch.object(r,'rpc',side_effect=rpc),patch.object(r,'heartbeat'), \
+             patch.object(r,'health',side_effect=[dict(stopped=False,active_task_id='move'),dict(stopped=True,active_task_id=None)]):
+            c.command('stop');c.command('wait')
+        self.assertEqual(r.sid,'stop-owner');self.assertFalse(r.delegated)
+        self.assertFalse(c.failed);self.assertIsNone(c.operator_stop_request)
+        self.assertEqual(requests,['/v21/operator/stop'])
+
     def test_operator_uncertain_land_reuses_request_id(self):
         c=self.console;c.operator_token='secret';c.r.sid='old'
         with patch.object(c.r,'rpc',side_effect=live.Failure('uncertain')) as rpc:

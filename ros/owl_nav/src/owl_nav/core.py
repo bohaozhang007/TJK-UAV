@@ -86,6 +86,7 @@ class FlightCore:
         self.operator_token = None
         self.operator_session = None
         self.operator_land_requests = {}
+        self.operator_stop_latched = False
         self.retired = set()
         self.lease_at = -math.inf
         self.tasks = {}
@@ -349,6 +350,7 @@ class FlightCore:
             self.session = None
             self.operator_token = self.operator_session = None
             self.operator_land_requests.clear()
+            self.operator_stop_latched = False
             self.fail('Robot server restarted')
             self.epoch = uuid.uuid4().hex
             self.initialized = False
@@ -356,7 +358,7 @@ class FlightCore:
         if op == 'acquire':
             sid = data['session_id']
             transfer = (self.operator_token is not None and self.session == self.operator_session
-                        and not data.get('operator_token') and self.initialized and self.enabled
+                        and not self.operator_stop_latched and not data.get('operator_token') and self.initialized and self.enabled
                         and self.fresh(now) and self.armed and self.airborne
                         and self.mode == 'OFFBOARD' and not self.manual
                         and self.last_error is None and data.get('flight_authorized'))
@@ -373,7 +375,7 @@ class FlightCore:
                 self.operator_session = sid
             self.session, self.lease_at = sid, now
             return {'ok': True}
-        if op in ('operator_heartbeat','operator_land'):
+        if op in ('operator_heartbeat','operator_land','operator_stop'):
             if not self.operator_token or data.get('operator_token') != self.operator_token:
                 raise Rejected('invalid operator token')
             if op == 'operator_heartbeat':
@@ -385,7 +387,7 @@ class FlightCore:
             sid,tid = data['session_id'],data['task_id']
             if tid in self.operator_land_requests:
                 result = self.operator_land_requests[tid]
-                if result['session_id'] != sid:
+                if result['session_id'] != sid or result.get('operation', 'operator_land') != op:
                     raise Rejected('operator request identity mismatch')
                 return result.copy()
             if tid in self.tasks:
@@ -394,13 +396,24 @@ class FlightCore:
                 return {'ok': True,'session_id':sid,'task_id':tid}
             if self.manual or not self.fresh(now):
                 raise Rejected('manual takeover or stale telemetry')
+            if op == 'operator_stop' and (self.landing or not self.enabled or not self.initialized
+                                          or not self.armed or not self.airborne or self.mode != 'OFFBOARD'
+                                          or not data.get('flight_authorized')):
+                raise Rejected('operator stop requires valid airborne OFFBOARD hold authority; cannot interrupt landing')
             if sid in self.retired:
                 raise Rejected('retired operator session')
             if self.session and self.session != sid:
                 self.retired.add(self.session)
             self.session = self.operator_session = sid
             self.lease_at = now
-            if self.landing and self.active and self.tasks[self.active]['kind'] == 'land':
+            if op == 'operator_stop':
+                self.operator_stop_latched = True
+                self.last_error = None
+                self.invalidate()
+                if self.active:
+                    self.tasks[self.active].update(status='stopping', stopped=False)
+                result = {'ok': True, 'session_id': sid, 'task_id': self.active, 'operation': op}
+            elif self.landing and self.active and self.tasks[self.active]['kind'] == 'land':
                 # Adopt an already accepted AUTO.LAND without resending the mode request.
                 self.tasks[self.active]['session_id'] = sid
                 result = {'ok': True,'session_id':sid,'task_id':self.active}
@@ -416,6 +429,7 @@ class FlightCore:
             if self.session == self.operator_session:
                 self.operator_token = self.operator_session = None
                 self.operator_land_requests.clear()
+                self.operator_stop_latched = False
             self.retired.add(self.session)
             self.session = None
             self.fail('session released')

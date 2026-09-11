@@ -32,7 +32,7 @@
 ## 已确认任务与几何假设
 
 - 用户确认的联合调试流程（2026-09-11）：Robot本机console init/takeoff后保持打开，
-  Agent在起飞停稳后直接接入，无需用户手动交接；console land可抢占Agent运动。
+  Agent在起飞停稳后直接接入，无需用户手动交接；console stop悬停和land降落均可抢占Agent运动。
   起飞由console执行；Agent仍可在有效会话内主动降落（含任务正常结束），两端均可land。
   内部仍保持一个有效运控租约，本机操作员权限不得替Agent续心跳或绕过遥控接管。
 - v21 与旧 owl/v20 并存。Robot 导航不经 Captain，避障用现有 FAST-LIO 机载点云；

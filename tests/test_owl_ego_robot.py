@@ -625,6 +625,7 @@ class CoreTest(unittest.TestCase):
         self.assertTrue(self.c.tasks['a']['stopped'])
 
     def test_yaw_allowance_is_bounded_when_heading_never_moves(self):
+        self.c.c['trajectory_grace_s']=2.0  # This timing fixture assumes a 2 s grace.
         self.short_position_large_yaw()
         for _ in range(58):
             self.feed((.1,0,1));self.cmd('heartbeat')
@@ -836,6 +837,41 @@ class OperatorCoreTest(unittest.TestCase):
 
     def land(self,tid='landing',sid='landing-owner'):
         return self.call('operator_land',operator_token='secret',session_id=sid,task_id=tid)
+
+    def test_operator_stop_revokes_agent_and_holds_without_auto_transfer(self):
+        self.agent();self.navigate()
+        result=self.call('operator_stop',operator_token='secret',session_id='stop-owner',
+                         task_id='stop-request',flight_authorized=True)
+        self.assertEqual(self.c.session,'stop-owner')
+        self.assertEqual(self.c.tasks['move']['status'],'stopping')
+        self.assertIsNone(self.c.generation)
+        np.testing.assert_equal(self.c.hold,self.c.pose)
+        self.assertFalse(self.c.stopped)
+        for op in ('heartbeat','release'):
+            with self.assertRaises(Rejected):self.call(op,session_id='agent')
+        duplicate=self.call('operator_stop',operator_token='secret',session_id='stop-owner',
+                            task_id='stop-request',flight_authorized=True)
+        self.assertEqual(result,duplicate)
+        for _ in range(8):self.feed()
+        self.assertEqual(self.c.tasks['move']['status'],'cancelled')
+        self.assertTrue(self.c.stopped)
+        with self.assertRaises(Rejected):self.call('acquire',session_id='new-agent',flight_authorized=True)
+        self.call('operator_heartbeat',operator_token='secret')
+        self.land()
+        self.assertTrue(self.c.landing)
+
+    def test_operator_stop_rejects_landing_and_bad_authority_without_revocation(self):
+        self.agent()
+        for token,authorized in [('bad',True),('secret',False)]:
+            with self.assertRaises(Rejected):
+                self.call('operator_stop',operator_token=token,session_id='stop-owner',
+                          task_id='stop',flight_authorized=authorized)
+            self.assertEqual(self.c.session,'agent')
+        self.land()
+        with self.assertRaises(Rejected):
+            self.call('operator_stop',operator_token='secret',session_id='stop-owner',
+                      task_id='stop',flight_authorized=True)
+        self.assertTrue(self.c.landing)
 
     def test_automatic_transfer_preserves_height_and_epoch(self):
         self.c.hold[2]=.9;hold=self.c.hold.copy();epoch=self.c.epoch
@@ -1122,7 +1158,7 @@ class FakeHardware:
             if self.session:return dict(ok=False,error='busy')
             self.session=data['session_id']
         if op=='release':self.session=None
-        if op=='operator_land':
+        if op in ('operator_land','operator_stop'):
             self.session=data['session_id']
             self.tasks[data['task_id']]=dict(task_id=data['task_id'],status='executing',stopped=False)
             return dict(ok=True,session_id=self.session,task_id=data['task_id'])
@@ -1187,6 +1223,19 @@ class HttpTest(unittest.TestCase):
         with patch.object(self.c,'_owner',side_effect=checked_then_overridden):
             self.rpc('POST','/v21/session/release',dict(session_id=self.sid))
         self.assertEqual(self.hw.commands[-1],('release',dict(session_id=self.sid)))
+
+    def test_operator_stop_http_permissions_and_cross_action_request_identity(self):
+        self.c.operator_token='secret';self.c.operator_session='old-operator'
+        body=dict(operator_token='secret',request_id=str(uuid.uuid4()))
+        with self.assertRaises(ApiError):
+            self.c.handle_http('POST','/v21/operator/stop',body,local_operator=False)
+        self.assertEqual(self.rpc('POST','/v21/operator/stop',dict(body,operator_token='wrong'))[0],403)
+        first=self.rpc('POST','/v21/operator/stop',body)
+        self.assertEqual(first[0],200)
+        self.assertEqual(first,self.rpc('POST','/v21/operator/stop',body))
+        self.assertEqual(sum(op=='operator_stop' for op,_ in self.hw.commands),1)
+        self.assertEqual(self.rpc('POST','/v21/operator/land',body)[0],409)
+        self.assertEqual(self.rpc('POST','/v21/heartbeat',dict(session_id=self.sid))[0],409)
 
     def test_operator_land_http_duplicate_does_not_preempt_twice(self):
         self.c.operator_token='secret';self.c.operator_session='old-operator'

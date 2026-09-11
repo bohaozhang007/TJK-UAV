@@ -103,7 +103,7 @@ class OwlEgoController:
                 '/health','/get_pose','/motion_tolerances','/v21/motion_log'}
         posts = {'/v21/session','/v21/heartbeat','/v21/session/release',
                  '/v21/navigation','/v21/navigation/cancel','/init','/takeoff',
-                 '/move_relative_xyz_yaw','/land','/v21/operator/land'}
+                 '/move_relative_xyz_yaw','/land','/v21/operator/land','/v21/operator/stop'}
         if path not in gets | posts:
             raise ApiError('unsupported owl_ego endpoint',404)
         if (method == 'GET') != (path in gets):
@@ -120,7 +120,7 @@ class OwlEgoController:
             if path == '/v21/capabilities':
                 return dict(ok=True,backend='owl_ego',protocol_version=1,async_navigation=True,
                             cancel_and_hold=True,synchronized_observation=True,
-                            control_lease=True,relative_xyz_yaw=True,software_takeoff=True,operator_override=True)
+                            control_lease=True,relative_xyz_yaw=True,software_takeoff=True,operator_override=True,operator_stop=True)
             if path == '/v21/observation':
                 result = self.observation()
                 with self.lock:
@@ -146,8 +146,8 @@ class OwlEgoController:
             if task.get('kind') != 'land' and task.get('goal') is not None:
                 result['target'] = public_pose(task['goal'])
             return result
-        if path == '/v21/operator/land':
-            return self._operator_land(data,local_operator)
+        if path in ('/v21/operator/land','/v21/operator/stop'):
+            return self._operator_land(data,local_operator,op='operator_'+path.rsplit('/',1)[-1])
         if path == '/v21/session':
             operator = data.get('operator',False)
             if type(operator) is not bool:
@@ -193,7 +193,7 @@ class OwlEgoController:
             return result
         return self._idempotent(path,data,lambda:self._mutate(path,data))
 
-    def _operator_land(self,data,local_operator):
+    def _operator_land(self,data,local_operator,op='operator_land'):
         if not local_operator:
             raise ApiError('operator access requires loopback connection',403)
         rid = data.get('request_id')
@@ -204,7 +204,7 @@ class OwlEgoController:
             if not self.operator_token or data.get('operator_token') != self.operator_token:
                 raise ApiError('invalid operator token',403)
             key = (self.operator_token,rid)
-            body = json.dumps(data,sort_keys=True,allow_nan=False)
+            body = json.dumps(dict(data,operation=op),sort_keys=True,allow_nan=False)
             entry = self.operator_requests.get(key)
             if entry and entry['body'] != body:
                 raise ApiError('request_id reused with different body')
@@ -212,7 +212,7 @@ class OwlEgoController:
                 entry = dict(body=body,session_id=uuid.uuid4().hex,task_id='nav-'+uuid.uuid4().hex)
                 self.operator_requests[key] = entry
             if 'result' not in entry:
-                result = self._command('operator_land',operator_token=self.operator_token,
+                result = self._command(op,operator_token=self.operator_token,
                     session_id=entry['session_id'],task_id=entry['task_id'])
                 if self.hw.snapshot().get('session_id') == result['session_id']:
                     self.session = self.operator_session = result['session_id']

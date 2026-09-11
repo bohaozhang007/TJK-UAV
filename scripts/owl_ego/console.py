@@ -33,6 +33,7 @@ class Console:
         self.failed=False
         self.operator_token=None
         self.operator_land_request=None
+        self.operator_stop_request=None
 
     def initialize(self):
         r=self.r
@@ -50,7 +51,7 @@ class Console:
             raise Failure('需要静止且无活动任务')
         if r.sid:
             if r.delegated or h.get('control_owner') == 'agent' and self.operator_token:
-                raise Failure('Agent正在控制；本窗口可直接land抢占，无需重复init。')
+                raise Failure('Agent正在控制；本窗口可直接stop悬停或land降落抢占，无需重复init。')
             if h.get('initialized'):
                 print('已经初始化，当前会话继续保持。',flush=True)
                 return
@@ -68,6 +69,7 @@ class Console:
         r.sid=session['session_id']
         self.operator_token=session.get('operator_token')
         self.operator_land_request=None
+        self.operator_stop_request=None
         r.delegated=False
         r.stop.clear();r.hb_error=None
         r.hb_thread=threading.Thread(target=r.heartbeat,daemon=True);r.hb_thread.start()
@@ -77,7 +79,7 @@ class Console:
             raise
         print('初始化完成，心跳持续。输入 takeoff 请求 OFFBOARD、解锁和起飞。',flush=True)
         if self.operator_token:
-            print('起飞停稳后Agent可直接接入；保持本窗口，land可抢占Agent运动。',flush=True)
+            print('起飞停稳后Agent可直接接入；保持本窗口，stop悬停、land降落均可抢占Agent运动。',flush=True)
 
     def launch(self,name,operation):
         if self.worker and self.worker.is_alive():
@@ -85,7 +87,7 @@ class Console:
         if not self.r.sid:
             raise Failure('请先 init')
         if self.r.delegated:
-            raise Failure('运控已交给Agent；本窗口可用land抢占。')
+            raise Failure('运控已交给Agent；本窗口可用stop或land抢占。')
         self.r.abort=threading.Event()
         self.r.phase=name
         def work():
@@ -146,6 +148,31 @@ class Console:
                 time.sleep(.1)
             raise Failure('降落确认超时；未自动取消AUTO.LAND')
         self.launch('land',wait_landing)
+
+    def operator_stop(self):
+        r=self.r
+        self.interrupt()
+        r.stop.set()
+        if r.hb_thread:
+            r.hb_thread.join(2.5)
+            if r.hb_thread.is_alive():
+                raise Failure('旧心跳尚未退出，未提交悬停抢占')
+        if self.operator_stop_request is None:
+            self.operator_stop_request=dict(operator_token=self.operator_token,request_id=str(uuid.uuid4()))
+        result=r.rpc('POST','/v21/operator/stop',self.operator_stop_request)
+        r.sid=result['session_id'];r.delegated=False
+        r.stop.clear();r.hb_error=None
+        r.hb_thread=threading.Thread(target=r.heartbeat,daemon=True);r.hb_thread.start()
+        def wait_stopped():
+            deadline=time.monotonic()+8
+            while time.monotonic()<deadline:
+                h=r.health()
+                if h.get('stopped') and not h.get('active_task_id'):
+                    self.operator_stop_request=None
+                    return h
+                time.sleep(.1)
+            raise Failure('悬停已请求，但8秒内未确认实测停稳；心跳继续，可用land')
+        self.launch('stop',wait_stopped)
 
     def move_relative(self, values):
         r=self.r
@@ -219,6 +246,8 @@ class Console:
             else:
                 self.interrupt()
                 self.launch(cmd,lambda:self.r.blocking('/land',95,flight=False))
+        elif cmd=='stop' and self.operator_token:
+            self.operator_stop()
         elif cmd=='wait':
             if self.worker:self.worker.join()
         elif cmd in ('stop','quit','exit'):

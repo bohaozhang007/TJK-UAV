@@ -29,3 +29,39 @@ Robot拉取后在每个启动终端 unset OWL_EGO_CONFIG，再运行脚本；检
 修改仓库YAML后需落地重启bridge与HTTP，两者使用同一文件。仓库飞行开关当前false，
 现场启用须在这个文件中明确设置。Agent push本身不会更新另一台机器，仍需Robot pull。
 无需Agent接口适配，无待回复的配置问题；高度反馈偏差尚未解决。
+
+## 同轮补充：console stop 悬停抢占
+
+用户要求stop也可抢占Agent。现复用操作员token、会话轮换和幂等请求路径，新增
+POST /v21/operator/stop及operator_stop:true能力。请求受理后旧Agent租约退役，
+轨迹generation清除，hold取当前实测位姿，原任务进入stopping，稳定采样后cancelled。
+无活动任务也重新确认停稳。console持新会话持续心跳，最多8 s确认，超时不自动降落。
+stop后锁住Agent自动接入，旧Agent不可续租/释放/继续动作；console可显式运控、land。
+下一轮联合任务应落地重新init。不打断已有降落，不绕过遥控接管/传感器/发布者检查。
+
+117项Robot和39项console回归通过，包括真实loopback HTTP权限/跨动作ID冲突/重复
+请求、旧租约拒绝、采样停稳、拒绝打断降落、console会话更新与等待。测试中旧yaw
+时限用例依赖2 s配置，与上一轮迁移的5 s不符，已将该测试夹具显式固定2 s。
+证据logs/owl_operator_stop/robot_tests.log、console_tests.log。未启动ROS或实飞。
+需落地重启bridge、HTTP、console；Agent无需新增请求，需联调确认其收到租约失效后
+结束任务且不自动重获控制。本轮不代改Agent代码/状态。
+
+## 同轮实测日志复核：22:15 降落确认
+
+核对 logs/owl_live/20260911-221425-3f01e4/events.jsonl 与 motions.jsonl：
+- motions.jsonl 第36行：Agent降落任务 nav-0ee0176ad47047b2a394be62b6d6ea38，
+  22:15:49.184受理，source=agent。
+- events第125–127行：22:15:53.415用户console输入land并发出operator/land，
+  22:15:53.444返回成功，task_id与Agent降落相同。随后health control_owner=operator。
+- 这解释Agent报告22:15:53.458 invalid session：操作员接管轮换会话，非Wi-Fi故障
+  或5 s租约心跳断档。按现有实现接管已有AUTO.LAND，不重复发送降落模式请求。
+- motions第37行：22:15:55.464同一任务终态arrived；events第164–165行：
+  22:15:55.502 console查询arrived/stopped:true并记录land完成。之前health已记录
+  新鲜ON_GROUND。
+
+结论：Robot已确认降落成功；Agent“降落未确认”是旧租约锁存阻止最终只读结果查询。
+Robot抢占会话符合约定，不应为了确认结果恢复旧会话。Agent需将已受理land的终态
+查询与运动授权分离：按原task_id有限只读查询（当前Robot任务GET不要求session），
+arrived且stopped才记降落确认成功，同时保留operator takeover/租约失效事件并禁止
+自动续任务、重获会话或重发land。仅请求受理或airborne=false不能当作完成。
+本轮只读分析与协作记录更新，未修改Agent实现、未运行新测试或触发飞行。

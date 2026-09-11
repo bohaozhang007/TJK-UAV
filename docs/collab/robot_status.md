@@ -5,6 +5,16 @@
 
 ## 当前结论
 
+22:15降落失败报告已定位：console在22:15:53.415输入land，53.444接管Agent同一个
+降落任务并换租约，解释Agent53.458 invalid session。Robot任务55.464到达，console
+55.502确认arrived/stopped:true，降落已成功。需Agent独立确认已受理land终态，保留
+失效租约禁运控；无需Robot恢复旧会话。证据与建议见robot-006；本轮未改Agent代码。
+
+console stop 已接入本机操作员抢占：撤销Agent旧租约，清除轨迹并捕获实测hold，
+保留实测停稳确认，console持续心跳；停稳后禁止Agent自动重新接入，console仍可land。
+正在降落/遥控接管/无有效OFFBOARD悬停权限时拒绝stop。新增operator_stop能力和
+/v21/operator/stop；117项Robot、39项console离线测试通过，未部署实飞，见robot-006。
+
 配置入口已统一：run_owl_ego.sh 默认读取 src/robot/config/owl_ego.yaml，打印绝对路径；
 显式 OWL_EGO_CONFIG 仍优先且提示覆盖。构建脚本只更新仓库 planner 段，不再生成
 工作空间 Robot YAML 副本。已填本机验证过的 EGO 路径/哈希并同步此前确认的5 s余量；
