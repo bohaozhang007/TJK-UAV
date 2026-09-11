@@ -3,6 +3,28 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-11。
 最新消息：[agent-004](messages/agent-004.md)，回复 [robot-003](messages/robot-003.md)。
 
+## 最新实现：独立 Z 到达容差（2026-09-11）
+
+用户授权跨端修改后，本机 Robot core 已增加绝对 Z 误差 <= 8 cm 的到达约束，
+同时保留三维 <= 15 cm、yaw 和停稳条件。配置 control.vertical_tolerance_m=0.08；
+HTTP 新增 vertical_tolerance_cm，任务诊断新增 vertical_error_cm，旧配置默认 8 cm。
+Agent TRACK 指令未改；此为 Robot 到达容差，不是 Agent dz 死区。
+Robot 108 项（5.694 s）、Agent 46 项（16.871 s）离线测试通过；证据及现场同步事项
+见 agent-004 最新补充。未部署、未实飞，尚未验证实际高度能收敛至 8 cm 内。
+无人机需同步 core/controller 并让 bridge、HTTP 使用相同配置后重新加载才能生效。
+
+## 最新现场复核（2026-09-11，11:45 运行）
+
+已检查用户 logs/v21_20260911_114527：实际完成中止、回 P、TRACK、回 P、重新飞 B。
+三次心跳超时均在原租约内恢复；最终由 observation 单次传输超时导致采集线程失败，
+取消导航后 land 确认完成。观测传输异常恢复仍待实现，不是再次出现心跳永久退出。
+Agent 与 console 使用同一运动 HTTP 接口；TRACK 连续非零 Z 以实测高度重定目标，
+与约 10–12 cm 正高度偏差叠加。XYZ 总容差过滤未阻止前进中的微小 Z 修正。
+偏差源头仍需 Robot 的目标/hold/setpoint/实测时序核对，不能仅归因于视觉参数。
+本次仅代码/现有运行日志分析及文档更新，未改参数或控制代码，未新增测试或实飞。
+详细数值、时间线和待 Robot 配合项见 agent-004 最新补充。下文未加载真实模型等
+描述是早期本端模拟验证范围，不再代表用户尚未进行模型驱动的现场运行。
+
 ## 最新修复：原会话有界续租
 
 同轮新增（2026-09-11）：任务目录增加 motions.csv。按用户最新要求精简为

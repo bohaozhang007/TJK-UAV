@@ -209,7 +209,7 @@ class CoreTest(unittest.TestCase):
         self.assertGreater(self.c.status(self.now)['stop_diagnostics']['speed_m_s'],.1)
 
     def test_level_relative_sequence_does_not_accumulate_altitude_offset(self):
-        self.nav(goal=(0,0,1,0));self.stable((0,0,1.1))
+        self.nav(goal=(0,0,1,0));self.stable((0,0,1.06))
         for i,relative in enumerate([[.3,0,0,0],[0,-.3,0,0],[-.3,0,0,0],[0,0,0,.35],[.2,.2,0,-.35]]):
             self.cmd('heartbeat')
             self.cmd('relative',task_id=str(i),relative=relative,localization_epoch=self.c.epoch)
@@ -219,9 +219,9 @@ class CoreTest(unittest.TestCase):
             # Inspect the actual hold/direct-yaw output before a planner exists.
             self.assertAlmostEqual(self.c.tick(self.now,self.now)[0][2],1.)
             if i==3:self.assertFalse(task['planner_required'])
-            for _ in range(8):self.feed((goal[0],goal[1],goal[2]+.10),yaw=goal[3],v=(0,0,-.124))
+            for _ in range(8):self.feed((goal[0],goal[1],goal[2]+.06),yaw=goal[3],v=(0,0,-.124))
             self.assertEqual(task['status'],'arrived')
-            self.assertAlmostEqual(self.c.pose[2],1.1)
+            self.assertAlmostEqual(self.c.pose[2],1.06)
             self.assertAlmostEqual(self.c.hold[2],1.)
 
     def test_explicit_vertical_relative_uses_measured_altitude_then_retains_goal(self):
@@ -229,18 +229,24 @@ class CoreTest(unittest.TestCase):
         self.cmd('relative',task_id='up',relative=[0,0,.2,0],localization_epoch=self.c.epoch)
         self.assertAlmostEqual(self.c.tasks['up']['goal'][2],1.3)
         self.stable((0,0,1.4))
+        self.assertNotEqual(self.c.tasks['up']['status'],'arrived')
+        with self.assertRaises(Rejected):
+            self.cmd('relative',task_id='premature',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
+        self.stable((0,0,1.36))
         self.cmd('relative',task_id='level',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
         self.assertAlmostEqual(self.c.tasks['level']['goal'][2],1.3)
+        self.feed((0,0,1.4))
         self.cmd('cancel',task_id='level');self.stable((0,0,1.4))
         self.assertAlmostEqual(self.c.hold[2],1.4)
         self.cmd('relative',task_id='after_cancel',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
         self.assertAlmostEqual(self.c.tasks['after_cancel']['goal'][2],1.4)
 
     def test_absolute_navigation_keeps_previous_Z_while_planning_and_recaptures_on_cancel(self):
-        self.nav(goal=(0,0,1,0));self.stable((0,0,1.1))
+        self.nav(goal=(0,0,1,0));self.stable((0,0,1.06))
         self.cmd('navigate',task_id='side',goal=[0,1,1,0],localization_epoch=self.c.epoch)
         self.assertAlmostEqual(self.c.tick(self.now,self.now)[0][2],1.)
         self.assertAlmostEqual(self.c.hold[2],1.)
+        self.feed((0,0,1.1))
         self.cmd('cancel',task_id='side');self.stable((0,0,1.1))
         self.assertAlmostEqual(self.c.hold[2],1.1)
         self.cmd('navigate',task_id='up',goal=[0,1,1.5,0],localization_epoch=self.c.epoch)
@@ -329,6 +335,47 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(self.c.tasks['a']['status'],'arrived')
         self.cmd('cancel',task_id='a')
         self.assertEqual(self.c.tasks['a']['status'],'arrived')
+
+    def test_arrival_requires_independent_vertical_tolerance(self):
+        for sign in (-1,1):
+            with self.subTest(sign=sign):
+                self.setUp()
+                self.nav(goal=(0,0,1,0))
+                self.stable((0,0,1+sign*.12))
+                self.assertTrue(self.c.stopped)
+                self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
+                self.assertAlmostEqual(self.c.tasks['a']['diagnostics']['vertical_error_cm'],12.)
+                self.stable((0,0,1+sign*.081))
+                self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
+                self.stable((0,0,1+sign*.079))
+                self.assertEqual(self.c.tasks['a']['status'],'arrived')
+
+    def test_vertical_tolerance_does_not_replace_3d_tolerance(self):
+        self.nav(goal=(0,0,1,0))
+        self.stable((.14,0,1.07))
+        self.assertTrue(self.c.stopped)
+        self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
+        self.stable((.12,0,1.07))
+        self.assertEqual(self.c.tasks['a']['status'],'arrived')
+
+    def test_vertical_tolerance_config_and_legacy_default(self):
+        config=copy.deepcopy(CONFIG['control'])
+        config.pop('vertical_tolerance_m')
+        self.assertEqual(FlightCore(config).c['vertical_tolerance_m'],.08)
+        for invalid in (0,-.1,True,float('nan'),float('inf')):
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                FlightCore(dict(config,vertical_tolerance_m=invalid))
+        self.c.c['vertical_tolerance_m']=.04
+        self.nav(goal=(0,0,1,0))
+        self.stable((0,0,1.06))
+        self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
+        self.stable((0,0,1.03))
+        self.assertEqual(self.c.tasks['a']['status'],'arrived')
+        controller=OwlEgoController.__new__(OwlEgoController)
+        controller.config=dict(control=dict(config,vertical_tolerance_m=.04))
+        self.assertEqual(controller.get_motion_tolerances()['vertical_tolerance_cm'],4.)
+        controller.config=dict(control=config)
+        self.assertEqual(controller.get_motion_tolerances()['vertical_tolerance_cm'],8.)
 
     def test_cancel_old_terminal_does_not_touch_new(self):
         self.nav();self.cmd('cancel',task_id='a');self.stable();self.nav('b')

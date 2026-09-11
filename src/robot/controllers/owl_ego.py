@@ -290,6 +290,7 @@ class OwlEgoController:
     def get_motion_tolerances(self):
         c = self.config['control']
         return dict(position_tolerance_cm=c['position_tolerance_m']*100,
+                    vertical_tolerance_cm=c.get('vertical_tolerance_m',0.08)*100,
                     yaw_tolerance_deg=math.degrees(c['yaw_tolerance_rad']),
                     position_error_metric='euclidean_3d',source='owl_ego')
 

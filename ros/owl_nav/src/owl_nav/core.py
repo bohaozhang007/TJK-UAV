@@ -49,6 +49,7 @@ class Polynomial:
 
 class FlightCore:
     def __init__(self, config):
+        config = {'vertical_tolerance_m': 0.08, **config}
         for key,value in config.items():
             if key in ('flight_enabled','failsafe_validated','sensors_validated'):
                 if type(value) is not bool:
@@ -236,6 +237,7 @@ class FlightCore:
             return
         t = self.tasks[self.active]
         t['diagnostics'] = dict(position_error_cm=float(np.linalg.norm(self.pose[:3]-np.array(t['goal'][:3]))*100),
+            vertical_error_cm=float(abs(self.pose[2]-t['goal'][2])*100),
             yaw_error_deg=math.degrees(abs(wrap(yaw-t['goal'][3]))),speed_m_s=self.speed,
             yaw_rate_deg_s=math.degrees(self.yaw_rate),elapsed_s=now-t['started'])
         if t['status'] == 'stopping':
@@ -245,6 +247,7 @@ class FlightCore:
         if t['kind'] == 'land':
             return
         good = (self.enabled and self.mode == 'OFFBOARD' and self.armed and self.airborne and self.stopped and np.linalg.norm(self.pose[:3]-np.array(t['goal'][:3])) <= self.c['position_tolerance_m']
+                and abs(self.pose[2]-t['goal'][2]) <= self.c['vertical_tolerance_m']
                 and abs(wrap(yaw-t['goal'][3])) <= self.c['yaw_tolerance_rad'])
         if good:
             self.hold = np.array(t['goal'])

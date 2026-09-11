@@ -228,7 +228,7 @@ relative movement and landing when their task_id is available. Unknown task IDs
 return HTTP 404. Task GET `ok:true` means the query succeeded; `status:failed`
 is still a motion failure.
 
-- `arrived,stopped:true`: measured 3D distance and yaw meet configured tolerances,
+- `arrived,stopped:true`: measured 3D distance, absolute Z error and yaw each meet configured tolerances,
   plus current pose stability. Trajectory end alone is not arrival.
 - Cancel acceptance revokes old trajectory/generation ownership and starts hold.
   Wait for `cancelled,stopped:true` before continuing. The legitimate race
@@ -250,9 +250,23 @@ is still a motion failure.
 Current tolerance response:
 ~~~json
 {"ok":true,"motion_tolerances":{"position_tolerance_cm":15,
+ "vertical_tolerance_cm":8,
  "yaw_tolerance_deg":5,"position_error_metric":"euclidean_3d","source":"owl_ego"}}
 ~~~
 Read the endpoint rather than hardcoding arrival tolerances.
+
+2026-09-11 user-approved arrival update: previously only 3D distance (15 cm)
+and yaw constrained position completion. Robot now additionally requires absolute
+Z error <= `control.vertical_tolerance_m` (default 0.08 m), including navigation,
+relative movements and takeoff. Landing and cancellation retain their existing
+completion rules. Task diagnostics add absolute `vertical_error_cm`.
+This is an arrival constraint, not an Agent dz deadband; Agent TRACK commands
+remain unchanged and wait for Robot completion. The tolerance response field is
+additive (protocol 1); older configs missing the setting default to 0.08 m in
+both core and HTTP reporting. Older Robot binaries do not enforce this constraint.
+Implemented in the Windows checkout under explicit cross-end user authorization;
+Robot deployment and flight convergence within 8 cm remain unverified. Apply the
+same control config to bridge and HTTP server when deploying both updated modules.
 
 Current stop confirmation uses >=0.5 s of accepted poses and >=5 distinct samples:
 the norm of XYZ component ranges <=5 cm and unwrapped yaw range <=2.5 degrees.
