@@ -65,27 +65,53 @@ class PatrolAgent(v20.TJKAgent):
         self.phase = "INITIALIZING"
         self._event_lock = threading.Lock()
         self.event_path = self._mission_vis_dir.parent / "events.jsonl"
+        self.client.event = self.event
+
+    def connect(self):
+        # A fresh session establishes fresh world coordinates and target memory.
+        result = super().connect()
+        self.memory = TargetMemory(self.patrol["dedup_distance_cm"],
+                                   self.patrol["retry_cooldown_s"],
+                                   self.patrol["max_target_attempts"])
+        self.capture_observation = None
+        return result
 
     def event(self, kind, **fields):
         record = {"time": dt.datetime.now().isoformat(), "event": kind, **fields}
         with self._event_lock:
             with self.event_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
-        self._log(f"[V21] {kind} {fields}")
+        if kind not in {"http_request", "flight_health", "navigation_status", "observation", "pose_sample"}:
+            self._log(f"[V21] {kind} {fields}")
 
     def set_phase(self, phase, **fields):
         self.phase = phase
         self.event("phase", phase=phase, **fields)
 
     def _ensure_flight_safety(self, context):
-        self.client.check_lease()
-        health = super()._ensure_flight_safety(context)
-        for capability in ("control_ready", "odom_ok", "rgb_ok", "planner_ok"):
-            if health.get(capability) is not True:
-                raise v20.FlightSafetyError(f"Missing flight capability: {capability}")
-        if health.get("localization_epoch") != self.client._frame_identity[1]:
-            raise v20.FlightSafetyError("Localization reset during mission")
-        return health
+        # v20's unconditional rgb_ok gate predates retryable synchronized frames.
+        try:
+            return self.client.flight_health()
+        except Exception as exc:
+            raise v20.FlightSafetyError(f"{context}: {exc}") from exc
+
+    def _calculate_motion_error(self, start_pose, end_pose, dx, dy, dz, dyaw):
+        error = super()._calculate_motion_error(start_pose, end_pose, dx, dy, dz, dyaw)
+        # z=0 preserves Robot's reference; measured start Z is not that reference.
+        if dz == 0:
+            error["ez"] = error["epos"] = None
+        self.event("relative_pose_samples", start_pose=start_pose, end_pose=end_pose,
+                   command=dict(x=dx, y=dy, z=dz, yaw=dyaw),
+                   zero_z_preserves_reference=dz == 0,
+                   note="Separate pose samples, not Robot acceptance/terminal snapshots")
+        return error
+
+    @staticmethod
+    def _format_motion_error(error):
+        if error is not None and error.get("ez") is None:
+            return (f"(ex={error['ex']:.2f}cm, ey={error['ey']:.2f}cm, "
+                    f"ez=N/A(reference retained), eyaw={error['eyaw']:.2f}deg, epos=N/A)")
+        return v20.TJKAgent._format_motion_error(error)
 
     def _capture_for_task(self, include_depth, context):
         result = super()._capture_for_task(include_depth, context)
@@ -117,6 +143,8 @@ class PatrolAgent(v20.TJKAgent):
                                    "position_cm": position.tolist()})
         self.event("detection", frame_id=obs.frame_id, timestamp_s=obs.timestamp_s,
                    capture_pose=obs.pose, candidates=candidates,
+                   calibration_quality=obs.calibration_quality,
+                   geometry_assumptions=obs.geometry_assumptions,
                    depth_source="box_core", inference_s=time.monotonic()-start)
         return candidates
 
@@ -184,6 +212,7 @@ class PatrolAgent(v20.TJKAgent):
         self.client.cancel_navigation(task_id)
         deadline = time.monotonic() + self.patrol["cancel_timeout_s"]
         while time.monotonic() < deadline:
+            self._ensure_flight_safety("waiting for cancellation")
             state = self._navigation_state(task_id)
             if state in {"cancelled", "arrived"}:
                 self.active_navigation = None
@@ -261,6 +290,8 @@ class PatrolAgent(v20.TJKAgent):
             "candidate": candidate, "intrinsics": obs.intrinsics.tolist(),
             "world_from_camera_optical_cm": obs.world_from_camera.tolist(),
             "localization_epoch": obs.localization_epoch,
+            "rectified": obs.rectified, "calibration_quality": obs.calibration_quality,
+            "geometry_assumptions": obs.geometry_assumptions,
         }, indent=2), encoding="utf-8")
         self._navigate_to_world_pose(obs.pose, "RETURN_TO_CAPTURE")
         success, refined = False, None
@@ -376,6 +407,10 @@ def main():
         if args.det_interval is not None:
             config["patrol"]["det_interval"] = args.det_interval
         patrol = validate_patrol_config(config)
+        connection = config.get("owl_ego", {})
+        if not isinstance(connection, dict) or set(connection) - {
+                "allow_approximate_geometry", "auto_arm", "stop_timeout_s", "observation_retry_s"}:
+            raise ValueError("Invalid owl_ego connection configuration")
         timeout = (config["runtime"]["http_request_timeout_s"]
                    if args.http_timeout_s is None else args.http_timeout_s)
         if not math.isfinite(timeout) or timeout <= 0:
@@ -388,7 +423,8 @@ def main():
     (directory/"config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     client = OwlEgoClient(host=args.server_host, port=args.server_port, timeout_s=timeout,
                           observation_max_age_s=patrol["observation_max_age_s"],
-                          observation_max_sync_error_s=patrol["observation_max_sync_error_s"])
+                          observation_max_sync_error_s=patrol["observation_max_sync_error_s"],
+                          **connection)
     # Load models and validate inherited TRACK configuration before taking control.
     agent = PatrolAgent(client=client, detector=v20.build_detector(args.det, config),
                         tracker=v20.build_tracker(args.trk, config, str(directory/"vis")),

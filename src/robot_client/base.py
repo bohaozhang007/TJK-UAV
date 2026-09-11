@@ -15,6 +15,22 @@ import numpy as np
 JsonObject = Dict[str, Any]
 
 
+class RobotHTTPError(RuntimeError):
+    """HTTP failure retaining machine-readable Robot error metadata."""
+
+    def __init__(self, status, path, detail):
+        super().__init__(f"HTTP {status} from {path}: {detail}")
+        self.status = status
+        try:
+            self.data = json.loads(detail)
+        except (ValueError, TypeError):
+            self.data = {}
+        if not isinstance(self.data, dict):
+            self.data = {}
+        self.error_code = self.data.get("error_code")
+        self.retryable = self.data.get("retryable") is True
+
+
 class BaseClient:
     """Agent-facing client for the unified Robot Server HTTP API.
 
@@ -66,7 +82,7 @@ class BaseClient:
                 return response.read(), response.headers.get_content_type()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"HTTP {exc.code} from {path}: {detail}") from exc
+            raise RobotHTTPError(exc.code, path, detail) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(
                 f"Cannot connect to Robot Server at {self.base_url}: {exc}"

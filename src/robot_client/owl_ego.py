@@ -5,7 +5,7 @@ No ROS or flight-control implementation belongs in this module.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import threading
 import time
@@ -15,7 +15,7 @@ import uuid
 import cv2
 import numpy as np
 
-from .base import BaseClient
+from .base import BaseClient, RobotHTTPError
 from .owl import _Da3DepthServiceClient
 
 
@@ -31,12 +31,41 @@ class Observation:
     world_from_camera: np.ndarray
     localization_epoch: str
     world_frame: str
+    rectified: bool = True
+    calibration_quality: str = "calibrated"
+    geometry_assumptions: dict = field(default_factory=dict)
 
 
-def decode_observation(data, *, max_age_s=0.5, max_sync_error_s=0.05):
+def decode_observation(data, *, max_age_s=0.5, max_sync_error_s=0.05,
+                       allow_approximate_geometry=False):
     """K applies to rectified RGB; transform is optical camera -> ROS ENU, cm."""
-    if data.get("ok") is not True or data.get("rectified") is not True:
-        raise ValueError("Observation must be successful and rectified")
+    quality = data.get("calibration_quality")
+    geometry = data.get("geometry_assumptions", {})
+    rectified = data.get("rectified")
+    if data.get("ok") is not True or type(rectified) is not bool:
+        raise ValueError("Invalid observation success/rectification flag")
+    if quality == "calibrated":
+        if not rectified:
+            raise ValueError("Calibrated observation must be rectified")
+    elif quality == "approximate" and allow_approximate_geometry:
+        if not isinstance(geometry, dict):
+            raise ValueError("Missing geometry assumptions")
+        if (geometry.get("extrinsics") != "body_coincident_fixed"
+                or geometry.get("camera_translation") != "body_coincident_assumption"):
+            raise ValueError("Unsupported approximate extrinsics")
+        mode = geometry.get("intrinsics")
+        if mode == "approximate_fov":
+            fov = geometry.get("assumed_horizontal_fov_deg")
+            if (isinstance(fov, bool) or not isinstance(fov, (int, float))
+                    or not math.isfinite(fov) or not 1 < fov < 179
+                    or geometry.get("principal_point") != "image_center"
+                    or geometry.get("square_pixels_assumed") is not True
+                    or geometry.get("distortion") != "unknown_not_corrected" or rectified):
+                raise ValueError("Invalid approximate FOV profile")
+        elif mode != "camera_info" or not rectified or geometry.get("distortion") != "corrected":
+            raise ValueError("Unsupported approximate intrinsics")
+    else:
+        raise ValueError("Geometry quality requires calibrated rectified data or explicit approximate opt-in")
     for key in ("frame_id", "localization_epoch", "world_frame"):
         if not isinstance(data.get(key), str) or not data[key]:
             raise ValueError(f"Missing observation {key}")
@@ -64,17 +93,40 @@ def decode_observation(data, *, max_age_s=0.5, max_sync_error_s=0.05):
             or not np.allclose(t[:3, :3].T @ t[:3, :3], np.eye(3), atol=1e-4)
             or not np.isclose(np.linalg.det(t[:3, :3]), 1, atol=1e-4)):
         raise ValueError("Invalid optical-camera-to-ENU rigid transform")
+    if quality == "approximate":
+        if not np.allclose(t[:3, 3], [pose["x"], -pose["y"], pose["z"]], atol=1e-3):
+            raise ValueError("Camera translation contradicts body-coincident profile")
+        if geometry["intrinsics"] == "approximate_fov":
+            w, h = data["image_size"]
+            f = w / (2 * math.tan(math.radians(geometry["assumed_horizontal_fov_deg"]) / 2))
+            if not np.allclose(k, [[f, 0, w/2], [0, f, h/2], [0, 0, 1]], atol=1e-4):
+                raise ValueError("Intrinsics contradict approximate FOV profile")
     return Observation(data["frame_id"], stamp, time.monotonic(), age, pose,
                        cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), k, t,
-                       data["localization_epoch"], data["world_frame"])
+                       data["localization_epoch"], data["world_frame"], rectified,
+                       quality, dict(geometry))
 
 
 class OwlEgoClient(BaseClient):
     SUPPORTS_MOTION_TIMEOUT = True
 
     def __init__(self, *args, observation_max_age_s=0.5,
-                 observation_max_sync_error_s=0.05, **kwargs):
+                 observation_max_sync_error_s=0.05, allow_approximate_geometry=False,
+                 auto_arm=False, stop_timeout_s=8.0, observation_retry_s=0.5, **kwargs):
         super().__init__(*args, **kwargs)
+        if type(allow_approximate_geometry) is not bool or type(auto_arm) is not bool:
+            raise ValueError("Geometry opt-in and auto_arm must be booleans")
+        for value in (stop_timeout_s, observation_retry_s):
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError("Wait budgets must be finite and positive")
+        self.allow_approximate_geometry = allow_approximate_geometry
+        self.auto_arm = auto_arm
+        self.stop_timeout_s = stop_timeout_s
+        self.observation_retry_s = observation_retry_s
+        self._rgb_unavailable_since = None
+        self._starting_task = None
+        self._starting_since = None
+        self.event = lambda *args, **kwargs: None
         self.depth_service = _Da3DepthServiceClient(timeout_s=self.timeout_s)
         self.observation_max_age_s = observation_max_age_s
         self.observation_max_sync_error_s = observation_max_sync_error_s
@@ -106,6 +158,14 @@ class OwlEgoClient(BaseClient):
                 return
 
     def start(self):
+        if self.session_id:
+            raise RuntimeError("Close the existing session before starting a fresh mission")
+        self._frame_identity = self._image_shape = self.last_observation = None
+        self._lease_stop.clear()
+        self._lease_error = None
+        self._rgb_unavailable_since = self._starting_task = self._starting_since = None
+        if not math.isfinite(self.timeout_s) or self.timeout_s <= 90:
+            raise ValueError("Transport timeout must exceed the 90 s landing budget")
         self.depth_service.health()
         caps = self.rpc("GET", "/v21/capabilities")
         if caps.get("backend") != "owl_ego" or caps.get("protocol_version") != 1:
@@ -114,6 +174,9 @@ class OwlEgoClient(BaseClient):
                     "control_lease", "relative_xyz_yaw"):
             if caps.get(key) is not True:
                 raise RuntimeError(f"Missing Robot capability: {key}")
+        if self.auto_arm and caps.get("software_takeoff") is not True:
+            raise RuntimeError("Missing Robot capability: software_takeoff")
+        self.get_motion_tolerances(refresh=True)
         # Validate calibration and metric depth before acquiring flight control.
         obs = self.observe()
         self.estimate_depth(obs)
@@ -124,21 +187,175 @@ class OwlEgoClient(BaseClient):
         self._lease_thread = threading.Thread(target=self._heartbeat_loop,
                                               name="owl-ego-heartbeat", daemon=True)
         self._lease_thread.start()
-        return super().start()
+        self._init()  # A new lease always initializes, even after an old session.
+        result = super().start()
+        self.wait_stopped()
+        return result
 
     def _request_json(self, method, path, payload=None, **kwargs):
         # Existing init/takeoff/relative-motion/land calls carry the same lease.
         if method == "POST" and self.session_id and not path.startswith("/v21/"):
-            payload = {**(payload or {}), "session_id": self.session_id,
-                       "request_id": str(uuid.uuid4())}
-        return super()._request_json(method, path, payload, **kwargs)
+            payload = dict(payload or {})
+            payload.setdefault("session_id", self.session_id)
+            payload.setdefault("request_id", str(uuid.uuid4()))
+        self.event("http_request", method=method, path=path,
+                   payload={k: v for k, v in (payload or {}).items() if k != "session_id"})
+        try:
+            return super()._request_json(method, path, payload, **kwargs)
+        except Exception as exc:
+            # No automatic mutation retry. Retain the exact request for explicit
+            # reconciliation/replay; never generate a fresh action on timeout.
+            exc.request_method, exc.request_path = method, path
+            exc.request_payload = dict(payload) if payload is not None else None
+            self.event("http_error", method=method, path=path, error=str(exc),
+                       request_id=(payload or {}).get("request_id"))
+            raise
+
+    def _takeoff(self):
+        if self.timeout_s <= 60:
+            raise ValueError("Takeoff transport timeout must exceed 60 s")
+        result = self.rpc("POST", "/takeoff", {"auto_arm": self.auto_arm}, timeout_s=self.timeout_s)
+        self._completed_motion(result)
+        self.wait_stopped()
+        return result
+
+    def flight_health(self):
+        self.check_lease()
+        h = self._health_state()
+        self.event("flight_health", health=h)
+        for key in ("initialized", "airborne", "control_ready", "hold_ready", "odom_ok"):
+            if h.get(key) is not True:
+                raise RuntimeError(f"Missing flight capability: {key}")
+        if self._frame_identity is None or h.get("localization_epoch") != self._frame_identity[1]:
+            raise RuntimeError("Localization reset during mission")
+        if h.get("manual_takeover") or h.get("landing") or h.get("conflicting_publishers") or h.get("error"):
+            raise RuntimeError(f"Flight authority/motion failed: {h}")
+        if h.get("frame_alignment_ok") is False:
+            raise RuntimeError("Robot world alignment invalid")
+        phase = h.get("planner_state")
+        if phase not in {"starting", "ready", "not_required"}:
+            raise RuntimeError(f"Planner unavailable: {phase}")
+        if phase == "ready" and h.get("planner_ok") is not True:
+            raise RuntimeError("Ready planner lacks heartbeat")
+        if phase == "starting":
+            task = h.get("active_task_id")
+            if not task:
+                raise RuntimeError("Starting planner has no task")
+            if self._starting_task != task:
+                self._starting_task, self._starting_since = task, time.monotonic()
+            elif time.monotonic() - self._starting_since > 10:
+                raise RuntimeError("Planner startup exceeded 10 s")
+            state = self.navigation_status(task)
+            # Status is a later snapshot: a same-task terminal transition is legal.
+            if state["status"] not in {"accepted", "planning", "executing", "stopping", "arrived", "cancelled"}:
+                raise RuntimeError(f"Planner task failed: {state}")
+        else:
+            self._starting_task = self._starting_since = None
+        if h.get("rgb_ok") is True:
+            self._rgb_unavailable_since = None
+        elif (h.get("observation_error_code") == "observation_unavailable"
+              and h.get("observation_retryable") is True):
+            now = time.monotonic()
+            if self._rgb_unavailable_since is None:
+                self._rgb_unavailable_since = now
+            if now - self._rgb_unavailable_since > self.observation_retry_s:
+                raise RuntimeError("Synchronized observation unavailable beyond retry budget")
+        else:
+            raise RuntimeError(f"Invalid observation health: {h}")
+        return h
+
+    def wait_stopped(self):
+        deadline = time.monotonic() + self.stop_timeout_s
+        while True:
+            h = self.flight_health()
+            if h.get("stopped") is True and "active_task_id" in h and h["active_task_id"] is None:
+                return h
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Current stop confirmation timed out")
+            time.sleep(0.05)
+
+    def _completed_motion(self, result, *, require_task=False):
+        if require_task and not result.get("task_id"):
+            raise RuntimeError("Motion response lacks task_id for completion confirmation")
+        if result.get("task_id"):
+            state = self.navigation_status(result["task_id"])
+            self.event("motion_completed", state=state)
+            if state["status"] != "arrived" or state.get("stopped") is not True:
+                raise RuntimeError(f"Robot motion did not arrive: {state}")
+
+    def move_relative(self, dx=0., dy=0., dz=0., dyaw=0.):
+        return self.move_rel_xyz_yaw(dx, dy, dz, dyaw)
+
+    def move_rel_xyz_yaw(self, x=0., y=0., z=0., yaw=0., timeout_s=None):
+        budget = 15.0 if timeout_s is None else timeout_s
+        if isinstance(budget, bool) or not math.isfinite(budget) or not 0 < budget <= 170:
+            raise ValueError("Relative motion timeout must be in (0,170]")
+        if self.timeout_s <= budget:
+            raise ValueError("Transport timeout must exceed motion timeout")
+        self.wait_stopped()
+        done, outcome = threading.Event(), {}
+        def send():
+            try:
+                outcome["result"] = super(OwlEgoClient, self).move_rel_xyz_yaw(x,y,z,yaw,budget)
+            except BaseException as exc:
+                outcome["error"] = exc
+            finally:
+                done.set()
+        worker = threading.Thread(target=send, name="owl-ego-relative", daemon=True)
+        worker.start()
+        owned_task = None
+        try:
+            while not done.wait(0.1):
+                h = self.flight_health()
+                active = h.get("active_task_id")
+                if active:
+                    if owned_task and active != owned_task:
+                        raise RuntimeError("Relative task ownership changed")
+                    owned_task = active
+                self.get_pose()  # Timestamped samples for XYZ diagnostics and epoch checks.
+            if "error" in outcome:
+                raise outcome["error"]
+            self._completed_motion(outcome["result"], require_task=any(
+                self.quantize_motion(x,y,z,yaw).values()))
+            self.wait_stopped()
+            return outcome["result"]
+        except BaseException:
+            if owned_task:
+                try:
+                    self.cancel_navigation(owned_task)
+                except Exception as exc:
+                    self.event("relative_cancel_failed", task_id=owned_task, error=str(exc))
+            raise
+
+    def land(self):
+        if self.timeout_s <= 90:
+            raise ValueError("Landing transport timeout must exceed 90 s")
+        # The blocking Robot wait confirms fresh ON_GROUND/disarmed. Do not apply
+        # airborne/epoch checks to this already accepted landing.
+        result = self.rpc("POST", "/land", {}, timeout_s=self.timeout_s)
+        self._completed_motion(result, require_task=True)
+        self._frame_identity = self._image_shape = self.last_observation = None
+        self.event("landed", result=result)
+        return result
 
     def observe(self):
         self.check_lease()
-        started = time.monotonic()
-        obs = decode_observation(self.rpc("GET", "/v21/observation"),
+        deadline = time.monotonic() + self.observation_retry_s
+        while True:
+            self.check_lease()
+            started = time.monotonic()
+            try:
+                data = self.rpc("GET", "/v21/observation", timeout_s=max(0.001, deadline-started))
+                break
+            except RobotHTTPError as exc:
+                if not (exc.status == 503 and exc.error_code == "observation_unavailable"
+                        and exc.retryable and time.monotonic() + 0.05 < deadline):
+                    raise
+                time.sleep(0.05)
+        obs = decode_observation(data,
                                  max_age_s=self.observation_max_age_s,
-                                 max_sync_error_s=self.observation_max_sync_error_s)
+                                 max_sync_error_s=self.observation_max_sync_error_s,
+                                 allow_approximate_geometry=self.allow_approximate_geometry)
         if obs.age_s + time.monotonic() - started > self.observation_max_age_s:
             raise RuntimeError("Observation is stale after network transfer")
         identity = (obs.world_frame, obs.localization_epoch)
@@ -150,6 +367,12 @@ class OwlEgoClient(BaseClient):
             self._image_shape = obs.rgb.shape
         elif self._image_shape != obs.rgb.shape:
             raise RuntimeError("RGB resolution changed during mission")
+        self.event("observation", frame_id=obs.frame_id, pose=obs.pose,
+                   localization_epoch=obs.localization_epoch, rectified=obs.rectified,
+                   calibration_quality=obs.calibration_quality,
+                   geometry_assumptions=obs.geometry_assumptions,
+                   intrinsics=obs.intrinsics.tolist(),
+                   world_from_camera_optical_cm=obs.world_from_camera.tolist())
         return obs
 
     def estimate_depth(self, observation):
@@ -168,10 +391,11 @@ class OwlEgoClient(BaseClient):
         pose = {k: float(result["pose"][k]) for k in ("x", "y", "z", "yaw")}
         if not all(math.isfinite(v) for v in pose.values()):
             raise RuntimeError("Invalid Robot pose")
+        self.event("pose_sample", pose=pose, localization_epoch=result.get("localization_epoch"))
         return pose
 
     def navigate(self, pose):
-        self.check_lease()
+        self.wait_stopped()
         return self.rpc("POST", "/v21/navigation", {
             "session_id": self.session_id, "request_id": str(uuid.uuid4()),
             "localization_epoch": self._frame_identity[1], "pose": dict(pose),
@@ -185,6 +409,7 @@ class OwlEgoClient(BaseClient):
         if result.get("status") not in {"accepted", "planning", "executing", "stopping",
                                         "arrived", "cancelled", "failed"}:
             raise RuntimeError("Invalid navigation status")
+        self.event("navigation_status", state=result)
         return result
 
     def cancel_navigation(self, task_id):
@@ -203,3 +428,4 @@ class OwlEgoClient(BaseClient):
             self._lease_stop.set()
             if self._lease_thread:
                 self._lease_thread.join(timeout=3)
+            self.session_id = None

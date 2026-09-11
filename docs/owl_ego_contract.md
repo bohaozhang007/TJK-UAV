@@ -3,9 +3,10 @@
 Updated: 2026-09-10. This is the shared interface specification for the current
 Robot implementation. It consolidates the earlier amendments; implementation
 history and test evidence remain in [robot-002](collab/messages/robot-002.md).
-The Agent client in `src/robot_client/owl_ego.py` still needs the adaptations
-listed below. Protocol version 1 and the existing endpoint names are retained;
-Robot availability does not mean the current Agent is already compatible.
+The Agent client in `src/robot_client/owl_ego.py` implements the adaptations below
+as of Agent round 3; see [agent-003](collab/messages/agent-003.md) for local test
+evidence and remaining real-EGO/model integration. Protocol version 1 and the
+existing endpoint names are retained; neither side alone certifies full integration.
 
 Robot runs on OWL; Agent runs on the Windows computer and calls Robot over Wi-Fi.
 Agent owns route decisions, detection/TRACK and DA3 depth. Robot owns FAST-LIO
@@ -249,8 +250,9 @@ For Agent-operated ground takeoff, explicitly opt in:
 ~~~
 Check `software_takeoff:true` before using it. Absent/false `auto_arm` preserves
 pilot-controlled mode/arming and cannot provide unattended ground startup.
-Current Agent BaseClient._takeoff sends an empty body before lease injection;
-it must be adapted if software takeoff is wanted.
+Agent round 3 overrides takeoff in OwlEgoClient: configuration `owl_ego.auto_arm`
+is explicit and defaults false; true requires the software_takeoff capability.
+Other backends retain BaseClient's existing behavior.
 
 Robot performs bounded hold preparation, OFFBOARD selection and ordinary arming,
 then direct +1 m takeoff at configured reference speed/lead limits. Preserve
@@ -367,19 +369,21 @@ ends the attempt; epoch changes and invalid geometry are not missing-frame retri
    Route index, target identity/deduplication and detection-result age belong to Agent.
 7. Land when intended, confirm completion, then release the session.
 
-The current Agent checkout still requires:
+Agent round 3 implements the following (local tests passed; real-EGO/model joint
+validation remains pending):
 - explicit approximate-geometry decoding/metadata logging;
 - phase-aware health checks and bounded current-stop waits between movements;
 - structured observation error handling and bounded retry;
 - software takeoff opt-in if Agent will arm/take off from the ground;
 - accepted-landing handling across epoch changes and fresh mission initialization;
-- retry IDs preserved for uncertain requests; use only supported motion endpoints;
+- original IDs/bodies retained on uncertain request exceptions, with no automatic
+  mutation retries; use only supported motion endpoints;
 - acceptance of zero-Z reference semantics and logging sufficient for XYZ diagnosis.
 
 Compared with the original contract, endpoint shapes and units are retained.
 Additive capabilities/status/error metadata and software takeoff are backward
 compatible only when clients handle them by phase. Zero-Z and pose-window stopping
-are explicit semantic corrections; unconditional planner_ok/rectified checks in
+  are explicit semantic corrections; unconditional planner_ok/rectified checks in
 the old Agent are incompatible with the current deployed profile.
 
 Robot-side mock-FCU/real-EGO and physical operator tests are recorded in robot-002.

@@ -3,6 +3,8 @@ import base64
 import copy
 from dataclasses import replace
 import json
+import math
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -10,7 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"src"))
 import cv2
@@ -21,6 +23,7 @@ from agent.tjk.patrol import PerceptionPipeline, TargetGeometryError, TargetMemo
 from agent.tjk.v21 import PatrolAgent, validate_patrol_config
 from agent.tjk.v20 import FlightSafetyError
 from robot_client.owl_ego import Observation, OwlEgoClient, decode_observation
+from robot_client.base import BaseClient, RobotHTTPError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +45,8 @@ def wire_observation():
     assert ok
     return dict(ok=True, frame_id=obs.frame_id, timestamp_s=obs.timestamp_s,
                 age_s=0.01, sync_error_s=0.01, pose=obs.pose, image_size=[20,20],
-                rectified=True, rgb_jpeg_base64=base64.b64encode(jpg).decode(),
+                rectified=True, calibration_quality="calibrated",
+                rgb_jpeg_base64=base64.b64encode(jpg).decode(),
                 intrinsics=obs.intrinsics.tolist(),
                 world_from_camera_optical_cm=obs.world_from_camera.tolist(),
                 localization_epoch="epoch-a", world_frame="odom")
@@ -162,13 +166,17 @@ class HttpContractTests(unittest.TestCase):
                 elif self.path=="/v21/observation": result=wire_observation()
                 elif self.path=="/v21/session": result=dict(session_id="session-1")
                 elif self.path=="/health":
-                    result=dict(health=dict(initialized=True,airborne=True))
+                    result=FakeClient().health()
                 elif self.path=="/motion_tolerances":
                     result=dict(motion_tolerances=dict(position_tolerance_cm=15,yaw_tolerance_deg=5,
                                 position_error_metric="euclidean_3d",source="owl_ego"))
                 elif self.path=="/v21/navigation": result=dict(task_id="nav-1")
+                elif self.path in ("/move_relative_xyz_yaw", "/land"):
+                    result=dict(task_id="motion-1")
                 elif self.path.startswith("/v21/navigation/status"):
-                    result=dict(task_id="nav-1",status="cancelled",stopped=True)
+                    result=(dict(task_id="motion-1",status="arrived",stopped=True)
+                            if "motion-1" in self.path else
+                            dict(task_id="nav-1",status="cancelled",stopped=True))
                 else: result={}
                 raw=json.dumps(dict(ok=True,**{k:v for k,v in result.items() if k!="ok"})).encode()
                 self.send_response(200)
@@ -284,8 +292,9 @@ class PipelineTests(unittest.TestCase):
             pipeline.close()
 
 
-class FakeClient:
+class FakeClient(OwlEgoClient):
     def __init__(self):
+        super().__init__()
         self.pose=dict(x=0.,y=0.,z=100.,yaw=0.)
         self.last_observation=None
         self._frame_identity=("odom","epoch-a")
@@ -297,7 +306,8 @@ class FakeClient:
     def check_lease(self): pass
     def health(self):
         return dict(ok=True,health=dict(initialized=True,airborne=True,control_ready=True,
-                    odom_ok=True,rgb_ok=True,planner_ok=True,localization_epoch="epoch-a"))
+                    hold_ready=True, stopped=True, active_task_id=None, planner_state="not_required",
+                    odom_ok=True,rgb_ok=True,planner_ok=False,localization_epoch="epoch-a"))
     def get_pose(self): return self.pose.copy()
     def observe(self):
         self.frame+=1
@@ -333,8 +343,9 @@ class MissionTests(unittest.TestCase):
         detector.cfg.confidence_threshold=.5
         self.agent=PatrolAgent(config=config,client=self.client,detector=detector,
                                tracker=Mock(),detector_name="sam3",tracker_name="sam2",
-                               vis_dir=self.temp.name,save_vis=False)
+                               vis_dir=str(Path(self.temp.name)/"vis"),save_vis=False)
         self.agent.event=Mock()
+        self.client.event=self.agent.event
         self.agent.mission_origin_pose=self.client.pose.copy()
         self.agent.position_tolerance_cm=15
         self.agent.yaw_tolerance_deg=5
@@ -397,6 +408,390 @@ class MissionTests(unittest.TestCase):
         config=copy.deepcopy(self.config)
         config["mission"]["waypoints"][0]["only_arrive"]=True
         with self.assertRaises(ValueError): validate_patrol_config(config)
+
+    def test_cancel_arrival_race_and_failed_task_are_not_confused(self):
+        self.agent.active_navigation="a"
+        self.client.cancel_navigation=Mock()
+        self.client.navigation_status=Mock(return_value=dict(status="arrived",stopped=True))
+        self.agent._cancel_navigation()
+        self.assertIsNone(self.agent.active_navigation)
+        self.agent.active_navigation="b"
+        self.client.navigation_status.return_value=dict(status="failed",stopped=True,error="planner lost")
+        with self.assertRaisesRegex(FlightSafetyError,"planner lost"):
+            self.agent._cancel_navigation()
+        self.assertEqual(self.agent.active_navigation,"b")
+
+
+def approximate_wire():
+    data = wire_observation()
+    data.update(rectified=False, calibration_quality="approximate", geometry_assumptions=dict(
+        intrinsics="approximate_fov", assumed_horizontal_fov_deg=90.,
+        principal_point="image_center", square_pixels_assumed=True,
+        distortion="unknown_not_corrected", extrinsics="body_coincident_fixed",
+        camera_translation="body_coincident_assumption"))
+    return data
+
+
+class CurrentContractTests(unittest.TestCase):
+    def client(self, **kwargs):
+        client = OwlEgoClient(**kwargs)
+        client._frame_identity = ("odom", "epoch-a")
+        client.health = Mock(return_value=FakeClient().health())
+        return client
+
+    def test_approximate_opt_in_and_metadata(self):
+        data = approximate_wire()
+        with self.assertRaises(ValueError): decode_observation(data)
+        obs = decode_observation(data, allow_approximate_geometry=True)
+        self.assertFalse(obs.rectified)
+        self.assertEqual(obs.geometry_assumptions["assumed_horizontal_fov_deg"], 90)
+        for key, value in (("geometry_assumptions", {}), ("calibration_quality", "unknown"),
+                           ("age_s", 1), ("sync_error_s", .2)):
+            bad = copy.deepcopy(data); bad[key] = value
+            with self.assertRaises(ValueError):
+                decode_observation(bad, allow_approximate_geometry=True)
+        data["intrinsics"][0][0] = 15
+        with self.assertRaisesRegex(ValueError, "contradict"):
+            decode_observation(data, allow_approximate_geometry=True)
+
+    def test_rectified_approximate_extrinsics_still_require_opt_in(self):
+        data = approximate_wire()
+        data["rectified"] = True
+        data["geometry_assumptions"].update(intrinsics="camera_info", distortion="corrected")
+        with self.assertRaises(ValueError): decode_observation(data)
+        self.assertEqual(decode_observation(data, allow_approximate_geometry=True).calibration_quality,
+                         "approximate")
+
+    def test_only_explicit_temporary_observation_is_retried(self):
+        transient = RobotHTTPError(503, "/v21/observation", json.dumps(dict(
+            error_code="observation_unavailable", retryable=True)))
+        client = self.client(observation_retry_s=.12)
+        client.rpc = Mock(side_effect=[transient, wire_observation()])
+        client.observe(); self.assertEqual(client.rpc.call_count, 2)
+        for status, code, retryable in [(409,"localization_epoch_changed",False),
+                                        (422,"invalid_observation",False), (503,"other",True)]:
+            client.rpc = Mock(side_effect=RobotHTTPError(status,"/v21/observation",json.dumps(
+                dict(error_code=code,retryable=retryable))))
+            with self.assertRaises(RobotHTTPError): client.observe()
+            self.assertEqual(client.rpc.call_count, 1)
+        client.rpc = Mock(side_effect=transient)
+        start = time.monotonic()
+        with self.assertRaises(RobotHTTPError): client.observe()
+        self.assertLess(time.monotonic()-start, .2)
+
+    def test_phase_health_and_persistent_rgb_absence(self):
+        client = self.client(observation_retry_s=.01)
+        h = client.health.return_value["health"]
+        client.flight_health()  # not_required, planner_ok false
+        h.update(planner_state="starting",active_task_id="a")
+        client.navigation_status = Mock(return_value=dict(status="planning"))
+        client.flight_health()
+        h.update(rgb_ok=False,observation_error_code="observation_unavailable",observation_retryable=True)
+        client.flight_health()
+        time.sleep(.015)
+        with self.assertRaisesRegex(RuntimeError,"retry budget"): client.flight_health()
+        h.update(rgb_ok=True,planner_state="lost")
+        with self.assertRaisesRegex(RuntimeError,"Planner"): client.flight_health()
+        h.update(planner_state="not_required",localization_epoch="new")
+        with self.assertRaisesRegex(RuntimeError,"reset"): client.flight_health()
+
+    def test_current_stop_required_and_timeout_has_no_submission(self):
+        client = self.client(stop_timeout_s=.06)
+        h = client.health.return_value["health"]
+        h["stopped"] = False
+        client.rpc = Mock()
+        with self.assertRaisesRegex(RuntimeError,"stop confirmation"):
+            client.navigate(dict(x=1,y=0,z=100,yaw=0))
+        client.rpc.assert_not_called()
+        first = copy.deepcopy(h)
+        h["stopped"] = True
+        client.health.side_effect = [dict(ok=True,health=first),dict(ok=True,health=h)]
+        client.rpc.return_value = dict(ok=True,task_id="b")
+        self.assertEqual(client.navigate(dict(x=1,y=0,z=100,yaw=0)),"b")
+
+    def test_startup_budget_and_ready_to_terminal_race(self):
+        client=self.client()
+        client.health.return_value["health"].update(planner_state="starting",active_task_id="a")
+        client.navigation_status=Mock(return_value=dict(status="arrived",stopped=True))
+        client.flight_health()  # Later task snapshot can already be terminal.
+        client._starting_since=time.monotonic()-11
+        with self.assertRaisesRegex(RuntimeError,"10 s"): client.flight_health()
+
+    def test_relative_monitors_epoch_and_cancels_only_owned_task(self):
+        client=self.client()
+        client.wait_stopped=Mock()
+        healthy=client.health.return_value["health"]
+        healthy["active_task_id"]="relative-a"
+        reset={**healthy,"localization_epoch":"new"}
+        client.health.side_effect=[dict(ok=True,health=healthy),dict(ok=True,health=reset)]
+        client.get_pose=Mock(return_value=dict(x=0,y=0,z=100,yaw=0))
+        release=threading.Event();completed=threading.Event()
+        def block(*args,**kwargs):
+            release.wait(2);completed.set()
+            return dict(ok=True)
+        client.cancel_navigation=Mock(side_effect=lambda task:release.set())
+        try:
+            with patch.object(BaseClient,"move_rel_xyz_yaw",side_effect=block):
+                with self.assertRaisesRegex(RuntimeError,"reset"):
+                    client.move_rel_xyz_yaw(x=20,z=0)
+                self.assertTrue(completed.wait(1))
+            client.cancel_navigation.assert_called_once_with("relative-a")
+        finally: release.set()
+
+    def test_relative_heartbeat_failure_is_fatal(self):
+        client=self.client();client.wait_stopped=Mock()
+        release=threading.Event()
+        def block(*args,**kwargs):
+            client._lease_error=RuntimeError("heartbeat timeout")
+            release.wait(2);return dict(ok=True)
+        try:
+            with patch.object(BaseClient,"move_rel_xyz_yaw",side_effect=block):
+                with self.assertRaisesRegex(RuntimeError,"lease"):
+                    client.move_rel_xyz_yaw(x=20)
+        finally: release.set()
+
+    def test_readiness_409_is_not_retried_as_new_navigation(self):
+        client=self.client();client.wait_stopped=Mock()
+        client.rpc=Mock(side_effect=RobotHTTPError(409,"/v21/navigation","busy"))
+        with self.assertRaises(RobotHTTPError):
+            client.navigate(dict(x=20,y=0,z=100,yaw=0))
+        client.rpc.assert_called_once()
+
+    def test_mutation_error_preserves_exact_request_for_replay(self):
+        client = self.client(); client.session_id = "s"
+        with patch.object(BaseClient,"_request_json",side_effect=RuntimeError("uncertain")) as call:
+            with self.assertRaises(RuntimeError) as cm:
+                client._request_json("POST","/move_relative_xyz_yaw",dict(x=20,y=0,z=0,yaw=0))
+            body = cm.exception.request_payload
+            with self.assertRaises(RuntimeError):
+                client._request_json("POST","/move_relative_xyz_yaw",body)
+            self.assertEqual(call.call_args_list[0],call.call_args_list[1])
+            self.assertTrue(body["request_id"])
+
+    def test_landing_epoch_change_does_not_use_airborne_health(self):
+        client = self.client(); client.session_id = "s"
+        def rpc(method,path,payload=None,**kw):
+            if path == "/land":
+                client.health.return_value["health"].update(localization_epoch="new",control_ready=False)
+                return dict(ok=True,task_id="land")
+            return dict(ok=True,task_id="land",status="arrived",stopped=True,
+                        localization_error="reset during landing")
+        client.rpc = Mock(side_effect=rpc)
+        client.land()
+        client.health.assert_not_called()
+        self.assertIsNone(client._frame_identity)
+
+    def test_takeoff_opt_in_and_fresh_session_init(self):
+        client = self.client(auto_arm=True); client.depth_service = Mock()
+        caps = dict(ok=True,backend="owl_ego",protocol_version=1,async_navigation=True,
+                    cancel_and_hold=True,synchronized_observation=True,control_lease=True,
+                    relative_xyz_yaw=True,software_takeoff=True)
+        client.observe = Mock(return_value=observation())
+        client.get_motion_tolerances = Mock(return_value={})
+        client._init = Mock(return_value=dict(ok=True))
+        def rpc(method,path,payload=None,**kw):
+            if path == "/v21/capabilities": return caps
+            if path == "/v21/session": return dict(ok=True,session_id="s")
+            if path == "/takeoff":
+                self.assertEqual(payload,{"auto_arm":True})
+                return dict(ok=True)
+            return dict(ok=True)
+        client.rpc = Mock(side_effect=rpc)
+        client.wait_stopped = Mock()
+        client._health_state = Mock(side_effect=[dict(initialized=True,airborne=False),
+                                                dict(initialized=True,airborne=True)])
+        try:
+            client.start()
+            client._init.assert_called_once()
+            self.assertTrue(any(c.args[1]=="/takeoff" for c in client.rpc.call_args_list))
+        finally: client.close()
+        caps["software_takeoff"] = False
+        with self.assertRaisesRegex(RuntimeError,"software_takeoff"): client.start()
+        self.assertIsNone(client.session_id)
+
+
+class SimulatedHardware:
+    """Simple timed pose interpolation; no ROS, EGO or FCU dynamics."""
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.session = None
+        self.pose = np.array([0.,0.,1.,0.])  # Robot internal metres/radians
+        self.tasks, self.commands = {}, []
+        self.active = None
+        self.epoch = "epoch-a"
+        self.initialized = False
+        self.airborne = True
+        self.frame = 0
+        self.frame_at = 0
+        self.cached = None
+        self.stop_until = 0
+
+    def start(self): pass
+    def close(self): pass
+
+    def snapshot(self):
+        with self.lock:
+            now = time.monotonic()
+            if self.active:
+                t = self.tasks[self.active]
+                fraction = min(1., (now-t["started"])/t["duration"])
+                if t["status"] != "stopping":
+                    self.pose = t["start"] + fraction*(t["goal"]-t["start"])
+                    t["status"] = "planning" if fraction < .12 else "executing"
+                if fraction >= 1:
+                    t.update(status="cancelled" if t["status"]=="stopping" else "arrived",stopped=True)
+                    self.active = None
+                    self.stop_until = now + .025  # Historical stop is insufficient.
+            h = dict(initialized=self.initialized,airborne=self.airborne,control_ready=True,
+                     hold_ready=True,odom_ok=True,localization_epoch=self.epoch,rgb_ok=True,
+                     active_task_id=self.active,stopped=self.active is None and now>=self.stop_until,
+                     planner_state="not_required",planner_ok=False)
+            if self.active:
+                phase = self.tasks[self.active]["status"]
+                h.update(planner_state="starting" if phase=="planning" else
+                         "not_required" if phase=="stopping" else "ready",
+                         planner_ok=phase=="executing")
+            tasks = {key:{k:v for k,v in t.items() if k in ("task_id","status","stopped")}
+                     for key,t in self.tasks.items()}
+            return dict(session_id=self.session,pose=self.pose.tolist(),health=h,tasks=tasks)
+
+    def command(self, op, data):
+        with self.lock:
+            snap = self.snapshot()
+            self.commands.append((op,copy.deepcopy(data),time.monotonic(),self.pose.copy()))
+            if op=="acquire": self.session=data["session_id"]
+            elif op=="init": self.initialized=True
+            elif op=="release": self.session=None
+            elif op=="land":
+                self.airborne=False; self.initialized=False; self.epoch="land-reset"
+                self.active=None
+                self.tasks[data["task_id"]]=dict(task_id=data["task_id"],status="arrived",stopped=True)
+            elif op=="cancel":
+                t=self.tasks[data["task_id"]]
+                if t["status"] not in ("arrived","cancelled"):
+                    t.update(status="stopping",started=time.monotonic(),duration=.08)
+            elif op in ("navigate","relative"):
+                if not snap["health"]["stopped"]:
+                    return dict(ok=False,error="previous motion not confirmed stopped")
+                goal=np.array(data.get("goal",self.pose),float)
+                if op=="relative":
+                    x,y,z,yaw=data["relative"]; a=self.pose[3]
+                    goal=self.pose+np.array([math.cos(a)*x-math.sin(a)*y,
+                                             math.sin(a)*x+math.cos(a)*y,z,yaw])
+                self.active=data["task_id"]
+                self.tasks[self.active]=dict(task_id=self.active,status="planning",stopped=False,
+                    start=self.pose.copy(),goal=goal,started=time.monotonic(),duration=.65)
+            return dict(ok=True,**({"task_id":data["task_id"]} if "task_id" in data else {}))
+
+    def observation(self):
+        from robot.controllers.owl_ego import public_pose
+        with self.lock:
+            self.snapshot()
+            now=time.monotonic()
+            if self.cached is None or now-self.frame_at>.025:
+                self.frame+=1; self.frame_at=now
+                data=approximate_wire(); data["frame_id"]=str(self.frame)
+                data["pose"]=public_pose(self.pose); data["localization_epoch"]=self.epoch
+                a=self.pose[3]
+                r=np.array([[math.cos(a),-math.sin(a),0], [math.sin(a),math.cos(a),0],[0,0,1]])
+                t=np.eye(4);t[:3,:3]=r@np.array([[0,0,1],[-1,0,0],[0,-1,0]])
+                t[:3,3]=self.pose[:3]*100
+                data["world_from_camera_optical_cm"]=t.tolist()
+                self.cached=data
+            return copy.deepcopy(self.cached)
+
+
+class LocalRobotIntegrationTests(unittest.TestCase):
+    def test_three_rounds_real_agent_track_client_and_robot_http(self):
+        from robot.controllers.owl_ego import OwlEgoController
+        from robot.server import run_http_server, NullKeepalive
+        hw=SimulatedHardware()
+        robot_config=yaml.safe_load((ROOT/"src/robot/config/owl_ego.yaml").read_text())
+        controller=OwlEgoController(hardware=hw,config=robot_config)
+        absent=[2]
+        def synced_observation():
+            from robot.controllers.owl_ego_observation import ObservationUnavailable
+            if absent[0]:
+                absent[0]-=1
+                raise ObservationUnavailable("synthetic image awaiting odometry")
+            return hw.observation()
+        controller.observation=synced_observation  # Synthetic exposure, real HTTP/controller.
+        server=run_http_server(controller,NullKeepalive(),"127.0.0.1",0)
+        client=OwlEgoClient(port=server.server_port,allow_approximate_geometry=True)
+        client.depth_service=Mock()
+        client.depth_service.estimate_depth_cm.return_value=np.full((20,20),200.)
+        class Tracker:
+            frame_idx=0
+            last_timing={}
+            def reset(self): self.frame_idx=0
+            def set_vis_dir(self,*args): pass
+            def set_img_size(self,*args): pass
+            def track_with_mask(self,frame,box=None):
+                self.frame_idx+=1
+                # Init, one forward adjustment, then centred at the desired size.
+                b=np.array([8,8,12,12] if self.frame_idx<=2 else [6,6,14,14])
+                mask=np.zeros((20,20),bool);mask[b[1]:b[3],b[0]:b[2]]=True
+                return b,mask
+        with tempfile.TemporaryDirectory() as directory:
+            cfg=yaml.safe_load((ROOT/"src/agent/config/owl/v21.yaml").read_text())
+            cfg["patrol"].update(capture_fps=40.,poll_interval_s=.02,min_depth_pixels=1)
+            cfg["mission"]["waypoints"]=[dict(name=f"B{i}",x_cm=250.*(i+1),y_cm=0.,z_cm=0.,yaw_deg=0.) for i in range(3)]
+            agent=PatrolAgent(config=cfg,client=client,detector=Mock(),tracker=Tracker(),
+                              detector_name="sam3",tracker_name="sam2",vis_dir=str(Path(directory)/"vis"),save_vis=False)
+            agent._log=lambda *args:None
+            agent.save_depth=False; agent.action_sleep_s=0; agent.max_fb_step_cm=60
+            records=[]
+            original_event=agent.event
+            def event(kind,**data):
+                records.append((kind,copy.deepcopy(data)));original_event(kind,**data)
+            agent.event=event;client.event=event
+            triggered=set()
+            def infer(obs):
+                segment=agent.pipeline.segment if agent.pipeline else None
+                if agent.phase=="PATROL":
+                    if segment in triggered: return []
+                    # Wait for a moving exposure, then model delayed inference.
+                    if not hw.snapshot()["health"]["active_task_id"]: return []
+                    triggered.add(segment);time.sleep(.2)
+                box=[8,8,12,12]
+                return [dict(box=box,confidence=.9,position_cm=agent.position(
+                    obs,np.full((20,20),200.),box).tolist())]
+            agent.infer_observation=infer
+            try:
+                agent.connect()
+                result=agent.run_mission("synthetic bottle")
+                client.land()
+                self.assertEqual(len(result),3)
+                self.assertTrue(all(r["status"]=="completed" for r in result))
+                phases=[data["phase"] for kind,data in records if kind=="phase"]
+                self.assertEqual(phases.count("TRACK"),3)
+                self.assertEqual(phases.count("RETURN_TO_ROUTE"),3)
+                self.assertEqual(len([c for c in hw.commands if c[0]=="relative"]),3)
+                claimed=[data for kind,data in records if kind=="target_claimed"]
+                cancels=[c for c in hw.commands if c[0]=="cancel"]
+                self.assertEqual(len(cancels),3)
+                for hit,cancel in zip(claimed,cancels):
+                    self.assertGreater(abs(cancel[3][0]*100-hit["capture_pose"]["x"]),12)
+                goals=[data["target"] for kind,data in records if kind=="navigation_started"]
+                for i,hit in enumerate(claimed):
+                    self.assertEqual(goals[4*i+1:4*i+3],[hit["capture_pose"]]*2)
+                    self.assertEqual(goals[4*i],goals[4*i+3])
+                self.assertTrue(any(c[0]=="heartbeat" for c in hw.commands))
+                self.assertIsNone(client._frame_identity)
+                output=os.environ.get("V21_TEST_OUTPUT")
+                if output:
+                    path=Path(output);path.mkdir(parents=True,exist_ok=True)
+                    (path/"integration_events.jsonl").write_text("".join(
+                        json.dumps(dict(event=kind,**data),ensure_ascii=False)+"\n"
+                        for kind,data in records),encoding="utf-8")
+                    (path/"integration_result.json").write_text(json.dumps(dict(
+                        scope="Real Agent/TRACK/Client/Robot HTTP; synthetic vision and interpolated hardware; no ROS/EGO/FCU",
+                        rounds=3, targets=result, goals=goals,
+                        cancelled_task_ids=[c[1]["task_id"] for c in cancels],
+                        exposure_to_cancel_distance_cm=[abs(c[3][0]*100-h["capture_pose"]["x"])
+                                                        for h,c in zip(claimed,cancels)]),indent=2),encoding="utf-8")
+            finally:
+                client.close();server.shutdown();server.server_close()
 
 
 if __name__=="__main__": unittest.main()

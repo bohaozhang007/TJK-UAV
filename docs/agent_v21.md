@@ -6,9 +6,14 @@
 .\run_agent_v21.bat --use_da3 --det sam3 --img assets\bottle-uav.jpg --box assets\bottle-uav.txt --robot owl_ego --server-host 192.168.2.20 --config owl\v21.yaml
 ```
 
-需要先实现并启动符合 [协议](owl_ego_contract.md) 的无人机端后端。当前旧 `owl`
-Server 不支持 v21；Client 会在取得控制权、起飞前检查能力和同步相机观测。
-[发给无人机端 Codex 的提示词](collab/messages/agent-001.md) 与协议文件一起传过去。
+需要启动符合当前 [协议](owl_ego_contract.md) 的 `owl_ego` 后端；旧 `owl` Server
+不支持 v21。Agent 已按 robot-002 接入，本地三轮 HTTP 模拟通过，详见
+[agent-003](collab/messages/agent-003.md)；尚未完成真实 EGO/模型参与的双方联调。
+
+`owl/v21.yaml` 的 `owl_ego.allow_approximate_geometry: true` 显式接纳用户指定近似相机，
+Client 默认仍严格。`auto_arm: false` 保留飞手切 OFFBOARD/解锁的起飞方式；若本次操作
+选择软件起飞，显式设置 `owl_ego.auto_arm: true`，Client 会检查 software_takeoff 能力。
+`init` 本身不解锁。每次新会话都重新 init，不继承上个会话的初始化结论。
 
 Agent/SAM2、SAM3、DA3 分别沿用 sam2、sam3、da3 Conda 环境。旧 run_agent.bat
 默认仍运行 v20；新 wrapper 仅在本次调用选择 v21。也可直接在正确环境运行
@@ -41,7 +46,15 @@ Agent/SAM2、SAM3、DA3 分别沿用 sam2、sam3、da3 Conda 环境。旧 run_ag
 这一近似不提供完美实例识别，也不是避障保证。
 
 DA3 原有服务已经返回对齐 RGB 的厘米深度，因此无需修改服务；K 和完整相机变换
-来自 Robot 的同步观测。Robot 负责图像去畸变及 resize 后的内参调整。
+来自 Robot 的同步观测。严格模式由 Robot 去畸变并缩放 K；当前近似模式保持
+rectified=false，HFOV=90°、固定水平和零安装平移是显式假设，写入目标记录和事件。
+
+每次导航和 TRACK 动作前最多等待 8 s 当前停稳：health.stopped=true、active_task_id=null，
+并检查权限/epoch。planner starting 允许有界启动，not_required 不要求心跳；lost 退出。
+仅对 503 + observation_unavailable + retryable=true 重试，预算 0.5 s、间隔 50 ms。
+TRACK 阻塞期间心跳独立运行，并轮询健康/位姿；z=0 原样传递、沿用 Robot 高度参考。
+运动请求不自动重发；异常保留原请求 ID/body 以供核对，不把 HTTP 失败当作停稳。
+已受理降落由 Robot 确认，期间不套用空中权限或旧 epoch 检查；成功后清理 Client 世界身份。
 
 `owl/v21.yaml` 暂保留 v20 TRACK 构造器所需的 SEARCH/SELECT/SCAN 参数，v21 不执行
 这些阶段。`track.skip=false`、`scan.skip=true` 为强制要求。示例航点仍需按场地配置。
@@ -50,12 +63,15 @@ DA3 原有服务已经返回对齐 RGB 的厘米深度，因此无需修改服�
 
 `logs/v21_<timestamp>/` 包含 log.txt、config.json、events.jsonl，以及每个目标的
 触发图、拍摄位姿/内参/变换、检测框和 TRACK 可视化。事件包含检测耗时、去重、
-状态切换、导航目标、任务结果和采集/覆盖统计。
+状态切换、导航目标、任务结果和采集/覆盖统计，并记录请求 ID、health、task diagnostics/
+timing_s、近似几何与独立位姿采样。分时采样不作为精确的受理/终态位姿快照；z=0
+动作的高度参考未由接口返回，因此不以“起点实测高度+0”计算高度/三维目标误差。
 
 ```powershell
 & "$env:USERPROFILE\anaconda3\envs\sam2\python.exe" -m unittest discover -s tests -p test_v21.py -v
 ```
 
-测试不加载模型、不连接无人机。覆盖空间变换、去重、失败重试、检测线程延迟与
-过期结果、采样间隔、巡航回退恢复、提前返航、协议校验及定位重置。实际 SAM3/DA3
-吞吐、显存占用、网络时延、标定精度和飞行停止恢复需要两端完成后联调验证。
+测试不加载模型、不连接无人机。包括真实 PatrolAgent、原 v20 TRACK、Client 与 Robot
+HTTP controller 的三轮联调；视觉输出和运动硬件为合成数据，不包含 ROS/EGO/FCU。
+设置环境变量 `V21_TEST_OUTPUT` 可保存联调事件和结果。实际 SAM3/DA3 吞吐、显存占用、
+Wi-Fi 时延、几何精度与真实 EGO 链路仍需后续验证。

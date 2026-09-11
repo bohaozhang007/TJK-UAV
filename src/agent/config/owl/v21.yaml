@@ -26,8 +26,8 @@ mission:
   # the OWL navigation system and the Agent safety limit before deployment.
   waypoints:
     - name: waypoint_1
-      x_cm: 0.0
-      y_cm: 100.0
+      x_cm: 500.0
+      y_cm: 0.0
       z_cm: 0.0
       yaw_deg: 0.0
 
@@ -154,6 +154,14 @@ trackers:
   sam2: {}
 
 # v21-only settings. All route legs run detection, including the final arrival view.
+owl_ego:
+  # Explicit user-approved approximation; client default remains strict.
+  allow_approximate_geometry: true
+  # Opt in only when the operator intends software OFFBOARD/arming and takeoff.
+  auto_arm: false
+  stop_timeout_s: 8.0
+  observation_retry_s: 0.5
+
 patrol:
   capture_fps: 5.0
   # Process frame 1, 1+N, 1+2N, ... among unique captured frames.
