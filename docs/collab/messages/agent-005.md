@@ -173,3 +173,27 @@ vis/target_NNN_attempt_NN/。巡航检测仍在 vis/detections/，trigger 图后
 不变。推理前固定目录并随写盘任务传递，避免异步写盘时使用后续目标的目录。
 针对性 3 项图片测试通过（0.389 s），包含实际 _reacquire 路径归档位置断言；
 git diff --check 通过。新运行生效，不搬移历史图片。
+
+### 连续阶段归档及 21:29 日志复核
+
+最新 logs/v21_20260911_212931：21:29:40.407 claim trigger，40.694 仍有一张
+已开始推理的尾帧完成；21:30:32.021 TRACK success，40.080 恢复巡航，40.894 起
+多次 duplicate。因此共享 detections 中 trigger 后的图片既包含尾帧，也包含
+完成目标后继续航线的检测，不能把这些都视为暂停后继续消费旧队列。
+
+按用户要求，日志 vis 下连续编号 phase_0_toPoint_1/detections/、
+phase_1_toTarget_1/、phase_2_toPoint_1/detections/；后续航点、目标访问各自递增，
+最后 phase_N_returnHome。toPoint 使用一基航点索引，toTarget 使用 target_id，
+重试同一目标因 phase 编号不同不会覆盖。目标阶段包含回曝光点、重捕获、TRACK、
+回 P；直接保存 trigger.jpg/json、reacquire top3/json 和跟踪图。
+
+推理开始时固定输出目录，候选带该目录供 trigger 后缀标记使用。即使写盘尚未完成
+或已经切到后续阶段，标记仍作用于触发图原航线阶段；phase 事件新增 log_directory。
+控制流程、检测阈值和去重不变，未搬移历史图片。
+图片测试 4 项通过（0.420 s），包括跨阶段异步 trigger 定位；Agent 51 项通过
+（17.724 s），完整模拟链路断言 0→目标1→继续航点1→航点2→返航目录及 trigger
+归属。证据 logs/phase_directory_regression.log；git diff --check 通过。未实飞。
+
+用户随后精简目录：toPoint 阶段直接保存巡航检测 PNG/JSON，移除 detections 子层，
+例如 vis/phase_0_toPoint_1/patrol_..._top3_trigger.png。针对性 4 项图片测试通过
+（0.418 s），git diff --check 通过。未移动历史文件，未修改现场 Robot 配置。

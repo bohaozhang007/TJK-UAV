@@ -254,6 +254,16 @@ Current tolerance response:
 ~~~
 Read the endpoint rather than hardcoding arrival tolerances.
 
+Task status additionally returns `target:{x,y,z,yaw}` for tasks with a fixed
+accepted position goal (navigation/relative movement/takeoff), in public world
+cm/degrees. It is converted from the immutable Robot task goal, including retained
+or global Z; it is not derived from Agent before-pose samples. Landing omits it.
+Agent caches this field from existing task status reads for motions.csv target
+and world-frame after-minus-target error. Old servers lacking target remain
+compatible, but relative target/error are left blank rather than guessed.
+This additive field requires updating/reloading Robot HTTP; bridge already stores
+the task goal. Implemented/tested locally, not deployed in this change.
+
 2026-09-11 final user decision: both options belong at the TOP LEVEL, at the
 very beginning of Robot src/robot/config/owl_ego.yaml, default false:
 

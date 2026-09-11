@@ -133,6 +133,8 @@ class OwlEgoClient(BaseClient):
         self.observation_max_age_s = observation_max_age_s
         self.observation_max_sync_error_s = observation_max_sync_error_s
         self.last_observation = None
+        self.motion_targets = {}
+        self.last_relative_task_id = None
         self._frame_identity = None
         self._image_shape = None
         self.session_id = None
@@ -424,6 +426,7 @@ class OwlEgoClient(BaseClient):
             raise ValueError("Relative motion timeout must be in (0,170]")
         if self.timeout_s <= budget:
             raise ValueError("Transport timeout must exceed motion timeout")
+        self.last_relative_task_id = None
         self.wait_stopped()
         done, outcome = threading.Event(), {}
         def send():
@@ -443,11 +446,14 @@ class OwlEgoClient(BaseClient):
                 if active:
                     if owned_task and active != owned_task:
                         raise RuntimeError("Relative task ownership changed")
+                    if owned_task is None:
+                        self.last_relative_task_id = active
                     owned_task = active
                     self._last_task_id = active
                 self.get_pose()  # Timestamped samples for XYZ diagnostics and epoch checks.
             if "error" in outcome:
                 raise outcome["error"]
+            self.last_relative_task_id = outcome["result"].get("task_id")
             self._completed_motion(outcome["result"], require_task=any(
                 self.quantize_motion(x,y,z,yaw).values()))
             self.wait_stopped()
@@ -585,6 +591,8 @@ class OwlEgoClient(BaseClient):
             raise RuntimeError("Invalid navigation status")
         if result["status"] == "failed":
             self._motion_failure = result.get("error", "Robot task failed")
+        if result.get("target") is not None:
+            self.motion_targets[task_id] = dict(result["target"])
         self.event("navigation_status", state=result)
         return result
 

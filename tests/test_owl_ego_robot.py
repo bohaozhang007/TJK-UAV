@@ -1132,6 +1132,15 @@ class FakeHardware:
 
 
 class HttpTest(unittest.TestCase):
+    def test_task_target_is_accepted_world_goal_in_public_units(self):
+        self.hw.tasks['target']=dict(task_id='target',kind='navigate',status='executing',
+                                    stopped=False,goal=[1.,-.2,1.05,-math.pi/2])
+        code,data=self.rpc('GET','/v21/navigation/status?task_id=target')
+        self.assertEqual(code,200)
+        self.assertEqual(data['target'],dict(x=100.,y=20.,z=105.,yaw=90.))
+        self.hw.tasks['target']['kind']='land'
+        self.assertNotIn('target',self.rpc('GET','/v21/navigation/status?task_id=target')[1])
+
     def test_local_motion_log_is_read_only_and_removes_session_credentials(self):
         self.hw.tasks['logged']=dict(task_id='logged',kind='navigate',status='arrived',
             session_id='private',source='agent',goal=[0,0,1,0])

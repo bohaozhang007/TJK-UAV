@@ -1,8 +1,8 @@
 # ===== Z CONTROL OPTIONS (Robot; restart bridge + HTTP after changes) =====
 # Accumulate relative dz on the retained world target Z instead of measured Z.
-global_z_enabled: false
+global_z_enabled: true
 # Add an independent 8 cm Z arrival constraint to the 15 cm 3D tolerance.
-vertical_tolerance_enabled: false
+vertical_tolerance_enabled: true
 
 controller:
   motion_timeout_s: 15.0

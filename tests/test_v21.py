@@ -334,6 +334,19 @@ class FakeClient(OwlEgoClient):
 
 
 class MissionTests(unittest.TestCase):
+    def test_csv_uses_robot_target_instead_of_before_plus_action(self):
+        self.client.motion_targets['global-z']=dict(x=100.,y=20.,z=105.,yaw=179.)
+        self.agent._csv_pose=Mock(return_value=dict(after_epoch='e',after_x_cm=103.,
+            after_y_cm=18.,after_z_cm=110.,after_yaw_deg=-179.))
+        row=dict(started_at='now',phase='TRACK',action='xyz_yaw_hybrid',action_frame='body_relative',
+                 action_x_cm=25.,action_y_cm=0.,action_z_cm=5.,action_yaw_deg=0.,
+                 before_x_cm=75.,before_y_cm=20.,before_z_cm=110.,before_yaw_deg=179.,before_epoch='e')
+        self.agent._csv_finish(row,'arrived',task_id='global-z')
+        with self.agent.motion_csv_path.open(encoding='utf-8-sig',newline='') as stream:
+            saved=list(csv.DictReader(stream))[-1]
+        self.assertEqual(saved['target'],'(100.00, 20.00, 105.00, 179.00)')
+        self.assertEqual(saved['error'],'(3.00, -2.00, 5.00, 2.00)')
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         config=yaml.safe_load((ROOT/"src/agent/config/owl/v21.yaml").read_text())
@@ -376,6 +389,10 @@ class MissionTests(unittest.TestCase):
         trigger=self.agent.event.call_args_list
         claimed=next(c.kwargs["capture_pose"] for c in trigger if c.args[0]=="target_claimed")
         self.assertEqual(goals[1:3],[claimed,claimed])
+        phases=sorted(p.name for p in self.agent._mission_vis_dir.glob("phase_*"))
+        self.assertEqual(phases, ["phase_0_toPoint_1", "phase_1_toTarget_1",
+                                  "phase_2_toPoint_1", "phase_3_toPoint_2", "phase_4_returnHome"])
+        self.assertTrue((self.agent._mission_vis_dir/"phase_1_toTarget_1"/"trigger.jpg").is_file())
 
     def test_failure_returns_then_continues(self):
         self.agent.infer_observation=lambda obs:[dict(box=[4,4,16,16],confidence=.9,
@@ -926,7 +943,7 @@ class SimulatedHardware:
                 h.update(planner_state="starting" if phase=="planning" else
                          "not_required" if phase=="stopping" else "ready",
                          planner_ok=phase=="executing")
-            tasks = {key:{k:v for k,v in t.items() if k in ("task_id","status","stopped")}
+            tasks = {key:{k:v for k,v in t.items() if k in ("task_id","status","stopped","goal")}
                      for key,t in self.tasks.items()}
             return dict(session_id=self.session,pose=self.pose.tolist(),health=h,tasks=tasks)
 
@@ -1056,7 +1073,7 @@ class LocalRobotIntegrationTests(unittest.TestCase):
                 with agent.motion_csv_path.open(encoding="utf-8-sig",newline="") as stream:
                     motions=list(csv.DictReader(stream))
                 self.assertEqual(list(motions[0]),["started_at","finished_at","phase","action",
-                                                   "action_xyz_yaw","before","after","error"])
+                                                   "action_xyz_yaw","before","target","after","error"])
                 relative=[r for r in motions if r["action"]=="xyz_yaw_hybrid"]
                 self.assertEqual(len(relative),3)
                 for row in relative:
@@ -1064,7 +1081,8 @@ class LocalRobotIntegrationTests(unittest.TestCase):
                     after_x=float(row["after"].strip("()").split(",")[0])
                     self.assertAlmostEqual(after_x-before_x,30.,places=2)
                     self.assertEqual(row["action_xyz_yaw"],"(30.00, 0.00, 0.00, 0.00)")
-                    self.assertEqual(row["error"].split(",")[2].strip(),"")
+                    self.assertAlmostEqual(float(row["error"].strip("()").split(",")[2]),0.,places=2)
+                    self.assertTrue(row["target"])
                 self.assertEqual(motions[-1]["action"],"land")
                 output=os.environ.get("V21_TEST_OUTPUT")
                 if output:

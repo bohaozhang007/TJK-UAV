@@ -66,6 +66,8 @@ class PatrolAgent(v20.TJKAgent):
         self.active_navigation = None
         self.capture_observation = None
         self.phase = "INITIALIZING"
+        self._log_phase_index = -1
+        self._patrol_detection_dir = self._mission_vis_dir / "detections"
         self._event_lock = threading.Lock()
         self.event_path = self._mission_vis_dir.parent / "events.jsonl"
         self.client.event = self.event
@@ -74,7 +76,7 @@ class PatrolAgent(v20.TJKAgent):
         self._csv_lock = threading.Lock()
         self._csv_navigation = {}
         self._csv_fields = ["started_at", "finished_at", "phase", "action",
-                            "action_xyz_yaw", "before", "after", "error"]
+                            "action_xyz_yaw", "before", "target", "after", "error"]
         with self.motion_csv_path.open("w", newline="", encoding="utf-8-sig") as stream:
             csv.DictWriter(stream, fieldnames=self._csv_fields).writeheader()
 
@@ -116,22 +118,18 @@ class PatrolAgent(v20.TJKAgent):
                 return ""
             return "(" + ", ".join("" if value is None else f"{value:.2f}" for value in items) + ")"
         command, before, after = values("action"), values("before"), values("after")
+        target = (getattr(self.client, "motion_targets", {}) or {}).get(task_id)
+        if target is None and row["action_frame"] == "world_absolute" and task_id:
+            target = dict(zip(("x","y","z","yaw"),command))
+        target_values = [target.get(k) if target else None for k in ("x","y","z","yaw")]
         errors = [None]*4
         same_epoch = row.get("before_epoch") == row.get("after_epoch")
-        if all(v is not None for v in command + after) and same_epoch:
-            if row["action_frame"] == "world_absolute":
-                errors = [actual-expected for expected,actual in zip(command,after)]
-            elif row["action_frame"] == "body_relative" and all(v is not None for v in before):
-                before_pose = dict(zip(("x","y","z","yaw"),before))
-                after_pose = dict(zip(("x","y","z","yaw"),after))
-                delta = v20.TJKAgent._calculate_motion_error(self,before_pose,after_pose,*command)
-                errors = [-delta[k] for k in ("ex","ey","ez","eyaw")]
-                if command[2] == 0 or (getattr(self.client, "_motion_tolerances", None) or {}).get("global_z_enabled", False):
-                    errors[2] = None  # Robot's retained height reference is not exposed.
-            if errors[3] is not None:
-                errors[3] = self._normalize_angle_deg(errors[3])
+        if all(v is not None for v in target_values + after) and same_epoch:
+            errors = [actual-expected for expected,actual in zip(target_values,after)]
+            errors[3] = self._normalize_angle_deg(errors[3])
+        row["target"] = target
         compact.update(action_xyz_yaw=packed(command), before=packed(before),
-                       after=packed(after), error=packed(errors))
+                       target=packed(target_values), after=packed(after), error=packed(errors))
         # Status, failures and sampling metadata remain in the detailed event log.
         self.event("motion_csv_result", **row)
         with self._csv_lock:
@@ -139,12 +137,14 @@ class PatrolAgent(v20.TJKAgent):
                 csv.DictWriter(stream, fieldnames=self._csv_fields).writerow(compact)
 
     def _execute_motion(self, action, dx_cm, dy_cm, dz_cm, dyaw_deg, operation, **kwargs):
+        self.client.last_relative_task_id = None
         row = self._csv_begin(action.value,
                               dict(x=dx_cm,y=dy_cm,z=dz_cm,yaw=dyaw_deg), "body_relative")
         try:
             result = super()._execute_motion(action, dx_cm, dy_cm, dz_cm, dyaw_deg, operation, **kwargs)
         except BaseException as exc:
-            self._csv_finish(row, "failed_or_uncertain", error=str(exc))
+            self._csv_finish(row, "failed_or_uncertain", error=str(exc),
+                             task_id=getattr(self.client, "last_relative_task_id", None) or "")
             raise
         self._csv_finish(row, "arrived", task_id=result.get("task_id", ""))
         return result
@@ -178,7 +178,15 @@ class PatrolAgent(v20.TJKAgent):
 
     def set_phase(self, phase, **fields):
         self.phase = phase
-        self.event("phase", phase=phase, **fields)
+        self.event("phase", phase=phase, log_directory=self.vis_dir, **fields)
+
+    def _start_log_phase(self, label):
+        self._log_phase_index += 1
+        directory = self._mission_vis_dir / f"phase_{self._log_phase_index}_{label}"
+        directory.mkdir(parents=True, exist_ok=True)
+        self.vis_dir = str(directory)
+        self.tracker.set_vis_dir(self.vis_dir)
+        return directory
 
     def _ensure_flight_safety(self, context):
         # v20's unconditional rgb_ok gate predates retryable synchronized frames.
@@ -220,7 +228,7 @@ class PatrolAgent(v20.TJKAgent):
         start = time.monotonic()
         # Capture the source before inference; patrol may be cancelled while GPU work runs.
         detection_phase = "reacquire" if self.phase == "REACQUIRE" else "patrol"
-        detection_directory = self.vis_dir if detection_phase == "reacquire" else None
+        detection_directory = self.vis_dir if detection_phase == "reacquire" else self._patrol_detection_dir
         detections, detection_error = [], None
         try:
             detections = self.detect(obs.rgb)
@@ -244,6 +252,7 @@ class PatrolAgent(v20.TJKAgent):
                     continue
                 candidates.append({"box": np.asarray(detection["box"]).tolist(),
                                    "detection_image": detection_image,
+                                   "detection_directory": str(detection_directory),
                                    "confidence": float(detection["confidence"]),
                                    "position_cm": position.tolist()})
         self.event("detection", frame_id=obs.frame_id, timestamp_s=obs.timestamp_s,
@@ -395,11 +404,8 @@ class PatrolAgent(v20.TJKAgent):
         # Cancel flight first; then wait for GPU workers before SAM2/main use.
         self.pipeline.wait_idle(self.patrol["worker_idle_timeout_s"])
         if candidate.get("detection_image"):
-            self.detection_images.mark_trigger(candidate["detection_image"])
-        target_dir = self._mission_vis_dir / f"target_{record.target_id:03d}_attempt_{record.attempts:02d}"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        self.vis_dir = str(target_dir)
-        self.tracker.set_vis_dir(self.vis_dir)
+            self.detection_images.mark_trigger(candidate["detection_image"], candidate.get("detection_directory"))
+        target_dir = self._start_log_phase(f"toTarget_{record.target_id}")
         trigger_image = cv2.cvtColor(obs.rgb, cv2.COLOR_RGB2BGR)
         x1, y1, x2, y2 = np.rint(candidate["box"]).astype(int)
         cv2.rectangle(trigger_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -443,6 +449,7 @@ class PatrolAgent(v20.TJKAgent):
 
     def _patrol_segment(self, index, waypoint, target):
         while True:
+            self._patrol_detection_dir = self._start_log_phase(f"toPoint_{index+1}")
             self.set_phase("PATROL", segment=index, waypoint=waypoint["name"])
             self.pipeline.resume(index)
             task_id = self._start_navigation(target)
@@ -491,6 +498,7 @@ class PatrolAgent(v20.TJKAgent):
                     break
             self.pipeline.pause()
             self.pipeline.wait_idle(self.patrol["worker_idle_timeout_s"])
+            self._start_log_phase("returnHome")
             self._navigate_to_world_pose(self.mission_origin_pose, "RETURN_HOME")
             self.event("mission_finished", targets=self.memory.snapshot(),
                        perception_stats=dict(self.pipeline.stats))

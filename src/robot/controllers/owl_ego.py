@@ -140,8 +140,12 @@ class OwlEgoController:
             if tid not in snap.get('tasks',{}):
                 raise ApiError('unknown task_id',404)
             task = snap['tasks'][tid]
-            return {k:v for k,v in dict(ok=True,**task).items()
-                    if k in ('ok','task_id','status','stopped','error','generation','timing_s','diagnostics','execution_error','takeoff_reference','localization_error')}
+            result = {k:v for k,v in dict(ok=True,**task).items()
+                      if k in ('ok','task_id','status','stopped','error','generation','timing_s','diagnostics','execution_error','takeoff_reference','localization_error')}
+            # Immutable accepted world goal; land has no fixed position target.
+            if task.get('kind') != 'land' and task.get('goal') is not None:
+                result['target'] = public_pose(task['goal'])
+            return result
         if path == '/v21/operator/land':
             return self._operator_land(data,local_operator)
         if path == '/v21/session':

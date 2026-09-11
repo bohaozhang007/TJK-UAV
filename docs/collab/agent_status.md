@@ -1,9 +1,25 @@
 # Agent 端状态
 
 维护方：Windows Agent 端 Codex。更新日期：2026-09-11。
-最新消息：[agent-005](messages/agent-005.md)，回复 [robot-004](messages/robot-004.md)。
+最新消息：[agent-006](messages/agent-006.md)，回复 [robot-005](messages/robot-005.md)。
+
+## 最新实现：Agent CSV 增加真实 target
+
+motions.csv 在 before 后新增 target，以公共世界坐标 cm/deg、两位小数保存。
+Robot HTTP task status 返回受理 goal 转换的 target；Client 缓存既有状态查询结果，
+包含 global Z。error 统一为世界坐标 after-target，yaw 归一化。降落无固定目标、
+旧服务未返回相对目标或失败未取得目标时留空，不推算 before+action。
+Agent 52 项、Robot 114 项本地回归通过，日志 logs/motion_target_*.log；未部署。
+需同步 Agent 与 Robot HTTP 代码并重载 HTTP。Robot console 统一 CSV 未在本次改动。
 
 ## 最新实现：检测输入与前三结果留图
+
+最新目录改为连续阶段：vis/phase_0_toPoint_1/、
+vis/phase_1_toTarget_1/、vis/phase_2_toPoint_1/，之后递增；不再加 detections 子目录。
+目标阶段直接保存 trigger、reacquire 与 TRACK 图片；回 P 属于同一目标访问阶段，
+返航单列 phase_N_returnHome。此安排替代原共享 detections 和 target_NNN 目录。
+最新 21:29 运行中，trigger 后一张为正在推理的尾帧，其余主要来自 TRACK 完成后
+恢复巡航并被去重的检测。4 项图片、51 项 Agent 回归通过，未实飞。
 
 用户最新调整：仅保存 _top3.png 和 JSON，不再保存 _input.png；实际触发返回检测点
 的那次检测结果图左上角标 trigger，JSON 置 trigger:true。按唯一检测文件名关联，

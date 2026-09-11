@@ -18,7 +18,6 @@ class DetectionImageLog:
 
     def submit(self, rgb, detections, *, phase, frame_id, timestamp_s, pose, error=None, directory=None):
         if self.thread is None:
-            self.directory.mkdir(parents=True, exist_ok=True)
             self.thread = threading.Thread(target=self._run, name="detection-image-log", daemon=True)
             self.thread.start()
         self.sequence += 1
@@ -31,9 +30,9 @@ class DetectionImageLog:
         self.queue.put((name, rgb.copy(), meta, Path(directory) if directory is not None else self.directory))
         return name
 
-    def mark_trigger(self, name):
+    def mark_trigger(self, name, directory=None):
         # The same FIFO worker handles initial save and later trigger annotation.
-        self.queue.put((name, None, None, self.directory))
+        self.queue.put((name, None, None, Path(directory) if directory is not None else self.directory))
 
     def _run(self):
         while True:
@@ -44,8 +43,8 @@ class DetectionImageLog:
                 name, rgb, meta, directory = item
                 directory.mkdir(parents=True, exist_ok=True)
                 if rgb is None:
-                    path = self.directory / f"{name}_top3.png"
-                    trigger_path = self.directory / f"{name}_top3_trigger.png"
+                    path = directory / f"{name}_top3.png"
+                    trigger_path = directory / f"{name}_top3_trigger.png"
                     if not path.exists():
                         path = trigger_path
                     annotated = cv2.imread(str(path))
@@ -58,7 +57,7 @@ class DetectionImageLog:
                         raise OSError(f"Failed to save {path}")
                     if path != trigger_path:
                         path.replace(trigger_path)
-                    metadata_path = self.directory / f"{name}.json"
+                    metadata_path = directory / f"{name}.json"
                     meta = json.loads(metadata_path.read_text(encoding="utf-8"))
                     meta["trigger"] = True
                     meta["image_file"] = trigger_path.name
