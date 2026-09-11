@@ -430,13 +430,16 @@ def main():
                         tracker=v20.build_tracker(args.trk, config, str(directory/"vis")),
                         config=config, detector_name=args.det, tracker_name=args.trk,
                         vis_dir=str(directory/"vis"), logger=logger)
+    mission_error = None
     try:
         agent.connect()
         agent.run_mission(prompt)
-    except BaseException:
+    except BaseException as exc:
+        mission_error = exc
         logger.exception("v21 mission aborted")
         raise
     finally:
+        cleanup_error = None
         try:
             if client.session_id:
                 if agent.active_navigation:
@@ -445,8 +448,17 @@ def main():
                     except Exception:
                         logger.exception("Navigation cancellation failed before landing")
                 v20._land_after_task(client, logger)
+        except Exception as exc:
+            cleanup_error = exc
+            logger.exception("Landing cleanup failed; landing is not confirmed")
         finally:
-            client.close()
+            try:
+                client.close()
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+                logger.exception("Session release failed")
+        if mission_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 if __name__ == "__main__":

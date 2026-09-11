@@ -336,6 +336,10 @@ class MissionTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         config=yaml.safe_load((ROOT/"src/agent/config/owl/v21.yaml").read_text())
+        # Test route is independent of the operator's current flight YAML.
+        config["mission"]["waypoints"]=[
+            dict(name="test_B",x_cm=0.,y_cm=100.,z_cm=0.,yaw_deg=0.),
+            dict(name="test_C",x_cm=0.,y_cm=-150.,z_cm=0.,yaw_deg=0.)]
         config["patrol"].update(capture_fps=60.,poll_interval_s=.02)
         self.config=config
         self.client=FakeClient()
@@ -608,6 +612,190 @@ class CurrentContractTests(unittest.TestCase):
         caps["software_takeoff"] = False
         with self.assertRaisesRegex(RuntimeError,"software_takeoff"): client.start()
         self.assertIsNone(client.session_id)
+
+
+class LeaseRecoveryTests(unittest.TestCase):
+    def client(self):
+        client=OwlEgoClient()
+        client.session_id="original-session"
+        client._lease_sent=100.
+        client.event=Mock()
+        return client
+
+    def test_single_timeout_then_recovery_uses_send_time(self):
+        client=self.client();now=[100.5]
+        def rpc(*args,**kwargs):
+            self.assertEqual(args[2]["session_id"],"original-session")
+            if now[0]<102:
+                now[0]+=2
+                raise TimeoutError("temporary network timeout")
+            now[0]+=.4
+            return dict(ok=True)
+        client.rpc=Mock(side_effect=rpc)
+        with patch("robot_client.owl_ego.time.monotonic",side_effect=lambda:now[0]):
+            self.assertTrue(client._renew_lease())
+            self.assertEqual(client._lease_sent,100.)
+            self.assertTrue(client._lease_recovering)
+            now[0]=102.6
+            self.assertTrue(client._renew_lease())
+            self.assertEqual(client._lease_sent,102.6)
+            self.assertFalse(client._lease_recovering)
+            self.assertEqual(client._recovery_version,1)
+            client.check_lease()
+
+    def test_repeated_timeouts_use_original_deadline(self):
+        client=self.client();now=[100.5];budgets=[]
+        def fail(*args,timeout_s,**kwargs):
+            budgets.append(timeout_s);now[0]+=timeout_s
+            raise TimeoutError("no response")
+        client.rpc=Mock(side_effect=fail)
+        with patch("robot_client.owl_ego.time.monotonic",side_effect=lambda:now[0]):
+            self.assertTrue(client._renew_lease())
+            self.assertTrue(client._renew_lease())
+            self.assertFalse(client._renew_lease())
+            self.assertEqual(budgets,[2.,2.,.5])
+            self.assertEqual(client._lease_sent,100.)
+            with self.assertRaisesRegex(RuntimeError,"lease"):client.check_lease()
+            self.assertFalse(client._renew_lease())
+            self.assertEqual(client.rpc.call_count,3)
+
+    def test_late_success_does_not_revive_session(self):
+        client=self.client();now=[104.8]
+        def late(*args,**kwargs):
+            self.assertAlmostEqual(kwargs["timeout_s"],.2)
+            now[0]=105.1;return dict(ok=True)
+        client.rpc=Mock(side_effect=late)
+        with patch("robot_client.owl_ego.time.monotonic",side_effect=lambda:now[0]):
+            self.assertFalse(client._renew_lease())
+            self.assertEqual(client._lease_sent,100.)
+            self.assertIsNotNone(client._lease_error)
+
+    def test_rejection_and_program_error_are_not_retried(self):
+        for error in (RobotHTTPError(409,"/v21/heartbeat",'expired or operator takeover'),
+                      ValueError("invalid JSON"),RuntimeError("program bug")):
+            client=self.client();client.rpc=Mock(side_effect=error)
+            with patch("robot_client.owl_ego.time.monotonic",return_value=101.):
+                self.assertFalse(client._renew_lease())
+                self.assertFalse(client._renew_lease())
+            client.rpc.assert_called_once()
+            self.assertTrue(client._lease_error)
+
+    def test_transport_classification_preserves_wrapped_timeout(self):
+        import urllib.error
+        wrapped=RuntimeError("cannot connect")
+        wrapped.__cause__=urllib.error.URLError(TimeoutError("timeout"))
+        self.assertTrue(OwlEgoClient._transport_failure(wrapped))
+        self.assertFalse(OwlEgoClient._transport_failure(RobotHTTPError(503,"/health","busy")))
+
+    def test_new_navigation_waits_and_reconciles_original_task(self):
+        client=self.client();client._lease_sent=time.monotonic()
+        client._frame_identity=("odom","epoch-a")
+        client.health=Mock(return_value=FakeClient().health())
+        client._last_task_id="old-task"
+        client.navigation_status=Mock(return_value=dict(status="arrived",stopped=True,task_id="old-task"))
+        client.rpc=Mock(return_value=dict(ok=True,task_id="new-task"))
+        client._begin_recovery()
+        result=[]
+        thread=threading.Thread(target=lambda:result.append(client.navigate(dict(x=20,y=0,z=100,yaw=0))))
+        thread.start()
+        try:
+            time.sleep(.07)
+            client.rpc.assert_not_called()
+            client._renew_lease()
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result,["new-task"])
+            client.navigation_status.assert_called_once_with("old-task")
+            self.assertEqual([c.args[1] for c in client.rpc.call_args_list],
+                             ["/v21/heartbeat","/v21/navigation"])
+        finally:
+            client._fail_lease("test finished");thread.join(1)
+
+    def test_recovered_failed_task_stays_failed_no_motion_replay(self):
+        client=self.client();client._lease_sent=time.monotonic()
+        client._frame_identity=("odom","epoch-a")
+        client.health=Mock(return_value=FakeClient().health())
+        client._recovery_version=1;client._last_task_id="failed-task"
+        client.navigation_status=Mock(return_value=dict(status="failed",error="cancelled by watchdog"))
+        client.rpc=Mock()
+        with self.assertRaisesRegex(RuntimeError,"Original task failed"):
+            client.navigate(dict(x=20,y=0,z=100,yaw=0))
+        client.navigation_status.return_value=dict(status="arrived",stopped=True)
+        with self.assertRaisesRegex(RuntimeError,"latched"):
+            client.navigate(dict(x=20,y=0,z=100,yaw=0))
+        client.rpc.assert_not_called()
+
+    def test_health_timeout_recovers_read_once_without_replaying_motion(self):
+        client=self.client();client._lease_sent=time.monotonic()
+        client._frame_identity=("odom","epoch-a")
+        client._last_task_id="original-task"
+        client._lease_thread=threading.Thread(target=client._heartbeat_loop,daemon=True)
+        health_calls=[0];paths=[]
+        def wire(method,path,payload=None,**kwargs):
+            paths.append(path)
+            if path=="/health":
+                health_calls[0]+=1
+                if health_calls[0]==1:raise TimeoutError("health timed out")
+                return FakeClient().health()
+            if path.startswith("/v21/navigation/status"):
+                return dict(ok=True,task_id="original-task",status="arrived",stopped=True)
+            return dict(ok=True)
+        with patch.object(BaseClient,"_request_json",side_effect=wire):
+            client._lease_thread.start()
+            try:
+                client.flight_health()
+                client.flight_health()  # Reconcile recovery observed during the first read.
+                self.assertIn("/v21/heartbeat",paths)
+                self.assertTrue(any(p.startswith("/v21/navigation/status") for p in paths))
+                self.assertNotIn("/v21/navigation",paths)
+                self.assertNotIn("/move_relative_xyz_yaw",paths)
+            finally:client.close()
+
+    def test_operator_takeover_latches_before_authority_error(self):
+        client=self.client();client._lease_sent=time.monotonic()
+        client._frame_identity=("odom","epoch-a")
+        h=FakeClient().health();h["health"].update(control_ready=False,control_owner="operator")
+        client.health=Mock(return_value=h)
+        with self.assertRaisesRegex(RuntimeError,"operator takeover"):client.flight_health()
+        client.rpc=Mock()
+        with self.assertRaises(RuntimeError):client.land()
+        client.rpc.assert_not_called()
+
+    def test_blocking_landing_keeps_heartbeat_and_recovers(self):
+        beats=[]
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args):pass
+            def do_GET(self):self.respond(dict(ok=True,task_id="land",status="arrived",stopped=True))
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length",0)))
+                if self.path=="/land":
+                    time.sleep(1.8)
+                    self.respond(dict(ok=True,task_id="land"))
+                else:
+                    if self.path=="/v21/heartbeat":beats.append(time.monotonic())
+                    self.respond(dict(ok=True))
+            def respond(self,data):
+                raw=json.dumps(data).encode();self.send_response(200)
+                self.send_header("Content-Length",str(len(raw)));self.end_headers();self.wfile.write(raw)
+        server=ThreadingHTTPServer(("127.0.0.1",0),Handler)
+        serving=threading.Thread(target=server.serve_forever,daemon=True);serving.start()
+        client=OwlEgoClient(port=server.server_port);client.session_id="same"
+        client._lease_sent=time.monotonic()
+        original=client.rpc;failed=[False]
+        def rpc(method,path,*args,**kw):
+            if path=="/v21/heartbeat" and not failed[0]:
+                failed[0]=True;raise TimeoutError("one transient timeout during land")
+            return original(method,path,*args,**kw)
+        client.rpc=rpc
+        client._lease_thread=threading.Thread(target=client._heartbeat_loop,daemon=True)
+        client._lease_thread.start()
+        try:
+            client.land()
+            self.assertGreaterEqual(len(beats),2)
+            self.assertEqual(client._recovery_version,1)
+            self.assertIsNone(client._lease_error)
+        finally:
+            client.close();server.shutdown();server.server_close();serving.join(2)
 
 
 class SimulatedHardware:

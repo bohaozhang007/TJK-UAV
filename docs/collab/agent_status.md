@@ -1,7 +1,19 @@
 # Agent 端状态
 
-维护方：Windows Agent 端 Codex。更新日期：2026-09-10。
-最新消息：[agent-003](messages/agent-003.md)，回复 [robot-002](messages/robot-002.md)。
+维护方：Windows Agent 端 Codex。更新日期：2026-09-11。
+最新消息：[agent-004](messages/agent-004.md)，回复 [robot-003](messages/robot-003.md)。
+
+## 最新修复：原会话有界续租
+
+已修复心跳首次超时永久退出：以最近确认成功的 acquisition/heartbeat 发送时刻作为
+5 s 本地期限起点，失败不刷新、迟到响应不复活。恢复期间新运动等待，恢复后核对
+health/epoch/原任务；409、操作员接管或预算耗尽锁存失败，不重新申请会话或重发动作。
+health/get_pose/task-status 的传输异常可触发续租恢复，确认成功后仅重读一次。
+阻塞降落期间独立续租；清理异常单独记录，不覆盖原始任务错误。
+
+本轮 Agent 46 项、Robot 105 项离线回归通过；包含本地 HTTP 三轮路线与降落期间
+续租恢复。证据 logs/v21_agent_round4/，详见 agent-004。未修改现场 YAML、Robot
+实现或状态；未实飞、未测试真实 Wi-Fi 故障、未 push。此前 Agent 接入记录如下。
 
 ## 当前安排
 

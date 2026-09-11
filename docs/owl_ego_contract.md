@@ -78,8 +78,9 @@ endpoint, task cancellation, session release, and synchronized observation.
   recovery budget ends recovery; never reacquire automatically or revive a
   failed mission. Keep heartbeat independent through landing and cancellation.
   Clarification 2026-09-11: Robot already accepts renewal of valid sessions and
-  rejects expired ones; local Agent heartbeat still exits on first exception.
-  Client bounded recovery is required but not yet implemented/verified here.
+  rejects expired ones. Agent round 4 implements bounded recovery and local
+  regression coverage; see [agent-004](collab/messages/agent-004.md). No Robot
+  endpoint or lease duration changed; real Wi-Fi/fault-injection validation is pending.
 - Expiry/release invalidates active work and requests measured hold where output
   authority remains valid. It does not land or disarm. Telemetry/control loss
   may revoke setpoints and leave recovery to validated PX4 failsafe/pilot.

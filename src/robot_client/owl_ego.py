@@ -7,9 +7,11 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field
 import math
+import http.client
 import threading
 import time
 from urllib.parse import quote
+import urllib.error
 import uuid
 
 import cv2
@@ -137,6 +139,14 @@ class OwlEgoClient(BaseClient):
         self._lease_stop = threading.Event()
         self._lease_thread = None
         self._lease_error = None
+        self._lease_cv = threading.Condition()
+        self._lease_sent = None
+        self._lease_recovering = False
+        self._lease_failures = 0
+        self._recovery_version = 0
+        self._checked_recovery_version = 0
+        self._last_task_id = None
+        self._motion_failure = None
 
     def rpc(self, method, path, payload=None, *, timeout_s=3.0):
         result = self._request_json(method, path, payload, timeout_s=timeout_s)
@@ -145,16 +155,93 @@ class OwlEgoClient(BaseClient):
         return result
 
     def check_lease(self):
-        if self._lease_error is not None:
-            raise RuntimeError(f"Robot control lease failed: {self._lease_error}")
+        with self._lease_cv:
+            while True:
+                if self._lease_error is not None:
+                    raise RuntimeError(f"Robot control lease failed: {self._lease_error}")
+                if self._lease_sent is not None and time.monotonic() >= self._lease_sent + 5:
+                    self._fail_lease("local 5 s lease budget exhausted")
+                    continue
+                if not self._lease_recovering:
+                    return
+                self._lease_cv.wait(timeout=0.05)
+
+    @staticmethod
+    def _transport_failure(exc):
+        """Only network failures, never HTTP rejection or JSON/program errors."""
+        while exc is not None:
+            if isinstance(exc, (RobotHTTPError, urllib.error.HTTPError)):
+                return False
+            if isinstance(exc, (TimeoutError, ConnectionError, http.client.RemoteDisconnected)):
+                return True
+            if isinstance(exc, urllib.error.URLError):
+                return isinstance(exc.reason, (TimeoutError, ConnectionError))
+            exc = exc.__cause__
+        return False
+
+    def _fail_lease(self, reason):
+        with self._lease_cv:
+            if self._lease_error is None:
+                self._lease_error = RuntimeError(str(reason))
+                self.event("lease_failed", reason=str(reason), failures=self._lease_failures)
+            self._lease_cv.notify_all()
+
+    def _begin_recovery(self):
+        with self._lease_cv:
+            self._lease_recovering = True
+            self._lease_cv.notify_all()
+
+    def _renew_lease(self):
+        """One attempt, bounded by the LAST ACKNOWLEDGED request's send time."""
+        with self._lease_cv:
+            if self._lease_error is not None or self._lease_sent is None:
+                return False
+            sent = time.monotonic()
+            deadline = self._lease_sent + 5.0
+            if sent >= deadline:
+                self._fail_lease("local 5 s lease budget exhausted")
+                return False
+        error = None
+        try:
+            self.rpc("POST", "/v21/heartbeat", {"session_id": self.session_id},
+                     timeout_s=min(2.0, deadline-sent))
+        except Exception as exc:
+            error = exc
+        ended = time.monotonic()
+        with self._lease_cv:
+            self.event("lease_attempt", sent_monotonic=sent, elapsed_s=ended-sent,
+                       remaining_s=max(0., deadline-ended), success=error is None,
+                       consecutive_failures=self._lease_failures + (error is not None))
+            if self._lease_error is not None:
+                return False  # Never clear an independently latched failure.
+            if ended >= deadline:
+                self._fail_lease("lease recovery deadline exceeded; late reply cannot revive session")
+                return False
+            if error is not None:
+                self._lease_failures += 1
+                if not self._transport_failure(error):
+                    self._fail_lease(error)
+                    return False
+                self._begin_recovery()
+                self.event("lease_retry", reason=str(error), remaining_s=deadline-ended)
+                return True
+            self._lease_sent = sent  # NOT response time; failures never update this.
+            if self._lease_recovering:
+                self._recovery_version += 1
+                self.event("lease_recovered", failures=self._lease_failures,
+                           remaining_s=max(0., sent+5-ended))
+            self._lease_recovering = False
+            self._lease_failures = 0
+            self._lease_cv.notify_all()
+            return True
 
     def _heartbeat_loop(self):
-        while not self._lease_stop.wait(0.5):
-            try:
-                self.rpc("POST", "/v21/heartbeat", {"session_id": self.session_id},
-                         timeout_s=2.0)
-            except Exception as exc:
-                self._lease_error = exc
+        while not self._lease_stop.is_set():
+            with self._lease_cv:
+                remaining = self._lease_sent + 5 - time.monotonic()
+                self._lease_cv.wait(timeout=max(0., min(
+                    0.1 if self._lease_recovering else 0.5, remaining)))
+            if self._lease_stop.is_set() or not self._renew_lease():
                 return
 
     def start(self):
@@ -163,6 +250,10 @@ class OwlEgoClient(BaseClient):
         self._frame_identity = self._image_shape = self.last_observation = None
         self._lease_stop.clear()
         self._lease_error = None
+        self._lease_sent = None
+        self._lease_recovering = False
+        self._lease_failures = self._recovery_version = self._checked_recovery_version = 0
+        self._last_task_id = self._motion_failure = None
         self._rgb_unavailable_since = self._starting_task = self._starting_since = None
         if not math.isfinite(self.timeout_s) or self.timeout_s <= 90:
             raise ValueError("Transport timeout must exceed the 90 s landing budget")
@@ -180,10 +271,13 @@ class OwlEgoClient(BaseClient):
         # Validate calibration and metric depth before acquiring flight control.
         obs = self.observe()
         self.estimate_depth(obs)
+        acquisition_sent = time.monotonic()
         result = self.rpc("POST", "/v21/session", {"request_id": str(uuid.uuid4())})
         self.session_id = result["session_id"]
         if not isinstance(self.session_id, str) or not self.session_id:
             raise RuntimeError("Invalid session_id")
+        self._lease_sent = acquisition_sent
+        self.check_lease()
         self._lease_thread = threading.Thread(target=self._heartbeat_loop,
                                               name="owl-ego-heartbeat", daemon=True)
         self._lease_thread.start()
@@ -193,6 +287,13 @@ class OwlEgoClient(BaseClient):
         return result
 
     def _request_json(self, method, path, payload=None, **kwargs):
+        if method == "POST" and path in {"/init", "/takeoff", "/v21/navigation", "/move_relative_xyz_yaw"}:
+            self.check_lease()
+            if self._motion_failure is not None:
+                raise RuntimeError(f"Motion failure latched: {self._motion_failure}")
+            if (path in {"/v21/navigation", "/move_relative_xyz_yaw"}
+                    and self._recovery_version != self._checked_recovery_version):
+                self.flight_health()
         # Existing init/takeoff/relative-motion/land calls carry the same lease.
         if method == "POST" and self.session_id and not path.startswith("/v21/"):
             payload = dict(payload or {})
@@ -203,6 +304,14 @@ class OwlEgoClient(BaseClient):
         try:
             return super()._request_json(method, path, payload, **kwargs)
         except Exception as exc:
+            if (self._lease_sent is not None and self._transport_failure(exc)
+                    and method == "GET" and (path in {"/health", "/get_pose"}
+                    or path.startswith("/v21/navigation/status?"))):
+                self._begin_recovery()
+                self.event("telemetry_recovery", path=path, error=str(exc))
+                self.check_lease()
+                # Read only, once, after confirmed renewal. Never replay a motion.
+                return super()._request_json(method, path, payload, **kwargs)
             # No automatic mutation retry. Retain the exact request for explicit
             # reconciliation/replay; never generate a fresh action on timeout.
             exc.request_method, exc.request_path = method, path
@@ -221,8 +330,14 @@ class OwlEgoClient(BaseClient):
 
     def flight_health(self):
         self.check_lease()
+        if self._motion_failure is not None:
+            raise RuntimeError(f"Motion failure latched: {self._motion_failure}")
         h = self._health_state()
+        recovery_version = self._recovery_version
         self.event("flight_health", health=h)
+        if h.get("manual_takeover") or h.get("control_owner") not in (None, "agent"):
+            self._fail_lease("operator takeover")
+            self.check_lease()
         for key in ("initialized", "airborne", "control_ready", "hold_ready", "odom_ok"):
             if h.get(key) is not True:
                 raise RuntimeError(f"Missing flight capability: {key}")
@@ -262,6 +377,16 @@ class OwlEgoClient(BaseClient):
                 raise RuntimeError("Synchronized observation unavailable beyond retry budget")
         else:
             raise RuntimeError(f"Invalid observation health: {h}")
+        if recovery_version != self._checked_recovery_version:
+            if self._last_task_id:
+                state = self.navigation_status(self._last_task_id)
+                if state["status"] == "failed":
+                    self._motion_failure = str(state)
+                    raise RuntimeError(f"Original task failed during recovery: {state}")
+                if state["status"] in {"arrived", "cancelled"} and state.get("stopped") is not True:
+                    raise RuntimeError("Recovered terminal task lacks stop confirmation")
+                self.event("lease_task_reconciled", state=state, health=h)
+            self._checked_recovery_version = recovery_version
         return h
 
     def wait_stopped(self):
@@ -278,6 +403,7 @@ class OwlEgoClient(BaseClient):
         if require_task and not result.get("task_id"):
             raise RuntimeError("Motion response lacks task_id for completion confirmation")
         if result.get("task_id"):
+            self._last_task_id = result["task_id"]
             state = self.navigation_status(result["task_id"])
             self.event("motion_completed", state=state)
             if state["status"] != "arrived" or state.get("stopped") is not True:
@@ -312,6 +438,7 @@ class OwlEgoClient(BaseClient):
                     if owned_task and active != owned_task:
                         raise RuntimeError("Relative task ownership changed")
                     owned_task = active
+                    self._last_task_id = active
                 self.get_pose()  # Timestamped samples for XYZ diagnostics and epoch checks.
             if "error" in outcome:
                 raise outcome["error"]
@@ -320,6 +447,7 @@ class OwlEgoClient(BaseClient):
             self.wait_stopped()
             return outcome["result"]
         except BaseException:
+            self._motion_failure = "relative action failed or result uncertain"
             if owned_task:
                 try:
                     self.cancel_navigation(owned_task)
@@ -328,6 +456,7 @@ class OwlEgoClient(BaseClient):
             raise
 
     def land(self):
+        self.check_lease()
         if self.timeout_s <= 90:
             raise ValueError("Landing transport timeout must exceed 90 s")
         # The blocking Robot wait confirms fresh ON_GROUND/disarmed. Do not apply
@@ -396,10 +525,11 @@ class OwlEgoClient(BaseClient):
 
     def navigate(self, pose):
         self.wait_stopped()
-        return self.rpc("POST", "/v21/navigation", {
+        self._last_task_id = self.rpc("POST", "/v21/navigation", {
             "session_id": self.session_id, "request_id": str(uuid.uuid4()),
             "localization_epoch": self._frame_identity[1], "pose": dict(pose),
         })["task_id"]
+        return self._last_task_id
 
     def navigation_status(self, task_id):
         self.check_lease()
@@ -409,6 +539,8 @@ class OwlEgoClient(BaseClient):
         if result.get("status") not in {"accepted", "planning", "executing", "stopping",
                                         "arrived", "cancelled", "failed"}:
             raise RuntimeError("Invalid navigation status")
+        if result["status"] == "failed":
+            self._motion_failure = result.get("error", "Robot task failed")
         self.event("navigation_status", state=result)
         return result
 
@@ -421,11 +553,13 @@ class OwlEgoClient(BaseClient):
     def close(self):
         # Release must hold rather than disarm. Lease expiry covers network loss.
         try:
-            if self.session_id:
+            if self.session_id and self._lease_error is None:
                 return self.rpc("POST", "/v21/session/release",
                                 {"session_id": self.session_id})
         finally:
             self._lease_stop.set()
+            with self._lease_cv:
+                self._lease_cv.notify_all()
             if self._lease_thread:
                 self._lease_thread.join(timeout=3)
             self.session_id = None

@@ -18,8 +18,11 @@
 - [agent-003](messages/agent-003.md)：Agent 接入完成，本端回归与三轮 Agent/Robot HTTP 模拟。
 
 消息按实际对话往返组织：`agent-001 → robot-001 → agent-002 → robot-002`。
-agent-003 已在 Agent 本地写入，待用户同步；下一轮由 Robot 回复 robot-003。
+robot-003 的续租恢复要求已在 agent-004 实现；下一轮由 Robot 回复 robot-004。
 同一轮本地讨论只补充当前己方消息，不另起编号。
+
+- [robot-003](messages/robot-003.md)：原会话有界心跳恢复要求。
+- [agent-004](messages/agent-004.md)：客户端续租恢复、任务核对与降落期间心跳验证。
 
 不再设置 archive 或独立 camera-check、handoff、implementation 文件，也不保留
 旧跳转页。消息记录历史，status 记录当前状态，contract 记录接口；职责不重复。
