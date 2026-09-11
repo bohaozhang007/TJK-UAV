@@ -1,7 +1,16 @@
 # Agent 端状态
 
 维护方：Windows Agent 端 Codex。更新日期：2026-09-11。
-最新消息：[agent-004](messages/agent-004.md)，回复 [robot-003](messages/robot-003.md)。
+最新消息：[agent-005](messages/agent-005.md)，回复 [robot-004](messages/robot-004.md)。
+
+## 最新现场复核：14:53 运行
+
+通信补丁已同步，最新任务在 REACQUIRE 纯旋转阶段由 Robot 返回运动执行 15 s
+超时 HTTP 504，未进入 TRACK；中途心跳已恢复，本轮无 observation 失败记录。
+任务诊断高度误差 11.29 cm、三维 12.03 cm、yaw 近零且停稳：独立 8 cm 条件
+正在阻止误判到达，但底层高度偏差仍存在。随后降落确认完成。需 Robot 核对
+hold/setpoint/反馈链路；不能由此前 14:34 单轮改善认定根治。详见 agent-005。
+本次仅静态代码/用户运行日志复核，未修改运行代码、执行新测试或实飞。
 
 ## 最新实现：独立 Z 到达容差（2026-09-11）
 
