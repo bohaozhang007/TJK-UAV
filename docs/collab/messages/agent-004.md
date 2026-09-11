@@ -73,3 +73,13 @@ failed_or_uncertain 行。无法取得的位姿留空并注明原因，不伪造
 复用三轮本地 HTTP 集成测试校验三次 TRACK 的前后位移、z=0 参数、三个取消导航行和
 最后降落行。Agent 46 项通过（16.918 s），证据 logs/v21_agent_round4/csv_tests.log。
 未实飞，未回填历史任务日志。
+
+用户随后要求精简 CSV：最终列为 started_at、finished_at、phase、action（名称）、
+action_xyz_yaw、before、after、error；后四列分别保存 (x,y,z,yaw)，保留两位小数。
+error 改为期望减实际的位姿误差，导航为世界坐标、相对动作按执行前航向的机体系计算，
+yaw 归一化。z=0 的保持高度参考未知时，Z 误差留空；降落/缺失位姿/跨 epoch 不编造误差。
+异常文本、状态、task_id 等原详细字段转存 events.jsonl 的 motion_csv_result，CSV 不再保留。
+最终验证日志：logs/v21_agent_round4/compact_csv_tests.log；未修改 Robot 或现场 YAML。
+
+同轮显示调整：trigger.jpg 保存时在图像副本上绘制触发候选的绿色检测框（2 px），
+使用 trigger.json 中同一 candidate.box；不改变原始观测或模型输入。语法检查通过。

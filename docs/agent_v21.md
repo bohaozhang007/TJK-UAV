@@ -62,12 +62,13 @@ TRACK 阻塞期间心跳独立运行，并轮询健康/位姿；z=0 原样传递
 ## 日志与离线验证
 
 每次任务额外生成 `motions.csv`（与 log.txt、events.jsonl 同目录，UTF-8 BOM，便于 Excel 打开）。
-每行记录一次 Agent 绝对导航、TRACK 相对动作或降落：开始/结束时间、任务阶段、action、
-动作参数、task_id、状态，以及执行前后 XYZ(cm)/yaw(°)、各自采样时间与 epoch。
-`action_frame=world_absolute` 表示绝对目标；`body_relative` 表示相对位移/转角；
-`robot_managed` 用于降落。导航取消记录为 cancelled，失败或结果未知记录为 failed_or_uncertain。
-失败后不额外请求位姿延误清理，执行后位姿留空并注明原因；其他取位姿失败也留空，
-不拿目标位姿代替实测值。前后是独立 HTTP 位姿采样，不是 Robot 受理/终态原子快照。
+每行只保留 started_at、finished_at、phase、action（动作名称）、action_xyz_yaw、before、after、error。
+后四列各存一个 `(x, y, z, yaw)`，数值保留两位小数；XYZ 为 cm，yaw 为 °。
+navigate 的 action_xyz_yaw 为世界绝对目标，TRACK 动作为机体相对位移/转角。
+error 表示期望减实际：导航用世界坐标，TRACK 用执行前航向定义的机体坐标，yaw 误差归一化。
+相对 z=0 保留的 Robot 高度参考不可取得，其 Z 误差留空；降落无明确 XYZ/yaw 目标，error 留空。
+位姿缺失或跨 epoch 时不伪造误差。取消/失败状态、异常原因、任务 ID 和采样信息保留在
+events.jsonl 的 motion_csv_result 中。前后位姿是独立 HTTP 采样，不是 Robot 原子快照。
 
 `logs/v21_<timestamp>/` 包含 log.txt、config.json、events.jsonl，以及每个目标的
 触发图、拍摄位姿/内参/变换、检测框和 TRACK 可视化。事件包含检测耗时、去重、

@@ -71,12 +71,8 @@ class PatrolAgent(v20.TJKAgent):
         self.motion_csv_path = self.event_path.with_name("motions.csv")
         self._csv_lock = threading.Lock()
         self._csv_navigation = {}
-        self._csv_fields = ["started_at", "finished_at", "phase", "action", "action_frame",
-                            "action_x_cm", "action_y_cm", "action_z_cm", "action_yaw_deg",
-                            "task_id", "status", "error"]
-        for prefix in ("before", "after"):
-            self._csv_fields += [f"{prefix}_{key}" for key in (
-                "sampled_at", "x_cm", "y_cm", "z_cm", "yaw_deg", "epoch", "pose_error")]
+        self._csv_fields = ["started_at", "finished_at", "phase", "action",
+                            "action_xyz_yaw", "before", "after", "error"]
         with self.motion_csv_path.open("w", newline="", encoding="utf-8-sig") as stream:
             csv.DictWriter(stream, fieldnames=self._csv_fields).writeheader()
 
@@ -109,9 +105,36 @@ class PatrolAgent(v20.TJKAgent):
             row["after_pose_error"] = "Not sampled after failure; see events.jsonl"
         else:
             row.update(self._csv_pose("after"))
+        compact = {key: row[key] for key in ("started_at", "finished_at", "phase", "action")}
+        def values(prefix):
+            return [row.get(f"{prefix}_{k}_{'deg' if k == 'yaw' else 'cm'}")
+                    for k in ("x", "y", "z", "yaw")]
+        def packed(items):
+            if all(value is None for value in items):
+                return ""
+            return "(" + ", ".join("" if value is None else f"{value:.2f}" for value in items) + ")"
+        command, before, after = values("action"), values("before"), values("after")
+        errors = [None]*4
+        same_epoch = row.get("before_epoch") == row.get("after_epoch")
+        if all(v is not None for v in command + after) and same_epoch:
+            if row["action_frame"] == "world_absolute":
+                errors = [expected-actual for expected,actual in zip(command,after)]
+            elif row["action_frame"] == "body_relative" and all(v is not None for v in before):
+                before_pose = dict(zip(("x","y","z","yaw"),before))
+                after_pose = dict(zip(("x","y","z","yaw"),after))
+                delta = v20.TJKAgent._calculate_motion_error(self,before_pose,after_pose,*command)
+                errors = [delta[k] for k in ("ex","ey","ez","eyaw")]
+                if command[2] == 0:
+                    errors[2] = None  # Robot's retained height reference is not exposed.
+            if errors[3] is not None:
+                errors[3] = self._normalize_angle_deg(errors[3])
+        compact.update(action_xyz_yaw=packed(command), before=packed(before),
+                       after=packed(after), error=packed(errors))
+        # Status, failures and sampling metadata remain in the detailed event log.
+        self.event("motion_csv_result", **row)
         with self._csv_lock:
             with self.motion_csv_path.open("a", newline="", encoding="utf-8-sig") as stream:
-                csv.DictWriter(stream, fieldnames=self._csv_fields).writerow(row)
+                csv.DictWriter(stream, fieldnames=self._csv_fields).writerow(compact)
 
     def _execute_motion(self, action, dx_cm, dy_cm, dz_cm, dyaw_deg, operation, **kwargs):
         row = self._csv_begin(action.value,
@@ -360,7 +383,10 @@ class PatrolAgent(v20.TJKAgent):
         target_dir.mkdir(parents=True, exist_ok=True)
         self.vis_dir = str(target_dir)
         self.tracker.set_vis_dir(self.vis_dir)
-        cv2.imwrite(str(target_dir / "trigger.jpg"), cv2.cvtColor(obs.rgb, cv2.COLOR_RGB2BGR))
+        trigger_image = cv2.cvtColor(obs.rgb, cv2.COLOR_RGB2BGR)
+        x1, y1, x2, y2 = np.rint(candidate["box"]).astype(int)
+        cv2.rectangle(trigger_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.imwrite(str(target_dir / "trigger.jpg"), trigger_image)
         (target_dir / "trigger.json").write_text(json.dumps({
             "frame_id": obs.frame_id, "timestamp_s": obs.timestamp_s, "pose": obs.pose,
             "candidate": candidate, "intrinsics": obs.intrinsics.tolist(),

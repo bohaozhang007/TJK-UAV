@@ -970,13 +970,16 @@ class LocalRobotIntegrationTests(unittest.TestCase):
                 self.assertIsNone(client._frame_identity)
                 with agent.motion_csv_path.open(encoding="utf-8-sig",newline="") as stream:
                     motions=list(csv.DictReader(stream))
-                relative=[r for r in motions if r["action_frame"]=="body_relative"]
+                self.assertEqual(list(motions[0]),["started_at","finished_at","phase","action",
+                                                   "action_xyz_yaw","before","after","error"])
+                relative=[r for r in motions if r["action"]=="xyz_yaw_hybrid"]
                 self.assertEqual(len(relative),3)
                 for row in relative:
-                    self.assertEqual(row["status"],"arrived")
-                    self.assertAlmostEqual(float(row["after_x_cm"])-float(row["before_x_cm"]),30.,places=3)
-                    self.assertEqual(float(row["action_z_cm"]),0.)
-                self.assertEqual(sum(r["status"]=="cancelled" for r in motions),3)
+                    before_x=float(row["before"].strip("()").split(",")[0])
+                    after_x=float(row["after"].strip("()").split(",")[0])
+                    self.assertAlmostEqual(after_x-before_x,30.,places=2)
+                    self.assertEqual(row["action_xyz_yaw"],"(30.00, 0.00, 0.00, 0.00)")
+                    self.assertEqual(row["error"].split(",")[2].strip(),"")
                 self.assertEqual(motions[-1]["action"],"land")
                 output=os.environ.get("V21_TEST_OUTPUT")
                 if output:
