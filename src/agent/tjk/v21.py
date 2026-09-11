@@ -120,12 +120,12 @@ class PatrolAgent(v20.TJKAgent):
         same_epoch = row.get("before_epoch") == row.get("after_epoch")
         if all(v is not None for v in command + after) and same_epoch:
             if row["action_frame"] == "world_absolute":
-                errors = [expected-actual for expected,actual in zip(command,after)]
+                errors = [actual-expected for expected,actual in zip(command,after)]
             elif row["action_frame"] == "body_relative" and all(v is not None for v in before):
                 before_pose = dict(zip(("x","y","z","yaw"),before))
                 after_pose = dict(zip(("x","y","z","yaw"),after))
                 delta = v20.TJKAgent._calculate_motion_error(self,before_pose,after_pose,*command)
-                errors = [delta[k] for k in ("ex","ey","ez","eyaw")]
+                errors = [-delta[k] for k in ("ex","ey","ez","eyaw")]
                 if command[2] == 0 or (getattr(self.client, "_motion_tolerances", None) or {}).get("global_z_enabled", False):
                     errors[2] = None  # Robot's retained height reference is not exposed.
             if errors[3] is not None:

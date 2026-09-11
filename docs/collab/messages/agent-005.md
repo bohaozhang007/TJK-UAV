@@ -147,3 +147,11 @@ FIFO 写盘线程：左上角黑底黄色 trigger，JSON 增加 trigger:true。�
 触发图，也不会因原始异步保存较晚而覆盖标记。巡航与重捕获文件名前缀不变。
 新增标记/无原图保存断言，图片测试 2 项通过；完整 Agent 回归记录见
 logs/detection_trigger_regression.log。未修改历史已保存图片，未实飞。
+
+### motions.csv 误差方向调整
+
+按用户最新要求，error 改为实际减期望：绝对导航用 after-target，相对动作将既有
+requested-minus-actual 诊断取反后记录，yaw 仍归一化。仅修改 CSV 表达，不改变
+运动控制或 v20 内部误差定义；全局 Z/零 dz 等参考未知的 Z 误差仍留空。
+临时文件验证世界坐标误差 (3,-2,5,2)、旋转机体系误差 (3,0,3,2) 及 yaw 跨界
+通过，git diff --check 通过。新运行生效，历史 CSV 不自动改写。

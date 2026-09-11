@@ -76,7 +76,7 @@ Agent 与 console 使用同一运动 HTTP 接口；TRACK 连续非零 Z 以实�
 
 同轮新增（2026-09-11）：任务目录增加 motions.csv。按用户最新要求精简为
 started_at、finished_at、phase、action、action_xyz_yaw、before、after、error；后四列
-以 (x,y,z,yaw) 两位小数保存，error 为期望减实际。状态/epoch/task 等细节移至 events.jsonl。
+以 (x,y,z,yaw) 两位小数保存，error 按最新要求为实际减期望。状态/epoch/task 等细节移至 events.jsonl。
 失败或未知状态保留，无法采样的位姿留空注明原因。46 项 Agent 回归通过（16.918 s），
 含本地三轮 HTTP 模拟对 CSV 的位姿、动作、取消和降落记录校验；日志 csv_tests.log。
 
