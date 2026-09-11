@@ -3,6 +3,32 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-11。
 最新消息：[agent-005](messages/agent-005.md)，回复 [robot-004](messages/robot-004.md)。
 
+## 最新配置位置与语义（替代下文中间决定）
+
+两个开关均位于 src/robot/config/owl_ego.yaml 最上方、顶层：global_z_enabled:false、
+vertical_tolerance_enabled:false。独立 8 cm Z 约束恢复为可选功能。Robot bridge 和
+HTTP 从相同 YAML 读取；Agent 顶层和 session 配置传递已移除。缺字段默认 false。
+Robot 111 项（5.677 s）、Agent 51 项（17.493 s）通过；日志 root_z_options_*.log
+在 logs/v21_agent_round5。修改开关需重载 bridge/HTTP。未部署或实飞。
+
+## 最新实现：可选全局 Z 参考
+
+control.global_z_enabled 默认 false，保持当前相对 Z 行为；true 时相对 dz 累加
+到已有世界 hold 高度，复用现有参考生命周期。绝对导航完成采用目标高度，中止/
+失败重新取实测 hold，定位重置清除参考。没有重新引入独立 8 cm 容差。
+Robot 110 项（5.775 s）、Agent 51 项（17.518 s）通过，日志在
+logs/v21_agent_round5/global_z_robot.log、global_z_agent.log。尚未部署/实飞。
+开关在 src/robot/config/owl_ego.yaml 的 control 下，现场 bridge/HTTP 使用相同值。
+
+## 最新决定：取消独立 Z 到达容差（2026-09-11）
+
+按用户最新指令，本机 Robot 已移除独立 8 cm Z 到达约束，恢复三维距离 15 cm、
+yaw 和原停稳判定。移除 YAML/HTTP 中独立 Z 容差，旧配置残留字段忽略；保留
+vertical_error_cm 诊断。Robot 108 项、Agent 51 项本地回归通过，证据在
+logs/v21_agent_round5/remove_z_gate_robot.log 和 remove_z_gate_agent.log。
+尚未部署或实飞，Robot 需同步并重载 bridge 与 HTTP server；历史保留 8 cm 的
+建议被此决定替代。此修改不代表底层高度反馈偏差已修复。
+
 ## 最新现场复核：14:53 运行
 
 通信补丁已同步，最新任务在 REACQUIRE 纯旋转阶段由 Robot 返回运动执行 15 s

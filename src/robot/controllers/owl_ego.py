@@ -35,6 +35,10 @@ class OwlEgoController:
     backend = 'owl_ego'
     def __init__(self, image_dir=None, config_path=None, *, hardware=None, config=None):
         self.config = config or load_robot_config('owl_ego',config_path)
+        self.motion_options = {key: self.config.get(key,False)
+                               for key in ("global_z_enabled","vertical_tolerance_enabled")}
+        if any(type(v) is not bool for v in self.motion_options.values()):
+            raise ValueError("Z options must be booleans")
         if hardware is None:
             from ..hardware.owl_ego import OwlEgoHardware
             hardware = OwlEgoHardware(self.config)
@@ -290,7 +294,8 @@ class OwlEgoController:
     def get_motion_tolerances(self):
         c = self.config['control']
         return dict(position_tolerance_cm=c['position_tolerance_m']*100,
-                    vertical_tolerance_cm=c.get('vertical_tolerance_m',0.08)*100,
+                    global_z_enabled=getattr(self,'motion_options',{}).get('global_z_enabled',False),
+                    vertical_tolerance_enabled=getattr(self,'motion_options',{}).get('vertical_tolerance_enabled',False),
                     yaw_tolerance_deg=math.degrees(c['yaw_tolerance_rad']),
                     position_error_metric='euclidean_3d',source='owl_ego')
 

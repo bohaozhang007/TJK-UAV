@@ -29,7 +29,9 @@ class Node:
         with open(rospy.get_param('~config')) as f:
             self.c = yaml.safe_load(f)
         self.lock = threading.RLock()
-        self.core = FlightCore(self.c['control'])
+        self.core = FlightCore(self.c['control'],
+                              global_z_enabled=self.c.get('global_z_enabled', False),
+                              vertical_tolerance_enabled=self.c.get('vertical_tolerance_enabled', False))
         self.frames = Frames(self.c['control'].get('mavros_frame_profile','standard_enu'))
         with open(self.c['planner']['parameters']) as f:
             planner_params=yaml.safe_load(f)

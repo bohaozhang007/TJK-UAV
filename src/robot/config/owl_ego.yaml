@@ -1,3 +1,9 @@
+# ===== Z CONTROL OPTIONS (Robot; restart bridge + HTTP after changes) =====
+# Accumulate relative dz on the retained world target Z instead of measured Z.
+global_z_enabled: false
+# Add an independent 8 cm Z arrival constraint to the 15 cm 3D tolerance.
+vertical_tolerance_enabled: false
+
 controller:
   motion_timeout_s: 15.0
   takeoff_timeout_s: 60.0
@@ -39,8 +45,6 @@ control:
   max_tracking_error_m: 0.5
   world_limit_m: 30.0
   position_tolerance_m: 0.15
-  # Arrival requires both 3D distance and absolute Z error within tolerance.
-  vertical_tolerance_m: 0.08
   yaw_tolerance_rad: 0.0872664626
   # Pose stability: allowed XYZ/yaw span = these rates * stable_duration_s.
   # Raw odometry twist remains diagnostic; it does not gate stopped.

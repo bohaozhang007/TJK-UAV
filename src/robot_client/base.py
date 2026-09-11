@@ -168,6 +168,10 @@ class BaseClient:
             )
         parsed["position_error_metric"] = metric
         parsed["source"] = str(tolerances.get("source", "unknown"))
+        global_z = tolerances.get("global_z_enabled", False)
+        if type(global_z) is not bool:
+            raise RuntimeError("motion_tolerances global_z_enabled must be boolean")
+        parsed["global_z_enabled"] = global_z
         self._motion_tolerances = parsed
         return dict(parsed)
 

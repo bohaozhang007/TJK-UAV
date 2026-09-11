@@ -124,7 +124,7 @@ class PatrolAgent(v20.TJKAgent):
                 after_pose = dict(zip(("x","y","z","yaw"),after))
                 delta = v20.TJKAgent._calculate_motion_error(self,before_pose,after_pose,*command)
                 errors = [delta[k] for k in ("ex","ey","ez","eyaw")]
-                if command[2] == 0:
+                if command[2] == 0 or (getattr(self.client, "_motion_tolerances", None) or {}).get("global_z_enabled", False):
                     errors[2] = None  # Robot's retained height reference is not exposed.
             if errors[3] is not None:
                 errors[3] = self._normalize_angle_deg(errors[3])

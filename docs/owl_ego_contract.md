@@ -228,7 +228,7 @@ relative movement and landing when their task_id is available. Unknown task IDs
 return HTTP 404. Task GET `ok:true` means the query succeeded; `status:failed`
 is still a motion failure.
 
-- `arrived,stopped:true`: measured 3D distance, absolute Z error and yaw each meet configured tolerances,
+- `arrived,stopped:true`: measured 3D distance and yaw meet configured tolerances,
   plus current pose stability. Trajectory end alone is not arrival.
 - Cancel acceptance revokes old trajectory/generation ownership and starts hold.
   Wait for `cancelled,stopped:true` before continuing. The legitimate race
@@ -250,23 +250,42 @@ is still a motion failure.
 Current tolerance response:
 ~~~json
 {"ok":true,"motion_tolerances":{"position_tolerance_cm":15,
- "vertical_tolerance_cm":8,
  "yaw_tolerance_deg":5,"position_error_metric":"euclidean_3d","source":"owl_ego"}}
 ~~~
 Read the endpoint rather than hardcoding arrival tolerances.
 
-2026-09-11 user-approved arrival update: previously only 3D distance (15 cm)
-and yaw constrained position completion. Robot now additionally requires absolute
-Z error <= `control.vertical_tolerance_m` (default 0.08 m), including navigation,
-relative movements and takeoff. Landing and cancellation retain their existing
-completion rules. Task diagnostics add absolute `vertical_error_cm`.
-This is an arrival constraint, not an Agent dz deadband; Agent TRACK commands
-remain unchanged and wait for Robot completion. The tolerance response field is
-additive (protocol 1); older configs missing the setting default to 0.08 m in
-both core and HTTP reporting. Older Robot binaries do not enforce this constraint.
-Implemented in the Windows checkout under explicit cross-end user authorization;
-Robot deployment and flight convergence within 8 cm remain unverified. Apply the
-same control config to bridge and HTTP server when deploying both updated modules.
+2026-09-11 final user decision: both options belong at the TOP LEVEL, at the
+very beginning of Robot src/robot/config/owl_ego.yaml, default false:
+
+```yaml
+global_z_enabled: false
+vertical_tolerance_enabled: false
+```
+
+Robot bridge reads these root keys when constructing FlightCore. HTTP reads the
+same root keys and reports both booleans in motion_tolerances. Both processes must
+load the same config and be reloaded after changes. Missing fields default false;
+non-boolean values are rejected. Agent YAML and session requests do not select
+these modes. No session-motion-options API or capability is introduced. This
+supersedes the intermediate Agent-YAML/session configuration proposal.
+
+vertical_tolerance_enabled=true adds absolute Z error <=0.08 m to the existing
+3D distance (default 0.15 m), yaw and pose stability arrival conditions for
+navigation, relative movement and takeoff. False uses the original 3D/yaw/stability
+conditions only. Landing and cancellation completion are unchanged.
+
+global_z_enabled=true uses retained world hold Z + dz for relative commands,
+falling back to measured Z only if no reference exists. False retains measured
+Z + dz for nonzero dz, and retained hold for zero dz. Successful absolute navigation
+establishes its goal Z as the next reference. Init, cancellation and failure
+recapture measured hold; localization reset clears it. Rejected/busy commands
+never accumulate dz. XY/yaw semantics are unchanged.
+
+GET /motion_tolerances reports both configured booleans. Absolute
+vertical_error_cm stays diagnostic. Agent relative-action CSV Z error is blank
+when global Z is enabled because before/after samples do not expose the accepted
+world goal. This changes target/arrival semantics, not FCU height feedback.
+Implemented and tested in the local checkout, not deployed or flight-tested.
 
 Current stop confirmation uses >=0.5 s of accepted poses and >=5 distinct samples:
 the norm of XYZ component ranges <=5 cm and unwrapped yaw range <=2.5 degrees.

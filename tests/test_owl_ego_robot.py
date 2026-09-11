@@ -170,7 +170,7 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(sample['hold_z_m'], 1.)
         self.assertEqual(sample['output_z_world_m'], 1.02)
         self.assertEqual(sample['measured_z_world_m'], 1.11)
-        self.assertEqual(sample['vertical_tolerance_m'], .08)
+        self.assertEqual(sample['position_tolerance_m'], .15)
         self.assertAlmostEqual(sample['odom_receipt_age_s'], .02)
         np.testing.assert_array_equal(self.c.hold,before[0])
         np.testing.assert_array_equal(self.c.pose,before[1])
@@ -249,10 +249,7 @@ class CoreTest(unittest.TestCase):
         self.cmd('relative',task_id='up',relative=[0,0,.2,0],localization_epoch=self.c.epoch)
         self.assertAlmostEqual(self.c.tasks['up']['goal'][2],1.3)
         self.stable((0,0,1.4))
-        self.assertNotEqual(self.c.tasks['up']['status'],'arrived')
-        with self.assertRaises(Rejected):
-            self.cmd('relative',task_id='premature',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
-        self.stable((0,0,1.36))
+        self.assertEqual(self.c.tasks['up']['status'],'arrived')
         self.cmd('relative',task_id='level',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
         self.assertAlmostEqual(self.c.tasks['level']['goal'][2],1.3)
         self.feed((0,0,1.4))
@@ -260,6 +257,40 @@ class CoreTest(unittest.TestCase):
         self.assertAlmostEqual(self.c.hold[2],1.4)
         self.cmd('relative',task_id='after_cancel',relative=[.3,0,0,0],localization_epoch=self.c.epoch)
         self.assertAlmostEqual(self.c.tasks['after_cancel']['goal'][2],1.4)
+
+    def test_global_z_accumulates_commands_not_measured_bias(self):
+        self.c.motion_options['global_z_enabled']=True
+        self.stable((0,0,1.1))
+        for tid,dz,expected in [('up',.05,1.05),('down',-.02,1.03),('level',0,1.03)]:
+            self.cmd('heartbeat')
+            self.cmd('relative',task_id=tid,relative=[0,0,dz,0],localization_epoch=self.c.epoch)
+            self.assertAlmostEqual(self.c.tasks[tid]['goal'][2],expected)
+            self.stable((0,0,expected+.1))
+            self.assertEqual(self.c.tasks[tid]['status'],'arrived')
+        self.nav('absolute',goal=(0,0,1.2,0));self.stable((0,0,1.3))
+        self.cmd('relative',task_id='next',relative=[0,0,.05,0],localization_epoch=self.c.epoch)
+        self.assertAlmostEqual(self.c.tasks['next']['goal'][2],1.25)
+        self.cmd('cancel',task_id='next');self.stable((0,0,1.3))
+        self.cmd('heartbeat')
+        self.cmd('relative',task_id='after_cancel',relative=[0,0,.05,0],localization_epoch=self.c.epoch)
+        self.assertAlmostEqual(self.c.tasks['after_cancel']['goal'][2],1.35)
+
+    def test_global_z_config_defaults_false_and_requires_bool(self):
+        config=dict(CONFIG['control'])
+        self.assertFalse(FlightCore(config).motion_options['global_z_enabled'])
+        for invalid in (1,0,'true',None):
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                FlightCore(config,global_z_enabled=invalid)
+
+    def test_optional_vertical_gate(self):
+        self.c.motion_options['vertical_tolerance_enabled']=True
+        self.nav(goal=(0,0,1,0));self.stable((0,0,1.12))
+        self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
+        self.stable((0,0,1.07))
+        self.assertEqual(self.c.tasks['a']['status'],'arrived')
+        self.assertTrue(FlightCore(CONFIG['control'],vertical_tolerance_enabled=True).motion_options['vertical_tolerance_enabled'])
+        with self.assertRaises(ValueError):
+            FlightCore(CONFIG['control'],vertical_tolerance_enabled='false')
 
     def test_absolute_navigation_keeps_previous_Z_while_planning_and_recaptures_on_cancel(self):
         self.nav(goal=(0,0,1,0));self.stable((0,0,1.06))
@@ -356,46 +387,23 @@ class CoreTest(unittest.TestCase):
         self.cmd('cancel',task_id='a')
         self.assertEqual(self.c.tasks['a']['status'],'arrived')
 
-    def test_arrival_requires_independent_vertical_tolerance(self):
+    def test_arrival_uses_3d_tolerance_without_separate_z_gate(self):
         for sign in (-1,1):
             with self.subTest(sign=sign):
                 self.setUp()
                 self.nav(goal=(0,0,1,0))
+                self.stable((0,0,1+sign*.16))
+                self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
                 self.stable((0,0,1+sign*.12))
-                self.assertTrue(self.c.stopped)
-                self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
-                self.assertAlmostEqual(self.c.tasks['a']['diagnostics']['vertical_error_cm'],12.)
-                self.stable((0,0,1+sign*.081))
-                self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
-                self.stable((0,0,1+sign*.079))
                 self.assertEqual(self.c.tasks['a']['status'],'arrived')
+                self.assertAlmostEqual(self.c.tasks['a']['diagnostics']['vertical_error_cm'],12.)
 
-    def test_vertical_tolerance_does_not_replace_3d_tolerance(self):
-        self.nav(goal=(0,0,1,0))
-        self.stable((.14,0,1.07))
-        self.assertTrue(self.c.stopped)
-        self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
-        self.stable((.12,0,1.07))
-        self.assertEqual(self.c.tasks['a']['status'],'arrived')
-
-    def test_vertical_tolerance_config_and_legacy_default(self):
-        config=copy.deepcopy(CONFIG['control'])
-        config.pop('vertical_tolerance_m')
-        self.assertEqual(FlightCore(config).c['vertical_tolerance_m'],.08)
-        for invalid in (0,-.1,True,float('nan'),float('inf')):
-            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
-                FlightCore(dict(config,vertical_tolerance_m=invalid))
-        self.c.c['vertical_tolerance_m']=.04
-        self.nav(goal=(0,0,1,0))
-        self.stable((0,0,1.06))
-        self.assertNotEqual(self.c.tasks['a']['status'],'arrived')
-        self.stable((0,0,1.03))
-        self.assertEqual(self.c.tasks['a']['status'],'arrived')
+    def test_retired_vertical_config_is_ignored(self):
+        config=dict(CONFIG['control'],vertical_tolerance_m=.08)
+        self.assertNotIn('vertical_tolerance_m',FlightCore(config).c)
         controller=OwlEgoController.__new__(OwlEgoController)
-        controller.config=dict(control=dict(config,vertical_tolerance_m=.04))
-        self.assertEqual(controller.get_motion_tolerances()['vertical_tolerance_cm'],4.)
         controller.config=dict(control=config)
-        self.assertEqual(controller.get_motion_tolerances()['vertical_tolerance_cm'],8.)
+        self.assertNotIn('vertical_tolerance_cm',controller.get_motion_tolerances())
 
     def test_cancel_old_terminal_does_not_touch_new(self):
         self.nav();self.cmd('cancel',task_id='a');self.stable();self.nav('b')
