@@ -155,3 +155,21 @@ requested-minus-actual 诊断取反后记录，yaw 仍归一化。仅修改 CSV 
 运动控制或 v20 内部误差定义；全局 Z/零 dz 等参考未知的 Z 误差仍留空。
 临时文件验证世界坐标误差 (3,-2,5,2)、旋转机体系误差 (3,0,3,2) 及 yaw 跨界
 通过，git diff --check 通过。新运行生效，历史 CSV 不自动改写。
+
+### trigger 文件后缀及返回点检测确认
+
+触发图在标记完成后由原 _top3.png 改名为 _top3_trigger.png，保留左上角 trigger；
+JSON 增加 image_file 指向最终文件，不保留重复的无后缀图。重捕获原有链路已调用
+observe/infer_observation，每次重新检测都保存 reacquire_*_top3.png，按返回置信度
+绘制前三框；无框仍保存。沿用配置的最多三次尝试，不额外重复一次模型调用。
+新增真实 _reacquire 方法配合模拟检测器的保存验证：确认返回点重新采集、检测、
+前三排序及身份匹配失败仍留图；连同触发后缀、无原图、空结果测试共 3 项通过
+（0.414 s），git diff --check 通过。未实飞、未修改历史图片。
+
+### 重捕获留图归属目标目录
+
+按用户最新要求，返回 trigger 点后的 reacquire_*_top3.png 及同名 JSON 改存当前
+vis/target_NNN_attempt_NN/。巡航检测仍在 vis/detections/，trigger 图后缀及标记
+不变。推理前固定目录并随写盘任务传递，避免异步写盘时使用后续目标的目录。
+针对性 3 项图片测试通过（0.389 s），包含实际 _reacquire 路径归档位置断言；
+git diff --check 通过。新运行生效，不搬移历史图片。

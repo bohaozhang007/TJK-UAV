@@ -220,6 +220,7 @@ class PatrolAgent(v20.TJKAgent):
         start = time.monotonic()
         # Capture the source before inference; patrol may be cancelled while GPU work runs.
         detection_phase = "reacquire" if self.phase == "REACQUIRE" else "patrol"
+        detection_directory = self.vis_dir if detection_phase == "reacquire" else None
         detections, detection_error = [], None
         try:
             detections = self.detect(obs.rgb)
@@ -229,7 +230,7 @@ class PatrolAgent(v20.TJKAgent):
         finally:
             detection_image = self.detection_images.submit(obs.rgb, detections, phase=detection_phase,
                                          frame_id=obs.frame_id, timestamp_s=obs.timestamp_s,
-                                         pose=obs.pose, error=detection_error)
+                                         pose=obs.pose, error=detection_error, directory=detection_directory)
         candidates = []
         if detections:
             depth = self.client.estimate_depth(obs)

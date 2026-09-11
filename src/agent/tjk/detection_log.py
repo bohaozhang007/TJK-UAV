@@ -16,7 +16,7 @@ class DetectionImageLog:
         self.thread = None
         self.sequence = 0
 
-    def submit(self, rgb, detections, *, phase, frame_id, timestamp_s, pose, error=None):
+    def submit(self, rgb, detections, *, phase, frame_id, timestamp_s, pose, error=None, directory=None):
         if self.thread is None:
             self.directory.mkdir(parents=True, exist_ok=True)
             self.thread = threading.Thread(target=self._run, name="detection-image-log", daemon=True)
@@ -28,12 +28,12 @@ class DetectionImageLog:
         meta = dict(phase=phase, frame_id=frame_id, timestamp_s=timestamp_s,
                     pose=dict(pose), detection_count=len(detections), top3=top, error=error)
         # Bounded queue with backpressure, not silent dropping of detector inputs.
-        self.queue.put((name, rgb.copy(), meta))
+        self.queue.put((name, rgb.copy(), meta, Path(directory) if directory is not None else self.directory))
         return name
 
     def mark_trigger(self, name):
         # The same FIFO worker handles initial save and later trigger annotation.
-        self.queue.put((name, None, None))
+        self.queue.put((name, None, None, self.directory))
 
     def _run(self):
         while True:
@@ -41,9 +41,13 @@ class DetectionImageLog:
             try:
                 if item is None:
                     return
-                name, rgb, meta = item
+                name, rgb, meta, directory = item
+                directory.mkdir(parents=True, exist_ok=True)
                 if rgb is None:
                     path = self.directory / f"{name}_top3.png"
+                    trigger_path = self.directory / f"{name}_top3_trigger.png"
+                    if not path.exists():
+                        path = trigger_path
                     annotated = cv2.imread(str(path))
                     if annotated is None:
                         raise OSError(f"Cannot mark missing detection image {path}")
@@ -52,9 +56,12 @@ class DetectionImageLog:
                                 .7, (0,255,255), 2, cv2.LINE_AA)
                     if not cv2.imwrite(str(path), annotated):
                         raise OSError(f"Failed to save {path}")
+                    if path != trigger_path:
+                        path.replace(trigger_path)
                     metadata_path = self.directory / f"{name}.json"
                     meta = json.loads(metadata_path.read_text(encoding="utf-8"))
                     meta["trigger"] = True
+                    meta["image_file"] = trigger_path.name
                     metadata_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
                     continue
                 original = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -68,10 +75,10 @@ class DetectionImageLog:
                 if not meta["top3"]:
                     cv2.putText(annotated, "DETECTION ERROR" if meta["error"] else "NO DETECTIONS",
                                 (8,22), cv2.FONT_HERSHEY_SIMPLEX, .6, (0,255,255), 2)
-                path = self.directory / f"{name}_top3.png"
+                path = directory / f"{name}_top3.png"
                 if not cv2.imwrite(str(path), annotated):
                     raise OSError(f"Failed to save {path}")
-                (self.directory / f"{name}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                (directory / f"{name}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
             except Exception as exc:
                 self.event("detection_image_save_failed", name=item[0], error=str(exc))
             finally:
