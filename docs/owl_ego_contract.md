@@ -67,6 +67,19 @@ endpoint, task cancellation, session release, and synchronized observation.
   use request_id; repeat release after retirement may be rejected.
 - Send heartbeat every 0.5 s with a 2 s HTTP timeout, independently of inference,
   capture and blocking motion. The onboard lease expires after 5 s.
+- Transport failures must not permanently terminate heartbeat on the first error.
+  Retry only the same session within a bounded remaining lease budget, using a
+  monotonic clock and bounded per-attempt timeouts/backoff. Conservatively base
+  the budget on the send time of the last acknowledged acquisition/heartbeat,
+  not its response receipt time; an uncertain request does not reset this budget.
+  Suspend new motion while renewal is uncertain. Successful renewal does not
+  replay motion or clear a latched mission failure: reconcile health, epoch and
+  the original task first. Explicit session rejection, takeover, or exhausted
+  recovery budget ends recovery; never reacquire automatically or revive a
+  failed mission. Keep heartbeat independent through landing and cancellation.
+  Clarification 2026-09-11: Robot already accepts renewal of valid sessions and
+  rejects expired ones; local Agent heartbeat still exits on first exception.
+  Client bounded recovery is required but not yet implemented/verified here.
 - Expiry/release invalidates active work and requests measured hold where output
   authority remains valid. It does not land or disarm. Telemetry/control loss
   may revoke setpoints and leave recovery to validated PX4 failsafe/pilot.
