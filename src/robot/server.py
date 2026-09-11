@@ -251,7 +251,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if getattr(self.controller, "backend", None) == "owl_ego":
             try:
-                result = self.controller.handle_http(self.command, path, body if self.command == "POST" else params)
+                result = self.controller.handle_http(self.command, path, body if self.command == "POST" else params,
+                    local_operator=self.client_address[0] in ("127.0.0.1", "::1"))
                 self._json_response(200 if result.get("ok") else 409, result)
             except Exception as exc:
                 self._json_response(getattr(exc, "code", 400), dict({"ok": False, "error": str(exc)},

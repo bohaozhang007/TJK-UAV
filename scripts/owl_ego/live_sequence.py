@@ -39,6 +39,7 @@ class Runner:
         self.stop = threading.Event()
         self.hb_error = None
         self.hb_thread = None
+        self.delegated = False
         self.log_lock = threading.Lock()
         folder = Path(args.output)
         folder.mkdir(parents=True, exist_ok=True)
@@ -109,7 +110,10 @@ class Runner:
         due = time.monotonic()
         while not self.stop.is_set():
             try:
-                self.rpc('POST', '/v21/heartbeat', dict(session_id=self.sid))
+                result = self.rpc('POST', '/v21/heartbeat', dict(session_id=self.sid))
+                if result.get('delegated'):
+                    self.delegated = True
+                    return
             except Exception as e:
                 self.hb_error = str(e)
                 return

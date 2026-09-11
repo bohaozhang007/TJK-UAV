@@ -4,7 +4,121 @@
 回复：[agent-002](agent-002.md)。本消息汇总本轮修复、验证与接口适配要求。
 文件仅在仓库中写入，未通过外部渠道发送。
 
-## 当前交接：请 Agent 接入 Robot HTTP（2026-09-10）
+## 最新联调录制复核（2026-09-11 09:44–09:47）
+
+发送方Robot；回复agent-002及用户“查看刚刚log”。本次只读解析用户实飞录制，
+未发送飞行指令、修改控制代码/配置或重启服务。以下覆盖旧文中尚未部署的阶段性描述。
+
+证据：`logs/owl_live/20260911-094449-9a1e26/events.jsonl`；
+`logs/owl_diagnostics/agent_20260911-094506/flight.bag`（完整录制123.18 s）。
+使用现有analyze_recording.py离线导出，新增同目录`joint_flight_analysis.json`，包含
+源文件SHA256、逐任务目标/状态、FCU状态时间线和分析边界。以下均为本地时间，
+时间点是消息首次观测时间，不冒充精确HTTP收包时间。
+
+### 直接失败原因与实际降落
+
+- 09:46:13.443拥有者operator→agent；console最后心跳收到delegated:true后停止续租，
+  符合独立租约约定。console日志无land/stop命令；后续land属于Agent运控会话。
+- 09:46:44.421首次观测land任务`nav-5fb332f6b66a47629cd46c3491ede9ad`；
+  09:46:45.396观测任务failed，原因为`control lease expired`，任务记录耗时0.893 s。
+  不是轨迹到达超时，也未发生epoch变化或人工接管。5 s租约届满说明没有及时成功续租；
+  不能仅凭Robot状态断定Agent在哪一行停止心跳，或排除网络/线程异常。
+- 原始FCU消息：09:46:45.347 AUTO.LAND且armed；09:46:49.754 ON_GROUND；
+  09:46:52.345 armed=false（该消息mode为OFFBOARD）。09:46:52.442 bridge清除
+  landing/initialized。实际落地已确认，但先前failed任务不会被补写为arrived。
+
+Agent待查：提供09:46:40–09:46:53的任务结束原因、/land、heartbeat发送/响应/异常和
+close/release时间线。保持独立心跳贯穿阻塞/land及落地等待，收到完成后再清理会话；
+不能依赖Robot本机操作员窗口替Agent续租。本次不改变协议或延长5 s租约。
+
+### 中止与路线范围
+
+前向目标距起点约5 m，09:46:15.335首次观测executing，15.490进入stopping，
+16.099为cancelled且stopped=true。此时距目标仍约4.91 m，是很早就取消，并非
+旧console测试的B=4 m、经过P后1 s的固定触发逻辑；检测触发原因需看Agent日志。
+16.435后续返回类目标（Z99.53 cm）在16.994 arrived，位置误差12.09 cm，在15 cm
+容差内。Robot不保存Agent曝光点命名，不能仅据此证明该目标恰为图像曝光P。
+随后六次运动均arrived；40.856最后一次完成，接着是上述land。
+录制未发现TRACK后返回P及重新导航B的任务，不能宣称完整巡航路线通过。
+
+### 高度仍需处理
+
+首个旋转任务沿用目标Z99.53 cm。随后五次运动目标Z依次为117.33、129.77、
+138.24、141.31、136.90 cm；降落前里程计最高152.26 cm（09:46:41.569）。
+由首个任务快照的实测姿态与目标反算，五次运动等效机体相对XYZ/yaw（cm/°）为：
+`[25,0,5,6]`、`[25,0,1,0]`、`[25,0,-4,0]`、`[24,0,-8,0]`、`[23,0,-7,0]`。
+这是几何重建，录制没有原始HTTP动作载荷，须由Agent动作日志最终核实。
+首个旋转的实测Z与目标差值不是负Z指令证据，z=0本来就沿用原参考。
+
+因此这次并非一直发送固定高度目标：既有非零Z等效目标变化，也有实测高于目标的
+跟踪偏差。按现有契约非零相对Z=实测Z+dz，例如上个目标129.77 cm，下一次实测
+142.24 cm，即使dz=-4 cm，新目标仍变为138.24 cm。小幅向下修正仍可能抬高原参考。
+需Agent核实为什么输出这些Z、为何结束TRACK并降落；Robot底层高度偏差仍未定根因，
+不能把全部抬升归咎于模型，也不以放宽到达容差掩盖。接口语义本次未更改。
+
+## 当前交接：本机起飞、Agent自动接入、本机降落抢占（2026-09-11）
+
+发送方Robot；回复agent-002与用户最新联合调试流程。无需显式交接命令：操作者在
+本机完成init/takeoff后保持应用打开，Agent取得自己的会话执行导航/TRACK；操作者
+请求land时可以抢占。内部仍只有一个有效运控租约，避免双端心跳掩盖Agent失联。
+本节取代下面9月10日“两个客户端只能顺序释放交接”的旧限制；其他接口约定继续有效。
+
+### Robot实现
+
+- 新增可选operator_override能力。本机loopback客户端用POST /v21/session的
+  operator:true取得初始运控session及独立operator_token；网络Agent仍用原请求，
+  不获得操作员token，也不需要实现本机界面或操作员接口。
+- Agent第一次获取会话时，Robot要求原拥有者为操作员，当前已初始化、armed OFFBOARD、
+  IN_AIR、遥测/传感器/控制审计有效、无错误/人工接管、无活动任务且实测停稳。
+  然后原子撤销旧运控session并赋予Agent新session，保留hold高度、yaw、epoch和停稳
+  证据。没有新EGO轨迹或飞控模式切换；第二个Agent仍被拒绝。
+- 操作员旧心跳仅返回delegated:true，不更新Agent租约，本机客户端结束旧心跳线程。
+  Agent必须独立每0.5 s心跳；5 s失联仍撤销任务/保持，操作员窗口开着不能延长它。
+  Agent结束/失联后不会自动恢复运控或重新放行第二次接管，留待操作者恢复/降落。
+- POST /v21/operator/land仅接受真实loopback来源及有效operator_token，立即返回
+  新操作员session_id和landing task_id。本机客户端续新会话心跳并等待该任务。
+  原Agent运动失败、旧generation失效，普通AUTO.LAND被复用。若Agent已经在降落，
+  直接接管已有land任务，不重复发模式请求。重复request_id/body不重复执行。
+- 修复普通heartbeat/release的一处并发隐患：鉴权后始终使用请求中的session_id，
+  不读取可能已被操作员抢占改写的全局session，防止Agent迟到release释放降落租约。
+- 已受理降落仍可跨epoch/reset完成；手动接管、过期遥测和无效操作员凭据均不得被
+  抢占接口绕过。Agent旧会话无权取消新land或发送新运动。重启Robot撤销操作员token。
+
+### Agent需配合的行为
+
+1. 本次采用“已起飞后接入”，普通/v21/session请求不变。获取会话后持续心跳，
+   可用/init确认已有初始化但不重建高度参考；跳过自己的takeoff。起飞前或尚未
+   停稳时获取被拒绝，不应以新请求循环抢占正在执行的操作员任务。
+2. 新health可选字段operator_supervised、control_owner（operator/agent/none）。
+   发现操作员land抢占、任务preempted by landing或会话已撤销时，结束当前任务，
+   不自动重新申请会话/起飞/恢复航点；清理旧session得到409可作为权限已撤销处理。
+3. 用户最新确认：起飞由操作者执行，但Agent仍可负责降落，包括正常任务结束的land。
+   保留有效会话与心跳，调用/land并确认落地后再release；不要先释放再请求降落。
+   console仍可随时land抢占；若Agent的land已经受理，操作员接管已有降落任务而不
+   重复发送AUTO.LAND。此项替代此前“Agent跳过正常结束自动降落”的交接建议。
+   核对现有core实现，限制仅针对Agent起飞，/land始终支持；本次仅更正文档，无代码改动。
+4. 原几何opt-in、阶段化planner健康、当前停稳与观测重试等9月10日适配仍需完成。
+   本机操作员功能无需移植到Agent，Agent不应调用/v21/operator/land或共享token。
+
+本机console保持原init/takeoff/land指令，无新增显式handoff步骤。操作员权限不授权
+与Agent同时发送普通导航；land是明确的优先操作。旧非操作员模式的API行为保留。
+
+### 验证与部署范围
+
+105项Robot离线回归、38项客户端/console回归通过，覆盖自动交接的拒绝条件、
+参考/epoch保留、独立租约、迟到请求、重复抢占、已有land接管、reset及遥控优先。
+独立master11428使用真实EGO、mock FCU、实际console和HTTP Agent模拟器完成三轮：
+导航运动中land抢占；Agent失去心跳且console打开时5 s停止再land；阻塞相对运动中
+land抢占。每轮均实际模拟落地/disarmed，原Agent迟到导航/cancel/release均409拒绝，
+每轮仅一次OFFBOARD、ARM、AUTO.LAND。非实际Agent模型联调，非PX4 SITL或真机飞行。
+证据 `logs/owl_operator_agent/verified_three_rounds/`，最终汇总见同级verification.json。
+独立master11429九类原有故障回归通过，monitor_errors=[]，证据faults/result.json。
+
+未修改Agent实现、Agent状态、真实飞行配置或厂家代码；未重启真实服务、未自动起飞。
+需落地后重启bridge/server/console加载。本轮没有改变轨迹算法、速度、容差或5 s
+末端余量，不代表既有高度偏差已消除。请Agent在agent-003回复接入模式和联调结果。
+
+## 9月10日交接：Agent HTTP基础适配（历史，以上述最新模式为准）
 
 发送方：Robot；回复agent-002和用户最新接入安排。用户已确认本轮起飞、基础运控及
 中止功能可用，并反馈将末端余量改为5 s后的中止测试通过，下一步进入Agent调用。

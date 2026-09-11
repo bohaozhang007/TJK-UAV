@@ -36,11 +36,14 @@ p.add_argument('--biased-vz',action='store_true',help='Add the observed -0.124 m
 p.add_argument('--altitude-offset',action='store_true',help='Mock actual OFFBOARD altitude settles 10 cm above its position setpoint')
 p.add_argument('--yaw-lag',action='store_true',help='Mock yaw response limited to 24 deg/s with a proportional settling tail')
 p.add_argument('--console-client',action='store_true')
+p.add_argument('--operator-agent',action='store_true',help='Actual console takeoff, automatic Agent acquisition, and operator landing override for three rounds')
 p.add_argument('--console-relative',action='store_true',help='Exercise manual relative console commands instead of test route')
 p.add_argument('--landing-frame-mismatch',action='store_true',help='Inject a persistent LIO mismatch during the pending AUTO.LAND service')
 p.add_argument('--live-client',action='store_true',help='Run the actual HTTP-only live_sequence client against this mock fixture')
 p.add_argument('--faults-only',action='store_true',help='Run fault injection scenarios instead of the three route rounds')
 a=p.parse_args()
+if a.operator_agent and (not a.console_client or a.console_relative or a.takeoff_retry or a.record_diagnostics or a.landing_frame_mismatch or a.settle_after_takeoff):
+    p.error('--operator-agent requires --console-client without other console scenarios')
 if a.landing_frame_mismatch and (not a.console_client or a.takeoff_retry):
     p.error('--landing-frame-mismatch requires --console-client without takeoff-retry')
 if a.console_relative and (not a.console_client or a.takeoff_retry or a.settle_after_takeoff):
@@ -291,6 +294,77 @@ try:
     assert not obs['rectified'] and obs['calibration_quality']=='approximate'
     assert obs['geometry_assumptions']['intrinsics']=='approximate_fov'
     assert obs['sync_error_s']<=.05 and obs['image_size']==[320,240]
+    if a.operator_agent:
+        console_log=(temp/'console_stdout.log').open('w')
+        client=subprocess.Popen([sys.executable,str(root/'scripts/owl_ego/console.py'),'--url',url,
+            '--output',str(temp/'console')],stdin=subprocess.PIPE,stdout=console_log,stderr=subprocess.STDOUT,
+            text=True,start_new_session=True)
+        processes.append(client)
+        results=[]
+        def send_console(command):
+            client.stdin.write(command+'\n');client.stdin.flush()
+        for index in range(3):
+            phase='operator-agent-'+str(index+1)
+            wait(lambda:bridge_snap.get('health',{}).get('stopped'))
+            send_console('init');send_console('takeoff');send_console('wait')
+            wait(lambda:bridge_snap.get('health',{}).get('airborne') and
+                 bridge_snap['health'].get('stopped') and not bridge_snap['health'].get('active_task_id'),40)
+            session=rpc('POST','/v21/session',dict(request_id=str(uuid.uuid4())))['session_id']
+            lease_stop=threading.Event()
+            def agent_heartbeat(sid=session,event=lease_stop):
+                while not event.is_set():
+                    try:rpc('POST','/v21/heartbeat',dict(session_id=sid),timeout=2)
+                    except Exception:return
+                    if event.wait(.5):return
+            hb=threading.Thread(target=agent_heartbeat,daemon=True);hb.start()
+            rpc('POST','/init',dict(session_id=session,request_id=str(uuid.uuid4())))
+            origin=rpc('GET','/get_pose');goal=origin['pose'].copy();goal['x']+=300
+            relative_result=[];relative_worker=None
+            if index==2:
+                def relative_call():
+                    try:
+                        relative_result.append(rpc('POST','/move_relative_xyz_yaw',dict(session_id=session,
+                            request_id=str(uuid.uuid4()),x=300,y=0,z=0,yaw=0,timeout_s=15)))
+                    except Exception as error:relative_result.append(str(error))
+                relative_worker=threading.Thread(target=relative_call,daemon=True);relative_worker.start()
+                move=wait(lambda:bridge_snap.get('health',{}).get('active_task_id'))
+            else:
+                move=rpc('POST','/v21/navigation',dict(session_id=session,request_id=str(uuid.uuid4()),
+                    localization_epoch=origin['localization_epoch'],pose=goal))['task_id']
+            wait(lambda:abs(rpc('GET','/get_pose')['pose']['x']-origin['pose']['x'])>20)
+            if index==1:
+                lease_stop.set();hb.join(3)
+                wait(lambda:bridge_snap.get('tasks',{}).get(move,{}).get('error')=='control lease expired',8)
+                record('agent_lease_expired_with_console_open',task_id=move)
+            send_console('land');send_console('wait')
+            landing=wait(lambda:bridge_snap.get('health',{}).get('landing') and
+                bridge_snap['health'].get('control_owner')=='operator' and bridge_snap['health']['active_task_id'])
+            for path,body in [('/v21/session/release',dict(session_id=session)),
+                              ('/v21/navigation',dict(session_id=session,request_id=str(uuid.uuid4()),
+                               localization_epoch=origin['localization_epoch'],pose=goal)),
+                              ('/v21/navigation/cancel',dict(session_id=session,request_id=str(uuid.uuid4()),task_id=landing))]:
+                try:rpc('POST',path,body)
+                except RuntimeError as error:assert str(error).startswith('409:'),str(error)
+                else:raise AssertionError('retired Agent request accepted: '+path)
+            lease_stop.set();hb.join(3)
+            wait(lambda:bridge_snap.get('tasks',{}).get(landing,{}).get('status')=='arrived',30)
+            assert bridge_snap['tasks'][move]['status']=='failed'
+            if relative_worker:
+                relative_worker.join(3)
+                assert len(relative_result)==1 and isinstance(relative_result[0],str) and relative_result[0].startswith('409:'),relative_result
+            assert bridge_snap['health']['landed_state']==1 and not armed
+            results.append(dict(round=index+1,motion_task=move,landing_task=landing,
+                reason=bridge_snap['tasks'][move]['error'],landed=True,relative_result=relative_result))
+            # Wait for the real console worker to finish before the next init.
+            wait(lambda:sum(json.loads(line).get('event')=='console_completed' and json.loads(line).get('command')=='land'
+                 for line in (temp/'console/events.jsonl').read_text().splitlines())>=index+1)
+        send_console('quit');client.wait(timeout=10);console_log.close()
+        assert client.returncode==0,client.returncode
+        assert fcu_calls==['OFFBOARD','ARM','AUTO.LAND']*3,fcu_calls
+        (temp/'result.json').write_text(json.dumps(dict(ok=True,rounds=results,fcu_calls=fcu_calls,
+            simulation='real EGO + mock FCU, actual console and HTTP Agent simulator; no real Agent/model/flight'),indent=2))
+        print('PASS: three automatic operator/Agent transfers and landing overrides',flush=True)
+        raise SystemExit(0)
     if a.console_client:
         wait(lambda:rpc('GET','/health')['health'].get('stopped'))
         commands=temp/'commands.txt'

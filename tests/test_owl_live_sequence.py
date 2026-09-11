@@ -254,6 +254,57 @@ class ConsoleTest(unittest.TestCase):
     def test_takeoff_requires_init(self):
         with self.assertRaises(live.Failure):self.console.command('takeoff')
 
+    def test_delegated_heartbeat_exits_without_refreshing_again(self):
+        r=self.console.r;r.sid='operator'
+        with patch.object(r,'rpc',return_value=dict(ok=True,delegated=True)) as rpc:
+            r.heartbeat()
+        self.assertEqual(rpc.call_count,1);self.assertTrue(r.delegated)
+        self.assertIsNone(r.hb_error)
+        with self.assertRaisesRegex(live.Failure,'Agent'):
+            self.console.command('takeoff')
+
+    def test_operator_land_replaces_session_and_waits_across_epoch(self):
+        c=self.console;r=c.r;c.operator_token='secret';r.sid='old';r.delegated=True;r.epoch='before'
+        requests=[]
+        def rpc(method,path,data=None,timeout=2):
+            requests.append((method,path,data))
+            if path=='/v21/operator/land':return dict(ok=True,session_id='landing-owner',task_id='land')
+            if path=='/health':return dict(health=dict(localization_epoch='after',odom_ok=False,landing=True))
+            if path.startswith('/v21/navigation/status'):return dict(status='arrived',stopped=True,localization_error='reset')
+            raise AssertionError(path)
+        with patch.object(r,'rpc',side_effect=rpc),patch.object(r,'heartbeat'):
+            c.command('land');c.command('wait')
+        self.assertEqual(r.sid,'landing-owner');self.assertFalse(r.delegated)
+        self.assertIsNone(r.epoch);self.assertFalse(c.failed)
+        self.assertEqual(requests[0][1],'/v21/operator/land')
+        self.assertEqual(requests[0][2]['operator_token'],'secret')
+
+    def test_operator_uncertain_land_reuses_request_id(self):
+        c=self.console;c.operator_token='secret';c.r.sid='old'
+        with patch.object(c.r,'rpc',side_effect=live.Failure('uncertain')) as rpc:
+            for _ in range(2):
+                with self.assertRaises(live.Failure):c.command('land')
+        self.assertEqual(rpc.call_args_list[0],rpc.call_args_list[1])
+
+    def test_operator_terminal_failure_allows_new_explicit_land_request(self):
+        c=self.console;r=c.r;c.operator_token='secret';r.sid='old'
+        payloads=[]
+        def rpc(method,path,data=None,timeout=2):
+            if path=='/v21/operator/land':
+                payloads.append(data.copy());return dict(ok=True,session_id='landing-owner',task_id='land')
+            if path=='/health':return dict(health=dict(landing=True))
+            return dict(status='failed',stopped=False,error='FCU service failed')
+        with patch.object(r,'rpc',side_effect=rpc),patch.object(r,'heartbeat'):
+            for _ in range(2):c.command('land');c.command('wait')
+        self.assertTrue(c.failed)
+        self.assertNotEqual(payloads[0]['request_id'],payloads[1]['request_id'])
+
+    def test_delegated_quit_does_not_cancel_agent(self):
+        c=self.console;c.operator_token='secret';c.r.sid='old';c.r.delegated=True
+        with patch.object(c.r,'rpc') as rpc,patch.object(c.r,'cleanup') as cleanup:
+            self.assertFalse(c.command('quit'))
+        rpc.assert_not_called();cleanup.assert_not_called();self.assertIsNone(c.r.sid)
+
     def test_relative_commands_require_init_and_reject_invalid_arguments(self):
         with self.assertRaisesRegex(live.Failure,'init'):
             self.console.command('move_rel_xyz_yaw 50 0 0 0')

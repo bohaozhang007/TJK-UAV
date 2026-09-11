@@ -31,6 +31,8 @@ class Console:
         self.r=ConsoleRunner(args)
         self.worker=None
         self.failed=False
+        self.operator_token=None
+        self.operator_land_request=None
 
     def initialize(self):
         r=self.r
@@ -47,6 +49,8 @@ class Console:
         if not h.get('stopped') or h.get('active_task_id'):
             raise Failure('需要静止且无活动任务')
         if r.sid:
+            if r.delegated or h.get('control_owner') == 'agent' and self.operator_token:
+                raise Failure('Agent正在控制；本窗口可直接land抢占，无需重复init。')
             if h.get('initialized'):
                 print('已经初始化，当前会话继续保持。',flush=True)
                 return
@@ -59,7 +63,12 @@ class Console:
             r.abort=threading.Event()
         r.epoch=h['localization_epoch']
         r.tolerances=r.rpc('GET','/motion_tolerances')['motion_tolerances']
-        r.sid=r.rpc('POST','/v21/session',dict(request_id=str(uuid.uuid4())))['session_id']
+        session=r.rpc('POST','/v21/session',dict(request_id=str(uuid.uuid4()),
+            **({'operator':True} if c.get('operator_override') else {})))
+        r.sid=session['session_id']
+        self.operator_token=session.get('operator_token')
+        self.operator_land_request=None
+        r.delegated=False
         r.stop.clear();r.hb_error=None
         r.hb_thread=threading.Thread(target=r.heartbeat,daemon=True);r.hb_thread.start()
         try:r.post('/init')
@@ -67,12 +76,16 @@ class Console:
             r.cleanup();r.sid=None
             raise
         print('初始化完成，心跳持续。输入 takeoff 请求 OFFBOARD、解锁和起飞。',flush=True)
+        if self.operator_token:
+            print('起飞停稳后Agent可直接接入；保持本窗口，land可抢占Agent运动。',flush=True)
 
     def launch(self,name,operation):
         if self.worker and self.worker.is_alive():
             raise Failure('任务运行中；使用 stop 或 land 抢占')
         if not self.r.sid:
             raise Failure('请先 init')
+        if self.r.delegated:
+            raise Failure('运控已交给Agent；本窗口可用land抢占。')
         self.r.abort=threading.Event()
         self.r.phase=name
         def work():
@@ -100,6 +113,39 @@ class Console:
             self.worker.join(3)
             if self.worker.is_alive():
                 raise Failure('客户端任务尚未退出，请遥控接管')
+
+    def operator_land(self):
+        r=self.r
+        self.interrupt()
+        # Stop the old operator heartbeat before installing the landing session.
+        r.stop.set()
+        if r.hb_thread:
+            r.hb_thread.join(2.5)
+            if r.hb_thread.is_alive():
+                raise Failure('旧心跳尚未退出，未提交降落抢占')
+        r.abort=threading.Event()
+        r.phase='land'
+        if self.operator_land_request is None:
+            self.operator_land_request=dict(operator_token=self.operator_token,request_id=str(uuid.uuid4()))
+        result=r.rpc('POST','/v21/operator/land',self.operator_land_request)
+        r.sid=result['session_id'];r.delegated=False
+        r.stop.clear();r.hb_error=None
+        r.hb_thread=threading.Thread(target=r.heartbeat,daemon=True);r.hb_thread.start()
+        def wait_landing():
+            deadline=time.monotonic()+95
+            while time.monotonic()<deadline:
+                r.health(flight=False,require_localization=False)
+                task=r.task(result['task_id'])
+                if task['status'] in ('arrived','failed','cancelled'):
+                    if task['status']=='arrived' and task.get('stopped'):
+                        r.epoch=None
+                        self.operator_land_request=None
+                        return task
+                    self.operator_land_request=None
+                    raise Failure('降落未完成：'+str(task))
+                time.sleep(.1)
+            raise Failure('降落确认超时；未自动取消AUTO.LAND')
+        self.launch('land',wait_landing)
 
     def move_relative(self, values):
         r=self.r
@@ -168,11 +214,22 @@ class Console:
             if count==3:values.append(0)
             self.launch(cmd,lambda:self.move_relative(values))
         elif cmd=='land':
-            self.interrupt()
-            self.launch(cmd,lambda:self.r.blocking('/land',95,flight=False))
+            if self.operator_token:
+                self.operator_land()
+            else:
+                self.interrupt()
+                self.launch(cmd,lambda:self.r.blocking('/land',95,flight=False))
         elif cmd=='wait':
             if self.worker:self.worker.join()
         elif cmd in ('stop','quit','exit'):
+            if self.operator_token and (self.r.delegated or self.r.rpc('GET','/health')['health'].get('control_owner')=='agent'):
+                if cmd=='stop':
+                    raise Failure('Agent正在控制；如需结束飞行请用land抢占。')
+                self.r.stop.set()
+                if self.r.hb_thread:self.r.hb_thread.join(2.5)
+                self.r.sid=None
+                print('退出本窗口不停止Agent；需要本窗口降落抢占时请保持打开。',flush=True)
+                return False
             self.interrupt()
             confirmed=self.r.cleanup()
             self.r.sid=None
@@ -219,7 +276,11 @@ def main():
                 except Exception as e:print(str(e),flush=True)
     finally:
         if console.r.sid:
-            console.interrupt();console.r.cleanup();console.r.sid=None
+            if console.operator_token and console.r.delegated:
+                console.r.stop.set()
+            else:
+                console.interrupt();console.r.cleanup()
+            console.r.sid=None
         console.r.record('console_exit',had_errors=console.failed)
     return 1 if console.failed else 0
 
