@@ -604,6 +604,49 @@ class CurrentContractTests(unittest.TestCase):
         client.health.assert_not_called()
         self.assertIsNone(client._frame_identity)
 
+    def test_landing_takeover_confirms_same_task_without_restoring_lease(self):
+        client = self.client(); client.session_id = "old"
+        calls = []
+        def request(method, path, payload=None, **kwargs):
+            calls.append((method, path, payload))
+            if path == "/land":
+                client._lease_error = RuntimeError("operator takeover")
+                return dict(ok=True, task_id="original-land")
+            self.assertEqual(path, "/v21/navigation/status?task_id=original-land")
+            self.assertIsNone(payload)
+            if len(calls) == 2:
+                raise TimeoutError("short read interruption")
+            return dict(ok=True, task_id="original-land", status="arrived", stopped=True)
+        with patch.object(BaseClient, "_request_json", side_effect=request):
+            client.land()
+            with self.assertRaisesRegex(RuntimeError, "lease"):
+                client.land()
+            with self.assertRaisesRegex(RuntimeError, "lease"):
+                client._request_json("POST", "/v21/navigation", {})
+        self.assertEqual(sum(method == "POST" for method, _, _ in calls), 1)
+        self.assertEqual(client.session_id, "old")
+        self.assertIsNotNone(client._lease_error)
+        self.assertEqual(client._recovery_version, 0)
+
+    def test_landing_confirmation_rejects_wrong_or_failed_task(self):
+        for state in (dict(task_id="other", status="arrived", stopped=True),
+                      dict(task_id="land", status="failed", stopped=False),
+                      dict(task_id="land", status="cancelled", stopped=True)):
+            with self.subTest(state=state):
+                client = self.client(); client.rpc = Mock(return_value=dict(ok=True, **state))
+                with self.assertRaises(RuntimeError):
+                    client._confirm_landing(dict(task_id="land"))
+                client.rpc.assert_called_once()
+
+    def test_landing_confirmation_requires_stopped_and_has_deadline(self):
+        client = self.client()
+        client.rpc = Mock(return_value=dict(ok=True, task_id="land", status="arrived", stopped=False))
+        with self.assertRaises(TimeoutError):
+            client._confirm_landing(dict(task_id="land"), timeout_s=0.02)
+        self.assertTrue(all(call.args[0] == "GET" for call in client.rpc.call_args_list))
+        with self.assertRaises(RuntimeError):
+            client._confirm_landing({})
+
     def test_takeoff_opt_in_and_fresh_session_init(self):
         client = self.client(auto_arm=True); client.depth_service = Mock()
         caps = dict(ok=True,backend="owl_ego",protocol_version=1,async_navigation=True,

@@ -1,7 +1,14 @@
 # Agent 端状态
 
 维护方：Windows Agent 端 Codex。更新日期：2026-09-11。
-最新消息：[agent-006](messages/agent-006.md)，回复 [robot-005](messages/robot-005.md)。
+最新消息：[agent-007](messages/agent-007.md)，回复 [robot-006](messages/robot-006.md)。
+
+## 最新实现：降落抢占后的只读确认
+
+POST /land 返回原 task_id 后，允许无会话独立确认终态，最多 5 s，单 GET 0.5 s。
+仅 arrived/stopped:true 判成功；租约失败保持锁存，不恢复控制、不重发降落。
+Robot 无需新增接口，待现场验证；未部署或实飞。测试记录 logs/landing_confirmation_agent.log。
+Agent 55 项回归通过（17.761 s），含既有本地 HTTP 模拟完整链路；git diff --check 通过。
 
 ## 最新实现：Agent CSV 增加真实 target
 

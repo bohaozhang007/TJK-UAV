@@ -153,8 +153,9 @@ class OwlEgoClient(BaseClient):
         self._observation_ready.set()
         self._observation_error = None
 
-    def rpc(self, method, path, payload=None, *, timeout_s=3.0):
-        result = self._request_json(method, path, payload, timeout_s=timeout_s)
+    def rpc(self, method, path, payload=None, *, timeout_s=3.0, _landing_confirmation=False):
+        options = {"_landing_confirmation": True} if _landing_confirmation else {}
+        result = self._request_json(method, path, payload, timeout_s=timeout_s, **options)
         if result.get("ok") is not True:
             raise RuntimeError(f"{path}: {result.get('error', result)}")
         return result
@@ -294,6 +295,9 @@ class OwlEgoClient(BaseClient):
         return result
 
     def _request_json(self, method, path, payload=None, **kwargs):
+        landing_confirmation = kwargs.pop("_landing_confirmation", False)
+        if landing_confirmation and (method != "GET" or not path.startswith("/v21/navigation/status?task_id=")):
+            raise ValueError("Landing confirmation permits only task-status GET")
         if method == "POST" and path in {"/init", "/takeoff", "/v21/navigation", "/move_relative_xyz_yaw"}:
             self._wait_observation_recovery()
             self.check_lease()
@@ -312,7 +316,7 @@ class OwlEgoClient(BaseClient):
         try:
             return super()._request_json(method, path, payload, **kwargs)
         except Exception as exc:
-            if (self._lease_sent is not None and self._transport_failure(exc)
+            if (not landing_confirmation and self._lease_sent is not None and self._transport_failure(exc)
                     and method == "GET" and (path in {"/health", "/get_pose"}
                     or path.startswith("/v21/navigation/status?"))):
                 self._begin_recovery()
@@ -474,10 +478,43 @@ class OwlEgoClient(BaseClient):
         # The blocking Robot wait confirms fresh ON_GROUND/disarmed. Do not apply
         # airborne/epoch checks to this already accepted landing.
         result = self.rpc("POST", "/land", {}, timeout_s=self.timeout_s)
-        self._completed_motion(result, require_task=True)
+        self._confirm_landing(result)
         self._frame_identity = self._image_shape = self.last_observation = None
         self.event("landed", result=result)
         return result
+
+    def _confirm_landing(self, result, *, timeout_s=5.0):
+        # Only reconcile the task returned by our one accepted land request.
+        # Operator takeover can retire the lease while the same landing finishes.
+        task_id = result.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise RuntimeError("Landing response lacks task_id for completion confirmation")
+        self._last_task_id = task_id
+        deadline = time.monotonic() + timeout_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Landing terminal confirmation timed out")
+            try:
+                state = self.rpc("GET", "/v21/navigation/status?task_id=" + quote(task_id, safe=""),
+                                 timeout_s=min(0.5, remaining), _landing_confirmation=True)
+            except Exception as exc:
+                if not self._transport_failure(exc):
+                    raise
+                self.event("landing_confirmation_retry", task_id=task_id, error=str(exc))
+            else:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Landing terminal confirmation timed out")
+                if state.get("task_id") != task_id:
+                    raise RuntimeError("Mismatched landing task_id")
+                self.event("landing_confirmation", state=state)
+                status = state.get("status")
+                if status == "arrived" and state.get("stopped") is True:
+                    self.event("motion_completed", state=state)
+                    return state
+                if status not in {"accepted", "planning", "executing", "stopping", "arrived"}:
+                    raise RuntimeError(f"Landing did not complete: {state}")
+            time.sleep(min(0.05, max(0., deadline-time.monotonic())))
 
     def _wait_observation_recovery(self):
         while not self._observation_ready.wait(0.05):

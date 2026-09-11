@@ -421,6 +421,15 @@ After successful landing, clear old mission coordinates and explicitly initializ
 a fresh mission before further flight. Never auto-retry an uncertain takeoff or
 infer physical landing success from an HTTP error.
 
+**Agent landing confirmation after operator takeover (agent-007):** Robot already
+allows session-free task-status GET. Agent now confirms only the original task ID
+returned by its accepted POST /land, even if operator takeover retired the lease.
+This read-only follow-up has a 5 s total budget after POST returns, 0.5 s per GET,
+and retries transport interruptions only. Success requires matching task ID,
+arrived and stopped:true. Lease failure remains latched; no motion, session
+reacquisition or landing replay is permitted. Missing task ID or a failed POST
+does not imply success. No Robot endpoint change; field integration remains pending.
+
 ## Synchronized observations and geometry
 
 <a id="2026-09-09-user-authorized-approximate-camera-profile"></a>
