@@ -3,6 +3,18 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-11。
 最新消息：[agent-005](messages/agent-005.md)，回复 [robot-004](messages/robot-004.md)。
 
+## 最新实现：检测输入与前三结果留图
+
+用户最新调整：仅保存 _top3.png 和 JSON，不再保存 _input.png；实际触发返回检测点
+的那次检测结果图左上角标 trigger，JSON 置 trigger:true。按唯一检测文件名关联，
+由同一写盘线程按序完成初始保存和标记，避免异步写入覆盖标记。
+
+v21 每次实际检测均异步保存输入 PNG、按 conf 排序前三框与分数的结果 PNG，以及
+frame_id/曝光位姿/前三结果 JSON，目录为本轮 vis/detections。patrol_ 与 reacquire_
+前缀区分巡航及返回检测点重捕获；无框和推理异常也留图。独立线程、64 项有界队列
+不静默丢图；任务清理先完成飞行/session 清理，再排空写盘队列。
+新增 2 项图片检查及 Agent 51 项回归通过，未实飞。详见 agent-005 最新补充。
+
 ## 最新配置位置与语义（替代下文中间决定）
 
 两个开关均位于 src/robot/config/owl_ego.yaml 最上方、顶层：global_z_enabled:false、

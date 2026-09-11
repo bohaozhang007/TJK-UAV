@@ -116,3 +116,34 @@ global_z_enabled 控制相对 Z 是否从世界 hold 参考累加；vertical_tol
 检查及 git diff --check 通过。证据 logs/v21_agent_round5/root_z_options_robot.log、
 root_z_options_agent.log。未连接实机/部署/实飞。Robot 需同步 Node/core/controller，
 bridge 与 HTTP 使用同一配置并在落地后重载；只改 YAML 不会更新正在运行的进程。
+
+## 同轮新增：每次检测输入及前三框异步保存
+
+根据 20:28 运行返回 P 后三次 candidates=[] 的排查需求，v21 的 infer_observation
+在检测返回后、置信度/DA3/去重候选处理之前，将原始输入副本及检测器返回结果交给
+独立写盘线程。文件放在每轮 vis/detections：
+patrol_000001_<曝光毫秒>_input.png / _top3.png / .json；重捕获使用 reacquire_。
+序号全程递增，同一曝光帧重复送检也分别保存。巡航末航点的补检归 patrol；未实际
+送入检测器的采样丢弃帧不保存。前缀在推理开始时确定，避免暂停巡航后误标来源。
+
+结果按返回 confidence 降序绘制最多三个框，框边标 #rank/conf；不改变检测阈值或
+模型返回规则。无结果标 NO DETECTIONS；推理异常留输入并标 DETECTION ERROR。
+JSON 记录曝光 frame_id/时间/pose、结果总数、前三 box/conf 和异常。保留输入原图，
+绘制只作用于副本。检测结果是当前检测器阈值处理后的返回值，不是模型原始 logits。
+
+64 项有界队列满时对检测生产端施加背压，不静默丢图；心跳/运控独立。写盘失败
+记录 detection_image_save_failed，主入口在降落/session 清理之后排空队列，避免
+等待磁盘延迟降落。无 Robot 改动，不回填缺少输入的历史日志。
+
+新增 tests/test_detection_log.py 两项通过（0.092 s），验证原图副本、通道、前三
+排序、巡航/重捕获命名、空检测与异常留图；Agent 51 项通过（17.774 s），日志
+logs/detection_image_regression.log；git diff --check 通过。未加载真实模型或实飞。
+
+### 留图格式最终调整
+
+用户要求取消 _input.png，只保留 _top3.png 和 JSON。候选携带唯一 detection_image
+文件标识，实际进入目标访问流程、取消并等待原检测结束后，将该图标记请求交给同一
+FIFO 写盘线程：左上角黑底黄色 trigger，JSON 增加 trigger:true。不会按最新帧猜测
+触发图，也不会因原始异步保存较晚而覆盖标记。巡航与重捕获文件名前缀不变。
+新增标记/无原图保存断言，图片测试 2 项通过；完整 Agent 回归记录见
+logs/detection_trigger_regression.log。未修改历史已保存图片，未实飞。

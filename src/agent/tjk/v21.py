@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from agent.tjk import v20
+from agent.tjk.detection_log import DetectionImageLog
 from agent.tjk.patrol import PerceptionPipeline, TargetGeometryError, TargetMemory, target_position
 from robot_client.owl_ego import OwlEgoClient
 from robot_client.base import BaseClient
@@ -68,6 +69,7 @@ class PatrolAgent(v20.TJKAgent):
         self._event_lock = threading.Lock()
         self.event_path = self._mission_vis_dir.parent / "events.jsonl"
         self.client.event = self.event
+        self.detection_images = DetectionImageLog(self._mission_vis_dir / "detections", self.event)
         self.motion_csv_path = self.event_path.with_name("motions.csv")
         self._csv_lock = threading.Lock()
         self._csv_navigation = {}
@@ -216,7 +218,18 @@ class PatrolAgent(v20.TJKAgent):
 
     def infer_observation(self, obs):
         start = time.monotonic()
-        detections = self.detect(obs.rgb)
+        # Capture the source before inference; patrol may be cancelled while GPU work runs.
+        detection_phase = "reacquire" if self.phase == "REACQUIRE" else "patrol"
+        detections, detection_error = [], None
+        try:
+            detections = self.detect(obs.rgb)
+        except Exception as exc:
+            detection_error = str(exc)
+            raise
+        finally:
+            detection_image = self.detection_images.submit(obs.rgb, detections, phase=detection_phase,
+                                         frame_id=obs.frame_id, timestamp_s=obs.timestamp_s,
+                                         pose=obs.pose, error=detection_error)
         candidates = []
         if detections:
             depth = self.client.estimate_depth(obs)
@@ -229,6 +242,7 @@ class PatrolAgent(v20.TJKAgent):
                     self.event("depth_rejected", frame_id=obs.frame_id, reason=str(exc))
                     continue
                 candidates.append({"box": np.asarray(detection["box"]).tolist(),
+                                   "detection_image": detection_image,
                                    "confidence": float(detection["confidence"]),
                                    "position_cm": position.tolist()})
         self.event("detection", frame_id=obs.frame_id, timestamp_s=obs.timestamp_s,
@@ -379,6 +393,8 @@ class PatrolAgent(v20.TJKAgent):
         self._cancel_navigation()
         # Cancel flight first; then wait for GPU workers before SAM2/main use.
         self.pipeline.wait_idle(self.patrol["worker_idle_timeout_s"])
+        if candidate.get("detection_image"):
+            self.detection_images.mark_trigger(candidate["detection_image"])
         target_dir = self._mission_vis_dir / f"target_{record.target_id:03d}_attempt_{record.attempts:02d}"
         target_dir.mkdir(parents=True, exist_ok=True)
         self.vis_dir = str(target_dir)
@@ -563,6 +579,9 @@ def main():
             except Exception as exc:
                 cleanup_error = cleanup_error or exc
                 logger.exception("Session release failed")
+            finally:
+                # Drain disk work after flight/session cleanup, including mission failures.
+                agent.detection_images.close()
         if mission_error is None and cleanup_error is not None:
             raise cleanup_error
 
