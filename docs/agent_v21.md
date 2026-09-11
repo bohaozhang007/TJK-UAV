@@ -61,6 +61,14 @@ TRACK 阻塞期间心跳独立运行，并轮询健康/位姿；z=0 原样传递
 
 ## 日志与离线验证
 
+每次任务额外生成 `motions.csv`（与 log.txt、events.jsonl 同目录，UTF-8 BOM，便于 Excel 打开）。
+每行记录一次 Agent 绝对导航、TRACK 相对动作或降落：开始/结束时间、任务阶段、action、
+动作参数、task_id、状态，以及执行前后 XYZ(cm)/yaw(°)、各自采样时间与 epoch。
+`action_frame=world_absolute` 表示绝对目标；`body_relative` 表示相对位移/转角；
+`robot_managed` 用于降落。导航取消记录为 cancelled，失败或结果未知记录为 failed_or_uncertain。
+失败后不额外请求位姿延误清理，执行后位姿留空并注明原因；其他取位姿失败也留空，
+不拿目标位姿代替实测值。前后是独立 HTTP 位姿采样，不是 Robot 受理/终态原子快照。
+
 `logs/v21_<timestamp>/` 包含 log.txt、config.json、events.jsonl，以及每个目标的
 触发图、拍摄位姿/内参/变换、检测框和 TRACK 可视化。事件包含检测耗时、去重、
 状态切换、导航目标、任务结果和采集/覆盖统计，并记录请求 ID、health、task diagnostics/

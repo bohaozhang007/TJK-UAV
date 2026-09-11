@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import json
 import math
@@ -18,6 +19,7 @@ import numpy as np
 from agent.tjk import v20
 from agent.tjk.patrol import PerceptionPipeline, TargetGeometryError, TargetMemory, target_position
 from robot_client.owl_ego import OwlEgoClient
+from robot_client.base import BaseClient
 
 
 def validate_patrol_config(config):
@@ -66,6 +68,71 @@ class PatrolAgent(v20.TJKAgent):
         self._event_lock = threading.Lock()
         self.event_path = self._mission_vis_dir.parent / "events.jsonl"
         self.client.event = self.event
+        self.motion_csv_path = self.event_path.with_name("motions.csv")
+        self._csv_lock = threading.Lock()
+        self._csv_navigation = {}
+        self._csv_fields = ["started_at", "finished_at", "phase", "action", "action_frame",
+                            "action_x_cm", "action_y_cm", "action_z_cm", "action_yaw_deg",
+                            "task_id", "status", "error"]
+        for prefix in ("before", "after"):
+            self._csv_fields += [f"{prefix}_{key}" for key in (
+                "sampled_at", "x_cm", "y_cm", "z_cm", "yaw_deg", "epoch", "pose_error")]
+        with self.motion_csv_path.open("w", newline="", encoding="utf-8-sig") as stream:
+            csv.DictWriter(stream, fieldnames=self._csv_fields).writeheader()
+
+    def _csv_pose(self, prefix):
+        result = {f"{prefix}_sampled_at": dt.datetime.now().isoformat()}
+        try:
+            # Read-only, bounded diagnostic sample; never retry or renew from logging.
+            if self.client._lease_error is not None:
+                raise RuntimeError("Lease failed; diagnostic pose request skipped")
+            data = BaseClient._request_json(self.client, "GET", "/get_pose", timeout_s=1.0)
+            pose = data["pose"]
+            result[f"{prefix}_epoch"] = data.get("localization_epoch", "")
+            for key in ("x", "y", "z", "yaw"):
+                result[f"{prefix}_{key}_{'deg' if key == 'yaw' else 'cm'}"] = pose[key]
+        except Exception as exc:
+            result[f"{prefix}_pose_error"] = str(exc)
+        return result
+
+    def _csv_begin(self, action, command, frame):
+        return {"started_at": dt.datetime.now().isoformat(), "phase": self.phase,
+                "action": action, "action_frame": frame,
+                **{f"action_{k}_{'deg' if k == 'yaw' else 'cm'}": v for k,v in command.items()},
+                **self._csv_pose("before")}
+
+    def _csv_finish(self, row, status, *, error="", task_id=""):
+        row.update(finished_at=dt.datetime.now().isoformat(), status=status,
+                   error=error, task_id=task_id)
+        if error:
+            # Do not delay failure cancellation/landing with an extra network request.
+            row["after_pose_error"] = "Not sampled after failure; see events.jsonl"
+        else:
+            row.update(self._csv_pose("after"))
+        with self._csv_lock:
+            with self.motion_csv_path.open("a", newline="", encoding="utf-8-sig") as stream:
+                csv.DictWriter(stream, fieldnames=self._csv_fields).writerow(row)
+
+    def _execute_motion(self, action, dx_cm, dy_cm, dz_cm, dyaw_deg, operation, **kwargs):
+        row = self._csv_begin(action.value,
+                              dict(x=dx_cm,y=dy_cm,z=dz_cm,yaw=dyaw_deg), "body_relative")
+        try:
+            result = super()._execute_motion(action, dx_cm, dy_cm, dz_cm, dyaw_deg, operation, **kwargs)
+        except BaseException as exc:
+            self._csv_finish(row, "failed_or_uncertain", error=str(exc))
+            raise
+        self._csv_finish(row, "arrived", task_id=result.get("task_id", ""))
+        return result
+
+    def land(self):
+        row = self._csv_begin("land", {}, "robot_managed")
+        try:
+            result = self.client.land()
+        except BaseException as exc:
+            self._csv_finish(row, "failed_or_uncertain", error=str(exc))
+            raise
+        self._csv_finish(row, "arrived", task_id=result.get("task_id", ""))
+        return result
 
     def connect(self):
         # A fresh session establishes fresh world coordinates and target memory.
@@ -184,11 +251,14 @@ class PatrolAgent(v20.TJKAgent):
         if target["z"] < self.safe_z_cm:
             raise v20.FlightSafetyError("Navigation target below safe world height")
         try:
+            row = self._csv_begin("navigate", target, "world_absolute")
             task_id = self.client.navigate(target)
             if not isinstance(task_id, str) or not task_id:
                 raise ValueError("Invalid task_id")
         except Exception as exc:
+            self._csv_finish(row, "failed_or_uncertain", error=str(exc))
             raise v20.FlightSafetyError(f"Navigation submit failed: {exc}") from exc
+        self._csv_navigation[task_id] = row
         self.active_navigation = task_id
         self.event("navigation_started", task_id=task_id, target=target)
         return task_id
@@ -201,8 +271,14 @@ class PatrolAgent(v20.TJKAgent):
             if state["status"] in {"arrived", "cancelled"}:
                 if state.get("stopped") is not True:
                     raise RuntimeError("Terminal navigation lacks stopped confirmation")
+                row = self._csv_navigation.pop(task_id, None)
+                if row is not None:
+                    self._csv_finish(row, state["status"], task_id=task_id)
             return state["status"]
         except Exception as exc:
+            row = self._csv_navigation.pop(task_id, None)
+            if row is not None:
+                self._csv_finish(row, "failed_or_uncertain", error=str(exc), task_id=task_id)
             raise v20.FlightSafetyError(f"Navigation status failed: {exc}") from exc
 
     def _cancel_navigation(self):
@@ -383,6 +459,10 @@ class PatrolAgent(v20.TJKAgent):
                     self._cancel_navigation()
             finally:
                 self.pipeline.close()
+                for task_id, row in list(self._csv_navigation.items()):
+                    self._csv_finish(row, "failed_or_uncertain",
+                                     error="Mission exited before terminal confirmation", task_id=task_id)
+                    self._csv_navigation.pop(task_id, None)
 
 
 def main():
@@ -447,7 +527,7 @@ def main():
                         agent._cancel_navigation()
                     except Exception:
                         logger.exception("Navigation cancellation failed before landing")
-                v20._land_after_task(client, logger)
+                agent.land()
         except Exception as exc:
             cleanup_error = exc
             logger.exception("Landing cleanup failed; landing is not confirmed")

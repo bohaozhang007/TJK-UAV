@@ -59,3 +59,17 @@
 尝试日志。当前实现未重新申请 session、未改变 5 s 租约。
 此次没有定位最初 Wi-Fi/服务超时根因，也没有修复此前高度偏差。
 Robot console 的同类首次异常退出仍由 Robot 端处理，不能视为已随 Agent 修复。
+
+## 同轮补充：独立动作 CSV（2026-09-11）
+
+按用户要求，在任务日志目录新增 motions.csv，记录 Agent 导航、TRACK 相对动作和降落。
+字段含 action/动作参数及坐标语义、before/after XYZ cm/yaw deg、各自采样时间/epoch、
+task_id、phase、status/error。导航实际取消后记录 cancelled；失败或未确认终态保留
+failed_or_uncertain 行。无法取得的位姿留空并注明原因，不伪造目标位置作为执行后位置。
+诊断读取使用独立 1 s 上限、无恢复重试的只读 get_pose；失败动作不追加取位姿请求，
+避免延误取消/降落。CSV 逐行关闭落盘，UTF-8 BOM 可直接用 Excel 打开。
+这是 Agent 侧记录，无 Robot 接口/行为变更；前后位姿不是 Robot 的原子受理/终态快照。
+
+复用三轮本地 HTTP 集成测试校验三次 TRACK 的前后位移、z=0 参数、三个取消导航行和
+最后降落行。Agent 46 项通过（16.918 s），证据 logs/v21_agent_round4/csv_tests.log。
+未实飞，未回填历史任务日志。

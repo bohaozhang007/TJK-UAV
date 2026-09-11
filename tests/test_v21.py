@@ -1,6 +1,7 @@
 """Offline tests: no model weights, ROS, drone connection or flight commands."""
 import base64
 import copy
+import csv
 from dataclasses import replace
 import json
 import math
@@ -349,6 +350,7 @@ class MissionTests(unittest.TestCase):
                                tracker=Mock(),detector_name="sam3",tracker_name="sam2",
                                vis_dir=str(Path(self.temp.name)/"vis"),save_vis=False)
         self.agent.event=Mock()
+        self.agent._csv_pose=Mock(return_value={})
         self.client.event=self.agent.event
         self.agent.mission_origin_pose=self.client.pose.copy()
         self.agent.position_tolerance_cm=15
@@ -948,7 +950,7 @@ class LocalRobotIntegrationTests(unittest.TestCase):
             try:
                 agent.connect()
                 result=agent.run_mission("synthetic bottle")
-                client.land()
+                agent.land()
                 self.assertEqual(len(result),3)
                 self.assertTrue(all(r["status"]=="completed" for r in result))
                 phases=[data["phase"] for kind,data in records if kind=="phase"]
@@ -966,6 +968,16 @@ class LocalRobotIntegrationTests(unittest.TestCase):
                     self.assertEqual(goals[4*i],goals[4*i+3])
                 self.assertTrue(any(c[0]=="heartbeat" for c in hw.commands))
                 self.assertIsNone(client._frame_identity)
+                with agent.motion_csv_path.open(encoding="utf-8-sig",newline="") as stream:
+                    motions=list(csv.DictReader(stream))
+                relative=[r for r in motions if r["action_frame"]=="body_relative"]
+                self.assertEqual(len(relative),3)
+                for row in relative:
+                    self.assertEqual(row["status"],"arrived")
+                    self.assertAlmostEqual(float(row["after_x_cm"])-float(row["before_x_cm"]),30.,places=3)
+                    self.assertEqual(float(row["action_z_cm"]),0.)
+                self.assertEqual(sum(r["status"]=="cancelled" for r in motions),3)
+                self.assertEqual(motions[-1]["action"],"land")
                 output=os.environ.get("V21_TEST_OUTPUT")
                 if output:
                     path=Path(output);path.mkdir(parents=True,exist_ok=True)
