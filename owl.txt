@@ -11,3 +11,8 @@ OWL_EGO_CONFIG=/home/visbot/owl_ego_ws/owl_ego_live.yaml \
 ter3:
 cd /home/visbot/TJK-UAV
 ./run_owl_ego_console.sh
+
+ter4:
+cd /home/visbot/TJK-UAV
+OWL_EGO_CONFIG=/home/visbot/owl_ego_ws/owl_ego_live.yaml \
+./run_owl_ego.sh record --output "logs/owl_diagnostics/agent_$(date +%Y%m%d-%H%M%S)"
