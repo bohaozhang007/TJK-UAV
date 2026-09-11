@@ -100,7 +100,7 @@ class OwlEgoController:
 
     def handle_http(self, method, path, data, *, local_operator=False):
         gets = {'/v21/capabilities','/v21/observation','/v21/navigation/status',
-                '/health','/get_pose','/motion_tolerances'}
+                '/health','/get_pose','/motion_tolerances','/v21/motion_log'}
         posts = {'/v21/session','/v21/heartbeat','/v21/session/release',
                  '/v21/navigation','/v21/navigation/cancel','/init','/takeoff',
                  '/move_relative_xyz_yaw','/land','/v21/operator/land'}
@@ -109,6 +109,14 @@ class OwlEgoController:
         if (method == 'GET') != (path in gets):
             raise ApiError('method not allowed',405)
         if method == 'GET':
+            if path == '/v21/motion_log':
+                if not local_operator:
+                    raise ApiError('motion log is local only',403)
+                snap = self.hw.snapshot()
+                keys = ('task_id','kind','status','goal','started_wall_s','finished_wall_s',
+                        'before_pose','after_pose','before_epoch','after_epoch','relative_command','source','error')
+                return dict(ok=True, bridge_id=snap.get('bridge_id'), tasks=[
+                    {k:t[k] for k in keys if k in t} for t in snap.get('tasks',{}).values()])
             if path == '/v21/capabilities':
                 return dict(ok=True,backend='owl_ego',protocol_version=1,async_navigation=True,
                             cancel_and_hold=True,synchronized_observation=True,

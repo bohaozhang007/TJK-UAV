@@ -4,6 +4,7 @@ Only tick() produces setpoints. Ownership is a UUID namespace per planner proces
 not a receive timestamp. All clocks for watchdogs are monotonic.
 """
 import math
+import time
 import uuid
 from collections import deque
 import numpy as np
@@ -310,7 +311,9 @@ class FlightCore:
 
     def finish(self, status, stopped, error=None):
         if self.active:
-            self.tasks[self.active].update(status=status, stopped=stopped)
+            self.tasks[self.active].update(status=status, stopped=stopped,
+                finished_wall_s=time.time(), after_pose=self.pose.tolist() if self.pose is not None else None,
+                after_epoch=self.epoch)
             self.tasks[self.active]['timing_s']['terminal'] = max(self.odom_at,self.last_tick or self.odom_at)-self.tasks[self.active]['started']
             if error:
                 self.tasks[self.active]['error'] = error
@@ -507,6 +510,9 @@ class FlightCore:
         self.active = tid
         self.tasks[tid] = dict(task_id=tid,session_id=self.session,status='accepted',stopped=False,
                                goal=goal,kind=op,started=now, timing_s={},
+                               started_wall_s=time.time(), before_pose=self.pose.tolist(), before_epoch=self.epoch,
+                               relative_command=data.get('relative'),
+                               source='console' if self.session == self.operator_session else 'agent',
                                auto_start_pending=op == 'takeoff' and data.get('auto_arm',False),
                                planner_required=bool(op == 'navigate' and np.linalg.norm(np.array(goal[:3])-self.hold[:3]) >= 1e-5))
         if op == 'land':

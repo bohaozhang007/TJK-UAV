@@ -160,6 +160,17 @@ class SoftwareTakeoffTest(unittest.TestCase):
 
 
 class CoreTest(unittest.TestCase):
+    def test_motion_log_keeps_acceptance_and_terminal_poses(self):
+        self.cmd('relative', task_id='log', relative=[0,0,0,.3],localization_epoch=self.c.epoch)
+        task=self.c.tasks['log']
+        before=task['before_pose'][:]
+        self.c.pose[2]+=.11
+        self.c.finish('failed',False,'test interruption')
+        self.assertEqual(task['before_pose'],before)
+        self.assertEqual(task['relative_command'],[0,0,0,.3])
+        self.assertAlmostEqual(task['after_pose'][2]-task['goal'][2],.11)
+        self.assertGreaterEqual(task['finished_wall_s'],task['started_wall_s'])
+
     def test_output_diagnostics_preserves_four_distinct_height_stages(self):
         self.nav(goal=(0,0,1,.2))
         self.c.pose[2] = 1.11
@@ -1121,6 +1132,18 @@ class FakeHardware:
 
 
 class HttpTest(unittest.TestCase):
+    def test_local_motion_log_is_read_only_and_removes_session_credentials(self):
+        self.hw.tasks['logged']=dict(task_id='logged',kind='navigate',status='arrived',
+            session_id='private',source='agent',goal=[0,0,1,0])
+        count=len(self.hw.commands)
+        code,data=self.rpc('GET','/v21/motion_log')
+        self.assertEqual(code,200)
+        self.assertEqual(data['tasks'][0]['source'],'agent')
+        self.assertNotIn('session_id',data['tasks'][0])
+        self.assertEqual(len(self.hw.commands),count)
+        with self.assertRaises(ApiError):
+            self.c.handle_http('GET','/v21/motion_log',{},local_operator=False)
+
     def setUp(self):
         self.hw=FakeHardware();self.c=OwlEgoController(hardware=self.hw,config=CONFIG)
         self.server=run_http_server(self.c,NullKeepalive(),'127.0.0.1',0)

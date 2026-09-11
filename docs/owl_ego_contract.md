@@ -450,6 +450,23 @@ time <=0.5 s and sync <=50 ms. Robot/Agent wall clocks need not be synchronized.
 
 ## Errors and observation retry
 
+Local motion recording (2026-09-11): GET `/v21/motion_log` is loopback-only,
+read-only, and requires no control lease. It returns sanitized task records from
+the bridge (no session/operator credentials). Console uses it independently of
+heartbeats to create motions.csv in its own run directory, including both owners'
+accepted motion tasks. No Agent adaptation is required. Task acceptance/terminal
+poses and actual goal come from the bridge; logging does not command motion.
+The seven CSV columns are started_at, finished_at, action, action_xyz_yaw, before,
+after, error. Units are cm/degrees; error is actual minus goal (relative XY errors
+in the starting body frame), yaw wrapped to [-180,180). Z uses the actual bridge
+goal, including retained height. Landing or cross-epoch errors are left blank;
+the landing task's starting hold pose is not a touchdown target. Status, source,
+task_id and failure details remain in motions.jsonl. Repeated polling/idempotent
+replays do not duplicate rows; ongoing tasks have empty final fields. Requires
+updated bridge/server and a newly opened console. Console must remain running
+while Agent flies; no recording is promised after it closes or across lost tasks
+on a bridge restart. Requests rejected before creating a task are not CSV motions.
+
 Non-2xx JSON has `{ok:false,error:"..."}`; machine-readable observation errors
 also contain error_code and retryable. Preserve these fields in the Client rather
 than reducing them to an opaque exception string.

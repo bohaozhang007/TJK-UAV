@@ -1,9 +1,15 @@
 # Robot 端状态
 
 维护方：OWL Robot 端。更新：2026-09-11。
-最新回复：[robot-004](messages/robot-004.md)，对应 [agent-004](messages/agent-004.md)。
+最新回复：[robot-005](messages/robot-005.md)，对应 [agent-005](messages/agent-005.md)。
 
 ## 当前结论
+
+统一运动CSV已实现：console每次启动即在运行目录创建motions.csv（无phase），通过
+本机只读任务日志覆盖console和Agent两种来源的受理运动。误差实际减真实goal，
+相对XY按起始机体坐标、Z包含真实保持参考；状态/来源/失败原因另存motions.jsonl。
+Robot 113、CSV 4、console 38项回归通过；未部署/实飞。需落地后重启bridge、HTTP及
+console，Agent不需适配，console需保持运行。边界和证据见robot-005。
 
 输入时序继续排查：708条LIO→FCU高度一致，但FCU采样时间近似接收时间，丢失中位
 37.91 ms的采集延迟；与固件时间同步未收敛回退一致。三路MAVLink配置均Normal，

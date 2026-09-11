@@ -250,8 +250,11 @@ def main():
     if args.output:argv+=['--output',args.output]
     flight_args=parse_args(argv)
     console=Console(flight_args)
+    from motion_log import MotionLog
+    motion_log=MotionLog(Path(console.r.log.name).parent,args.url.rstrip('/'))
     console.command('help')
     print('位姿/动作日志：'+str(console.r.log.name),flush=True)
+    print('运动表（含Agent动作）：'+str(Path(console.r.log.name).with_name('motions.csv')),flush=True)
     print('启动仅连接客户端，不控制飞机。test: B=前方%gm，P=移动%gm后的实测位置；记录P后约%gs取消。'%(
         flight_args.b_forward_cm/100,flight_args.capture_after_cm/100,flight_args.delay_s),flush=True)
     print('返回P → P左侧1m → P右侧1m（横移约2m）→ 顺时针转90° → 返回P并恢复原航向 → 前往B。',flush=True)
@@ -281,6 +284,7 @@ def main():
             else:
                 console.interrupt();console.r.cleanup()
             console.r.sid=None
+        motion_log.close()
         console.r.record('console_exit',had_errors=console.failed)
     return 1 if console.failed else 0
 
