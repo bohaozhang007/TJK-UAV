@@ -578,6 +578,13 @@ class PatrolAgent(v20.TJKAgent):
             return self.memory.snapshot()
         finally:
             self.pipeline.pause()
+            for record in self.memory.records:
+                if record.status == "pending":
+                    self.memory.finish(record, False)
+                    record.finished_at = dt.datetime.now().isoformat()
+                    self.event("target_interrupted", target_id=record.target_id,
+                               reason="mission exited before target completion")
+            self._write_targets_csv()
             try:
                 if self.active_navigation is not None:
                     self._cancel_navigation()

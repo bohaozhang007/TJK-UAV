@@ -111,3 +111,13 @@ fpv_时间.mkv及同名.log于Documents/QGroundControl/Video。可用--url、--o
 FFmpeg进程组，输入q并等15 s收尾；超时强制退出并提示文件可能不完整，不自动重连。
 测试test_record_fpv.py用真实FFmpeg合成流模拟Ctrl+C，成功收尾并全片解码无错，
 1项通过（1.663 s），未连接实际相机、未实飞。Robot无需改动。
+
+同轮17:56导航停稳竞态修复：日志两次health stopped:true，随后POST navigation被
+409 previous motion not confirmed stopped拒绝，触发退出降落。Agent仅对此精确错误
+且响应无task_id时允许最多两次额外提交；间隔0.2 s，每次先重新wait_stopped。
+由于该拒绝在Robot创建任务前发生且错误可按request_id缓存，重试使用新request_id，
+目标/会话保持；没有接受任务的回放。其他409、连接超时、身份失效继续失败。
+异常收尾同步pending→failed/finished_at，记录target_interrupted并刷新targets.csv。
+68项Agent回归通过（18.747 s），覆盖拒绝后成功/新ID、持续拒绝上限、超时不重试、
+其他409不重试以及异常退出CSV终态；logs/admission_retry_agent.log，diff check通过。
+无需Robot代码变更，待现场验证，未实飞。

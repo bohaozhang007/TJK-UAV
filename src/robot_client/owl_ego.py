@@ -611,12 +611,24 @@ class OwlEgoClient(BaseClient):
         return pose
 
     def navigate(self, pose):
-        self.wait_stopped()
-        self._last_task_id = self.rpc("POST", "/v21/navigation", {
-            "session_id": self.session_id, "request_id": str(uuid.uuid4()),
-            "localization_epoch": self._frame_identity[1], "pose": dict(pose),
-        })["task_id"]
-        return self._last_task_id
+        for attempt in range(3):
+            self.wait_stopped()
+            try:
+                self._last_task_id = self.rpc("POST", "/v21/navigation", {
+                    "session_id": self.session_id, "request_id": str(uuid.uuid4()),
+                    "localization_epoch": self._frame_identity[1], "pose": dict(pose),
+                })["task_id"]
+                return self._last_task_id
+            except RobotHTTPError as exc:
+                # This exact admission rejection occurs before task creation.
+                # Its request ID may be cached as rejected; a new attempt gets
+                # a new ID only after this unambiguous response and a fresh hold check.
+                if (attempt == 2 or exc.status != 409
+                        or exc.data.get("error") != "previous motion not confirmed stopped"
+                        or exc.data.get("task_id")):
+                    raise
+                self.event("navigation_admission_retry", attempt=attempt+1, reason=str(exc))
+                time.sleep(0.2)
 
     def navigation_status(self, task_id):
         self.check_lease()

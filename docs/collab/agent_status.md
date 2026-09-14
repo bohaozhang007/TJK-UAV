@@ -3,6 +3,12 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-14。
 最新消息：[agent-007](messages/agent-007.md)，回复 [robot-006](messages/robot-006.md)。
 
+17:56运行导航准入竞态已修复：仅HTTP409精确previous motion not confirmed stopped
+且无task_id时，等待0.2 s后重新wait_stopped再提交，最多三次提交；每次仍受既有
+停稳超时/租约检查约束。其他错误、超时不重发。mission异常退出将pending目标标failed
+并写finished_at，避免CSV残留pending。68项回归通过（18.747 s），
+logs/admission_retry_agent.log；未实飞，无Robot代码变更。
+
 独立本机录像脚本 run_record_fpv.bat 已新增，默认 RTSP 地址
 rtsp://192.168.2.20:8554/live/0，TCP原码录MKV，保存到用户Documents/QGroundControl/Video。
 Ctrl+C通知隔离进程组中的FFmpeg输入q正常收尾，最多等待15 s；失败输出日志路径。

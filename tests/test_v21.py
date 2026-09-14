@@ -482,6 +482,17 @@ class MissionTests(unittest.TestCase):
         self.assertFalse(any(c[0]=="navigate" and c[1]["y"]==-150 for c in self.client.calls))
         self.assertEqual(self.client.calls[-1],("navigate",self.agent.mission_origin_pose))
 
+    def test_mission_abort_finalizes_pending_target_csv(self):
+        self.agent.infer_observation=lambda obs:[dict(box=[4,4,16,16],confidence=.9,position_cm=[210,-20,100])]
+        self.agent._visit_target=Mock(side_effect=FlightSafetyError('navigation rejected'))
+        with self.assertRaises(FlightSafetyError):
+            self.agent.run_mission('bottle')
+        record=self.agent.memory.records[0]
+        self.assertEqual(record.status,'failed')
+        self.assertTrue(record.finished_at)
+        with self.agent.event_path.with_name('targets.csv').open(encoding='utf-8-sig',newline='') as stream:
+            self.assertEqual(next(csv.DictReader(stream))['status'],'failed')
+
     def test_trigger_fallback_seeds_original_image_then_runs_track(self):
         obs=observation()
         box=[4,4,16,16]
@@ -717,6 +728,27 @@ class CurrentContractTests(unittest.TestCase):
         with self.assertRaises(RobotHTTPError):
             client.navigate(dict(x=20,y=0,z=100,yaw=0))
         client.rpc.assert_called_once()
+
+    def test_stop_admission_rejection_retries_with_new_id_after_stop_check(self):
+        client=self.client();client.wait_stopped=Mock()
+        error=RobotHTTPError(409,'/v21/navigation',json.dumps(dict(ok=False,error='previous motion not confirmed stopped')))
+        client.rpc=Mock(side_effect=[error,dict(ok=True,task_id='accepted')])
+        with patch('robot_client.owl_ego.time.sleep'):
+            self.assertEqual(client.navigate(dict(x=20,y=0,z=100,yaw=0)),'accepted')
+        self.assertEqual(client.wait_stopped.call_count,2)
+        bodies=[call.args[2] for call in client.rpc.call_args_list]
+        self.assertNotEqual(bodies[0]['request_id'],bodies[1]['request_id'])
+        self.assertEqual(bodies[0]['pose'],bodies[1]['pose'])
+        self.assertEqual(bodies[0]['session_id'],bodies[1]['session_id'])
+
+    def test_stop_admission_retry_is_bounded_and_never_retries_timeout(self):
+        for error,count in ((RobotHTTPError(409,'/v21/navigation',json.dumps(dict(error='previous motion not confirmed stopped'))),3),
+                            (TimeoutError('unknown outcome'),1)):
+            client=self.client();client.wait_stopped=Mock();client.rpc=Mock(side_effect=error)
+            with patch('robot_client.owl_ego.time.sleep'):
+                with self.assertRaises(type(error)):
+                    client.navigate(dict(x=20,y=0,z=100,yaw=0))
+            self.assertEqual(client.rpc.call_count,count)
 
     def test_mutation_error_preserves_exact_request_for_replay(self):
         client = self.client(); client.session_id = "s"

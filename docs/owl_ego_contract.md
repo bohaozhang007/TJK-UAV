@@ -18,6 +18,14 @@ without sharing or extending the Agent's lease. See the operator section below.
 
 ## Endpoint inventory
 
+Agent admission retry (2026-09-14): only an HTTP 409 with exact error
+`previous motion not confirmed stopped` and no task_id may trigger another
+navigation submission. This rejection precedes task creation. Agent waits 0.2 s,
+reconfirms stopped under its existing bounded wait/lease checks, then uses a new
+request_id (the rejected ID may cache its error). Maximum three submissions total.
+Other errors and uncertain transport outcomes are not replayed. No Robot endpoint
+change; Agent local regression passed, field integration pending.
+
 Robot configuration source (2026-09-11): `run_owl_ego.sh` defaults to repository
 `src/robot/config/owl_ego.yaml` for bridge, HTTP, checks and recording, and prints
 the resolved path on stderr. Explicit `OWL_EGO_CONFIG` still overrides it, with
