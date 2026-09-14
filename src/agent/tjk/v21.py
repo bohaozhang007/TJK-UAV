@@ -81,7 +81,7 @@ class PatrolAgent(v20.TJKAgent):
     def _write_targets_csv(self):
         path = self.event_path.with_name("targets.csv")
         temporary = path.with_suffix(".csv.tmp")
-        fields = ["target_id", "position_cm", "status", "first_detected_at",
+        fields = ["target_id", "position_cm", "track_position_cm", "status", "first_detected_at",
                   "last_detected_at", "detection_count", "attempts",
                   "tracking_source", "phase", "finished_at"]
         try:
@@ -89,7 +89,9 @@ class PatrolAgent(v20.TJKAgent):
                 writer = csv.DictWriter(stream, fieldnames=fields)
                 writer.writeheader()
                 for record in self.memory.snapshot():
-                    record["position_cm"] = "(" + ", ".join(f"{v:.2f}" for v in record["position_cm"]) + ")"
+                    for key in ("position_cm", "track_position_cm"):
+                        pose = record[key]
+                        record[key] = "(" + ", ".join(f"{v:.2f}" for v in pose) + ")" if pose is not None else ""
                     writer.writerow(record)
             temporary.replace(path)
         except OSError as exc:
@@ -451,13 +453,13 @@ class PatrolAgent(v20.TJKAgent):
         # Cancel flight first; then wait for GPU workers before SAM2/main use.
         self.pipeline.wait_idle(self.patrol["worker_idle_timeout_s"])
         if candidate.get("detection_image"):
-            self.detection_images.mark_trigger(candidate["detection_image"], candidate.get("detection_directory"))
+            self.detection_images.mark_trigger(candidate["detection_image"], candidate.get("detection_directory"), candidate["box"])
         target_dir = self._start_log_phase(f"toTarget_{record.target_id}")
         record.phase = target_dir.name
         self._write_targets_csv()
         trigger_image = cv2.cvtColor(obs.rgb, cv2.COLOR_RGB2BGR)
         x1, y1, x2, y2 = np.rint(candidate["box"]).astype(int)
-        cv2.rectangle(trigger_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.rectangle(trigger_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
         cv2.imwrite(str(target_dir / "trigger.jpg"), trigger_image)
         (target_dir / "trigger.json").write_text(json.dumps({
             "frame_id": obs.frame_id, "timestamp_s": obs.timestamp_s, "pose": obs.pose,
@@ -480,13 +482,11 @@ class PatrolAgent(v20.TJKAgent):
                     try:
                         refined = self.position(self.capture_observation, last["depth_raw"],
                                                 last["bbox"], last["mask"])
-                        if np.linalg.norm(refined-record.position_cm) >= self.memory.distance_cm:
-                            self.event("identity_uncertain", target_id=record.target_id,
-                                       position_cm=refined.tolist())
-                            success, refined = False, None
+                        self.event("track_position_recorded", target_id=record.target_id,
+                                   position_cm=refined.tolist(),
+                                   detection_distance_cm=float(np.linalg.norm(refined-record.position_cm)))
                     except TargetGeometryError as exc:
                         self.event("completion_geometry_failed", reason=str(exc))
-                        success = False
         except v20.TaskFailure as exc:
             self.event("target_failed", target_id=record.target_id, reason=str(exc))
         self.memory.finish(record, success, refined)

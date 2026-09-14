@@ -30,9 +30,10 @@ class DetectionImageLog:
         self.queue.put((name, rgb.copy(), meta, Path(directory) if directory is not None else self.directory))
         return name
 
-    def mark_trigger(self, name, directory=None):
+    def mark_trigger(self, name, directory=None, box=None):
         # The same FIFO worker handles initial save and later trigger annotation.
-        self.queue.put((name, None, None, Path(directory) if directory is not None else self.directory))
+        self.queue.put((name, None, {"trigger_box": np.asarray(box).tolist()} if box is not None else None,
+                        Path(directory) if directory is not None else self.directory))
 
     def mark_tracking_source(self, filename, source, directory):
         if source not in {"TRIGGER", "DETECTION"}:
@@ -50,7 +51,7 @@ class DetectionImageLog:
                     return
                 name, rgb, meta, directory = item
                 directory.mkdir(parents=True, exist_ok=True)
-                if rgb is None and meta is not None:
+                if rgb is None and meta is not None and "tracking_source" in meta:
                     path = directory / name
                     annotated = cv2.imread(str(path))
                     if annotated is None:
@@ -75,6 +76,18 @@ class DetectionImageLog:
                     annotated = cv2.imread(str(path))
                     if annotated is None:
                         raise OSError(f"Cannot mark missing detection image {path}")
+                    metadata_path = directory / f"{name}.json"
+                    trigger_metadata_path = directory / f"{name}_trigger.json"
+                    if not metadata_path.exists():
+                        metadata_path = trigger_metadata_path
+                    saved_meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    if meta is not None:
+                        saved_meta.update(meta)
+                    boxes = ([saved_meta["trigger_box"]] if "trigger_box" in saved_meta
+                             else [result["box"] for result in saved_meta["top3"]])
+                    for box in boxes:
+                        x1,y1,x2,y2 = np.rint(box).astype(int)
+                        cv2.rectangle(annotated, (x1,y1), (x2,y2), (0,0,255), 2)
                     cv2.rectangle(annotated, (0,0), (100,30), (0,0,0), -1)
                     cv2.putText(annotated, "trigger", (8,22), cv2.FONT_HERSHEY_SIMPLEX,
                                 .7, (0,255,255), 2, cv2.LINE_AA)
@@ -82,11 +95,7 @@ class DetectionImageLog:
                         raise OSError(f"Failed to save {path}")
                     if path != trigger_path:
                         path.replace(trigger_path)
-                    metadata_path = directory / f"{name}.json"
-                    trigger_metadata_path = directory / f"{name}_trigger.json"
-                    if not metadata_path.exists():
-                        metadata_path = trigger_metadata_path
-                    meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    meta = saved_meta
                     meta["trigger"] = True
                     meta["image_file"] = trigger_path.name
                     metadata_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")

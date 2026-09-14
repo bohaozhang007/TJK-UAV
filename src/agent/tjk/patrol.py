@@ -75,6 +75,7 @@ class TargetRecord:
     tracking_source: str = ""
     phase: str = ""
     finished_at: str = ""
+    track_position_cm: list | None = None
 
 
 class TargetMemory:
@@ -86,8 +87,13 @@ class TargetMemory:
     def nearest(self, position):
         if not self.records:
             return None
-        record = min(self.records, key=lambda r: np.linalg.norm(np.asarray(r.position_cm)-position))
-        return record if np.linalg.norm(np.asarray(record.position_cm)-position) < self.distance_cm else None
+        def distance(record):
+            poses = [record.position_cm]
+            if record.track_position_cm is not None:
+                poses.append(record.track_position_cm)
+            return min(np.linalg.norm(np.asarray(pose)-position) for pose in poses)
+        record = min(self.records, key=distance)
+        return record if distance(record) < self.distance_cm else None
 
     def note_detection(self, record, detected_at):
         if not record.first_detected_at:
@@ -104,6 +110,7 @@ class TargetMemory:
             existing.status = "pending"
             existing.attempts += 1
             existing.position_cm = np.asarray(position).tolist()
+            existing.track_position_cm = None
             existing.tracking_source = existing.finished_at = ""
             return existing
         record = TargetRecord(len(self.records)+1, np.asarray(position).tolist())
@@ -114,7 +121,7 @@ class TargetMemory:
     def finish(self, record, success, position=None, now=None):
         record.status = "completed" if success else "failed"
         if position is not None:
-            record.position_cm = np.asarray(position).tolist()
+            record.track_position_cm = np.asarray(position).tolist()
 
     def snapshot(self):
         return [asdict(r) for r in self.records]

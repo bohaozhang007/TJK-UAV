@@ -63,3 +63,21 @@ attempts,tracking_source,phase,finished_at。每个内部目标一行，世界�
 两机时钟同步。只更新日志元数据，不改变匹配/运动逻辑。59 项 Agent 测试通过
 （17.780 s，logs/targets_csv_agent.log），5 项图片测试通过（0.437 s），diff check通过。
 Robot 无需改接口，未部署或实飞。
+
+同轮 trigger 框改红：目标阶段 trigger.jpg 和巡航 *_top3_trigger.png 中实际
+触发的候选框均为红色，巡航其他候选仍绿色；保存 trigger_box 以支持重复标记。
+5 项图片测试通过（0.439 s），未改历史图。10:06:31 运行 Target 2 两次触发位置
+相距39.37 cm，符合100 cm同目标匹配；首次TRACK后位置复核差约125 cm，
+身份不确定转failed才允许第二次访问，并非completed去重失效。
+
+同轮用户修订：目标现在保留两个位置，position_cm 是本次触发检测位置，
+track_position_cm 是 TRACK 成功后的估计位置，不再覆盖前者。nearest 对每个目标
+取两位置距离的最小值，严格小于 dedup_distance_cm（当前100 cm）即匹配。
+TRACK 返回成功即保持 completed，取消结束位置相差过大导致 failed 的规则。
+结束几何估计若报 TargetGeometryError，仅记 completion_geometry_failed，第二位置
+留空，不否定 TRACK 成功；有效估计记录 track_position_recorded 及与检测位置的距离。
+pending/completed 去重、失败可重试及飞行授权异常处理保持。targets.csv 增加
+track_position_cm 两位小数三元组列，空值留空。无 Robot 接口变更。
+61 项 Agent 回归通过（17.854 s，logs/dual_pose_agent.log），覆盖双位置任一命中、
+100 cm边界、CSV两列、结束位置相距300 cm仍完成及深度无效仍完成；diff check通过。
+未实飞、未部署，历史日志未改写。

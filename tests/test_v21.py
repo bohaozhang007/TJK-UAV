@@ -98,6 +98,15 @@ class GeometryTests(unittest.TestCase):
 
 
 class MemoryTests(unittest.TestCase):
+    def test_completed_target_matches_either_pose_strictly_within_one_meter(self):
+        memory = TargetMemory(100)
+        record = memory.claim([0,0,100])
+        memory.finish(record, True, position=[300,0,100])
+        self.assertEqual(record.position_cm, [0,0,100])
+        self.assertIsNone(memory.claim([99,0,100]))
+        self.assertIsNone(memory.claim([399,0,100]))
+        self.assertIsNotNone(memory.claim([400,0,100]))
+
     def test_pending_completed_and_distinct_targets(self):
         memory = TargetMemory(100)
         record = memory.claim([0,0,100], now=0)
@@ -352,7 +361,8 @@ class MissionTests(unittest.TestCase):
         with path.open(encoding='utf-8-sig',newline='') as stream:
             rows=list(csv.DictReader(stream))
         self.assertEqual(len(rows),1)
-        self.assertEqual(rows[0]['position_cm'],'(4.57, 2.00, 100.00)')
+        self.assertEqual(rows[0]['position_cm'],'(2.00, 2.00, 100.00)')
+        self.assertEqual(rows[0]['track_position_cm'],'(4.57, 2.00, 100.00)')
         self.assertEqual(rows[0]['detection_count'],'3')
         self.assertEqual(rows[0]['attempts'],'2')
         self.assertEqual(rows[0]['status'],'completed')
@@ -460,6 +470,24 @@ class MissionTests(unittest.TestCase):
         self.agent.track.assert_called_once()
         self.agent.tracker.reset.assert_called_once()
         self.assertEqual(record.status,'completed')
+
+    def test_track_success_survives_distant_or_unavailable_final_position(self):
+        for unavailable in (False, True):
+            with self.subTest(unavailable=unavailable):
+                obs=observation()
+                record=self.agent.memory.claim([1000*int(unavailable),0,100])
+                self.agent.pipeline=Mock()
+                self.agent._cancel_navigation=Mock()
+                self.agent._navigate_to_world_pose=Mock()
+                def track():
+                    self.agent.last_track_observation=dict(depth_raw=None,bbox=None,mask=None)
+                    return True
+                self.agent.track=track
+                self.agent.position=Mock(side_effect=TargetGeometryError('invalid depth') if unavailable else None,
+                                         return_value=np.array([300.,0,100]))
+                self.assertTrue(self.agent._visit_target((obs,dict(box=[4,4,16,16]),record)))
+                self.assertEqual(record.status,'completed')
+                self.assertEqual(record.track_position_cm, None if unavailable else [300.,0,100])
 
     def test_trigger_fallback_empty_mask_does_not_start_track(self):
         record=self.agent.memory.claim([210,-20,100])

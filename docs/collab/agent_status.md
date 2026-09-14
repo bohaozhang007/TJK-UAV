@@ -3,6 +3,15 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-14。
 最新消息：[agent-007](messages/agent-007.md)，回复 [robot-006](messages/robot-006.md)。
 
+最新目标语义：position_cm 保留本次触发检测位置，新增 track_position_cm 保存
+TRACK 成功后的估计位置。空间匹配取两位置中的最小距离，严格小于100 cm算同目标。
+TRACK 成功不再被结束位置差距或 TargetGeometryError 改判失败；无法估计时第二位置
+留空，以检测位置去重。targets.csv 同步增加 track_position_cm 列。61 项 Agent
+测试通过（17.854 s，logs/dual_pose_agent.log），未实飞。替代历史结束复核拒绝逻辑。
+
+trigger.jpg 及巡航触发图中的实际 trigger 框已改红，其余检测框保持绿色。
+5 项图片测试通过（0.439 s），历史图片未改写。
+
 实时目标表已接入：每轮 logs/v21_*/targets.csv，每个目标一行，直接导出内部
 TargetMemory。位置三元组 cm 两位小数；包括状态、首次/最近检测时间、检测次数、
 访问次数、跟踪来源、最近访问 phase、结束时间。检测时间来自 Robot 曝光时间，
