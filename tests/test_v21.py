@@ -106,13 +106,16 @@ class MemoryTests(unittest.TestCase):
         self.assertIsNone(memory.claim([10,0,100], now=100))
         self.assertIsNotNone(memory.claim([101,0,100], now=100))
 
-    def test_failed_retry_cooldown_and_limit(self):
-        memory = TargetMemory(100,30,2)
+    def test_failed_target_can_retry_immediately_without_attempt_limit(self):
+        memory = TargetMemory(100)
         r = memory.claim([0,0,100], now=0)
-        memory.finish(r,False,now=1)
-        self.assertIsNone(memory.claim([0,0,100],now=30))
-        self.assertIs(memory.claim([0,0,100],now=31),r)
-        memory.finish(r,False,now=32)
+        for i in range(5):
+            memory.finish(r,False,now=1)
+            self.assertIs(memory.claim([i,0,100],now=1),r)
+            self.assertEqual(r.position_cm, [i,0,100])
+            self.assertIsNone(memory.claim([i,0,100],now=1))
+        self.assertEqual(r.attempts,6)
+        memory.finish(r,True)
         self.assertIsNone(memory.claim([0,0,100],now=100))
 
 
@@ -334,6 +337,32 @@ class FakeClient(OwlEgoClient):
 
 
 class MissionTests(unittest.TestCase):
+    def test_targets_csv_tracks_duplicates_retry_and_completion(self):
+        path=self.agent.event_path.with_name('targets.csv')
+        self.assertTrue(path.is_file())
+        record=self.agent.memory.claim([1.234,2,100],detected_at='2026-09-14T09:00:00')
+        self.agent.memory.finish(record,False)
+        self.agent.memory.claim([2,2,100],detected_at='2026-09-14T09:00:01')
+        self.agent.memory.claim([3,2,100],detected_at='2026-09-14T09:00:02')
+        record.phase='phase_3_toTarget_1'
+        record.tracking_source='trigger'
+        self.agent.memory.finish(record,True,position=[4.567,2,100])
+        record.finished_at='2026-09-14T09:00:03'
+        self.agent._write_targets_csv()
+        with path.open(encoding='utf-8-sig',newline='') as stream:
+            rows=list(csv.DictReader(stream))
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['position_cm'],'(4.57, 2.00, 100.00)')
+        self.assertEqual(rows[0]['detection_count'],'3')
+        self.assertEqual(rows[0]['attempts'],'2')
+        self.assertEqual(rows[0]['status'],'completed')
+        self.assertEqual(rows[0]['first_detected_at'],'2026-09-14T09:00:00')
+        self.assertEqual(rows[0]['last_detected_at'],'2026-09-14T09:00:02')
+        self.assertEqual(rows[0]['tracking_source'],'trigger')
+        self.assertEqual(rows[0]['phase'],record.phase)
+        self.assertEqual(rows[0]['finished_at'],record.finished_at)
+        self.assertFalse(path.with_suffix('.csv.tmp').exists())
+
     def test_csv_uses_robot_target_instead_of_before_plus_action(self):
         self.client.motion_targets['global-z']=dict(x=100.,y=20.,z=105.,yaw=179.)
         self.agent._csv_pose=Mock(return_value=dict(after_epoch='e',after_x_cm=103.,
@@ -370,7 +399,9 @@ class MissionTests(unittest.TestCase):
         self.agent.yaw_tolerance_deg=5
         self.agent._reacquire=Mock(return_value=True)
         self.agent.track=Mock(return_value=True)
-    def tearDown(self): self.temp.cleanup()
+    def tearDown(self):
+        self.agent.detection_images.close()
+        self.temp.cleanup()
 
     def test_full_route_target_return_dedup_and_home(self):
         # Always sees the same object; completed memory must prevent retrigger.
@@ -395,9 +426,10 @@ class MissionTests(unittest.TestCase):
         self.assertTrue((self.agent._mission_vis_dir/"phase_1_toTarget_1"/"trigger.jpg").is_file())
 
     def test_failure_returns_then_continues(self):
-        self.agent.infer_observation=lambda obs:[dict(box=[4,4,16,16],confidence=.9,
+        self.agent.infer_observation=lambda obs: ([dict(box=[4,4,16,16],confidence=.9,
                                                     position_cm=[210,-20,100])]
-        self.agent._reacquire.return_value=False
+                                                  if not self.agent.memory.records else [])
+        self.agent._prepare_target=Mock(return_value=False)
         records=self.agent.run_mission("bottle")
         self.assertEqual(records[0]["status"],"failed")
         self.agent.track.assert_not_called()
@@ -407,10 +439,39 @@ class MissionTests(unittest.TestCase):
         self.agent.task_failure_policy="return_home"
         self.agent.infer_observation=lambda obs:[dict(box=[4,4,16,16],confidence=.9,
                                                     position_cm=[210,-20,100])]
-        self.agent._reacquire.return_value=False
+        self.agent._prepare_target=Mock(return_value=False)
         self.agent.run_mission("bottle")
         self.assertFalse(any(c[0]=="navigate" and c[1]["y"]==-150 for c in self.client.calls))
         self.assertEqual(self.client.calls[-1],("navigate",self.agent.mission_origin_pose))
+
+    def test_trigger_fallback_seeds_original_image_then_runs_track(self):
+        obs=observation()
+        box=[4,4,16,16]
+        record=self.agent.memory.claim([210,-20,100])
+        self.agent._reacquire.return_value=False
+        self.agent.tracker.track_with_mask.return_value=(np.array(box),np.ones((20,20),bool))
+        self.agent.pipeline=Mock()
+        self.agent._cancel_navigation=Mock()
+        self.agent._navigate_to_world_pose=Mock()
+        self.agent._visit_target((obs,dict(box=box,position_cm=record.position_cm),record))
+        call=self.agent.tracker.track_with_mask.call_args
+        self.assertIs(call.args[0],obs.rgb)
+        np.testing.assert_array_equal(call.kwargs['box'],box)
+        self.agent.track.assert_called_once()
+        self.agent.tracker.reset.assert_called_once()
+        self.assertEqual(record.status,'completed')
+
+    def test_trigger_fallback_empty_mask_does_not_start_track(self):
+        record=self.agent.memory.claim([210,-20,100])
+        self.agent._reacquire.return_value=False
+        self.agent.tracker.track_with_mask.return_value=(np.array([4,4,16,16]),np.zeros((20,20),bool))
+        self.assertFalse(self.agent._prepare_target(record,observation(),dict(box=[4,4,16,16])))
+        self.agent.track.assert_not_called()
+
+    def test_successful_reacquire_does_not_seed_trigger(self):
+        record=self.agent.memory.claim([210,-20,100])
+        self.assertTrue(self.agent._prepare_target(record,observation(),dict(box=[4,4,16,16])))
+        self.agent.tracker.track_with_mask.assert_not_called()
 
     def test_no_target_visits_entire_route(self):
         self.agent.infer_observation=lambda obs:[]

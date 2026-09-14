@@ -1,7 +1,30 @@
 # Agent 端状态
 
-维护方：Windows Agent 端 Codex。更新日期：2026-09-11。
+维护方：Windows Agent 端 Codex。更新日期：2026-09-14。
 最新消息：[agent-007](messages/agent-007.md)，回复 [robot-006](messages/robot-006.md)。
+
+实时目标表已接入：每轮 logs/v21_*/targets.csv，每个目标一行，直接导出内部
+TargetMemory。位置三元组 cm 两位小数；包括状态、首次/最近检测时间、检测次数、
+访问次数、跟踪来源、最近访问 phase、结束时间。检测时间来自 Robot 曝光时间，
+结束时间来自 Agent 本机时间，均格式化到本机时区。状态变更时临时文件原子替换，
+写失败仅记事件，不干扰飞行。59 项 Agent 和5 项图片测试通过；未实飞。
+
+触发检测 JSON 已同步增加 _trigger 后缀，图片仍为 _top3_trigger.png；
+4 项图片测试通过（0.420 s）。历史文件未改写。
+跟踪来源也已标记：选中重检图左上角 USING DETECTION，回退初始化成功的
+trigger.jpg 左上角 USING TRIGGER；对应 JSON 记录 tracking_source。
+5 项图片测试通过（0.455 s），不改变推理输入。
+
+## 最新实现：失败立即可重试，trigger 初始化 SAM2
+
+取消失败目标 30 s 冷却及最多两次访问限制，下一次巡航检测即可复用该目标 ID
+重新访问，并更新本次触发位置估计；pending/completed 仍去重。删除 v21 YAML
+retry_cooldown_s/max_target_attempts 配置项，旧自定义 YAML 需同步删除。
+返回曝光点后仍先进行 reacquire_attempts 次重检，未匹配成功则使用原始未画框
+trigger RGB + 原候选 box 初始化 SAM2。TRACK 首轮重新采集当前 RGB/DA3 深度
+后才决策运动，不对旧图片偏移直接发动作。空初始化 mask 则本次访问失败。
+58 项 Agent 回归通过（17.728 s），日志 logs/trigger_fallback_agent.log；未实飞。
+下文历史冷却/次数限制结论由本节替代。此变更不保证感知零漏检。
 
 ## 最新实现：降落抢占后的只读确认
 

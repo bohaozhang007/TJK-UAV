@@ -33,8 +33,7 @@ def validate_patrol_config(config):
         "max_detection_age_s": (0.1, 600, False),
         "observation_max_age_s": (0.05, 5, False),
         "observation_max_sync_error_s": (0, 0.5, False),
-        "dedup_distance_cm": (1, 10000, False), "retry_cooldown_s": (0, 3600, False),
-        "max_target_attempts": (1, 20, True), "reacquire_attempts": (1, 20, True),
+        "dedup_distance_cm": (1, 10000, False), "reacquire_attempts": (1, 20, True),
         "min_depth_pixels": (1, 1000000, True), "max_relative_depth_mad": (0, 1, False),
         "box_core_ratio": (0.01, 1, False),
     }
@@ -59,9 +58,7 @@ class PatrolAgent(v20.TJKAgent):
     def __init__(self, *, config, **kwargs):
         self.patrol = validate_patrol_config(config)
         super().__init__(config=config, **kwargs)
-        self.memory = TargetMemory(self.patrol["dedup_distance_cm"],
-                                   self.patrol["retry_cooldown_s"],
-                                   self.patrol["max_target_attempts"])
+        self.memory = TargetMemory(self.patrol["dedup_distance_cm"])
         self.pipeline = None
         self.active_navigation = None
         self.capture_observation = None
@@ -79,6 +76,24 @@ class PatrolAgent(v20.TJKAgent):
                             "action_xyz_yaw", "before", "target", "after", "error"]
         with self.motion_csv_path.open("w", newline="", encoding="utf-8-sig") as stream:
             csv.DictWriter(stream, fieldnames=self._csv_fields).writeheader()
+        self._write_targets_csv()
+
+    def _write_targets_csv(self):
+        path = self.event_path.with_name("targets.csv")
+        temporary = path.with_suffix(".csv.tmp")
+        fields = ["target_id", "position_cm", "status", "first_detected_at",
+                  "last_detected_at", "detection_count", "attempts",
+                  "tracking_source", "phase", "finished_at"]
+        try:
+            with temporary.open("w", newline="", encoding="utf-8-sig") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields)
+                writer.writeheader()
+                for record in self.memory.snapshot():
+                    record["position_cm"] = "(" + ", ".join(f"{v:.2f}" for v in record["position_cm"]) + ")"
+                    writer.writerow(record)
+            temporary.replace(path)
+        except OSError as exc:
+            self.event("targets_csv_write_failed", error=str(exc))
 
     def _csv_pose(self, prefix):
         result = {f"{prefix}_sampled_at": dt.datetime.now().isoformat()}
@@ -162,10 +177,9 @@ class PatrolAgent(v20.TJKAgent):
     def connect(self):
         # A fresh session establishes fresh world coordinates and target memory.
         result = super().connect()
-        self.memory = TargetMemory(self.patrol["dedup_distance_cm"],
-                                   self.patrol["retry_cooldown_s"],
-                                   self.patrol["max_target_attempts"])
+        self.memory = TargetMemory(self.patrol["dedup_distance_cm"])
         self.capture_observation = None
+        self._write_targets_csv()
         return result
 
     def event(self, kind, **fields):
@@ -282,7 +296,9 @@ class PatrolAgent(v20.TJKAgent):
             self.event("result_discarded", frame_id=obs.frame_id, age_s=age)
             return None
         for candidate in candidates:
-            record = self.memory.claim(candidate["position_cm"])
+            record = self.memory.claim(candidate["position_cm"],
+                                       detected_at=dt.datetime.fromtimestamp(obs.timestamp_s).isoformat())
+            self._write_targets_csv()
             if record:
                 self.event("target_claimed", target_id=record.target_id,
                            frame_id=obs.frame_id, capture_pose=obs.pose, age_s=age)
@@ -372,6 +388,11 @@ class PatrolAgent(v20.TJKAgent):
         for _ in range(self.patrol["reacquire_attempts"]):
             obs = self.client.observe()
             candidates = self.infer_observation(obs)
+            for candidate in candidates:
+                known = self.memory.nearest(candidate["position_cm"])
+                if known is not None:
+                    self.memory.note_detection(known, dt.datetime.fromtimestamp(obs.timestamp_s).isoformat())
+            self._write_targets_csv()
             matches = sorted(candidates, key=lambda c: np.linalg.norm(
                 np.asarray(c["position_cm"])-record.position_cm))
             if matches and np.linalg.norm(np.asarray(matches[0]["position_cm"])-record.position_cm) < self.memory.distance_cm:
@@ -390,11 +411,37 @@ class PatrolAgent(v20.TJKAgent):
                     continue
                 self.event("reacquired", target_id=record.target_id,
                            frame_id=obs.frame_id, position_cm=refined.tolist())
+                record.tracking_source = "detection"
+                self._write_targets_csv()
+                if matches[0].get("detection_image"):
+                    self.detection_images.mark_tracking_source(
+                        matches[0]["detection_image"] + "_top3.png", "DETECTION",
+                        matches[0].get("detection_directory", self.vis_dir))
                 self.exec_rotate_action_deg(
                     self.prepare_rotate_action_deg(self.get_bbox_state(bbox)["horizontal_offset"]),
                     context="v21 initial target alignment")
                 return True
         return False
+
+    def _prepare_target(self, record, trigger_obs, candidate):
+        if self._reacquire(record):
+            return True
+        # Seed SAM2 on the original, unannotated exposure image. TRACK's first
+        # iteration captures a fresh RGB/depth pair before deciding any motion.
+        self.event("trigger_track_fallback", target_id=record.target_id,
+                   frame_id=trigger_obs.frame_id, box=candidate["box"],
+                   reason="reacquire_exhausted")
+        record.tracking_source = "trigger"
+        self._write_targets_csv()
+        self.tracker.reset()
+        _bbox, mask = self.tracker.track_with_mask(
+            trigger_obs.rgb, box=np.asarray(candidate["box"]))
+        if not np.any(mask):
+            self.event("trigger_track_fallback_failed", target_id=record.target_id,
+                       reason="empty_trigger_mask")
+            return False
+        self.detection_images.mark_tracking_source("trigger.jpg", "TRIGGER", self.vis_dir)
+        return True
 
     def _visit_target(self, hit):
         obs, candidate, record = hit
@@ -406,6 +453,8 @@ class PatrolAgent(v20.TJKAgent):
         if candidate.get("detection_image"):
             self.detection_images.mark_trigger(candidate["detection_image"], candidate.get("detection_directory"))
         target_dir = self._start_log_phase(f"toTarget_{record.target_id}")
+        record.phase = target_dir.name
+        self._write_targets_csv()
         trigger_image = cv2.cvtColor(obs.rgb, cv2.COLOR_RGB2BGR)
         x1, y1, x2, y2 = np.rint(candidate["box"]).astype(int)
         cv2.rectangle(trigger_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -423,7 +472,7 @@ class PatrolAgent(v20.TJKAgent):
         self.last_track_observation = None
         try:
             self.set_phase("REACQUIRE", target_id=record.target_id)
-            if self._run_task_stage("reacquire", lambda: self._reacquire(record)):
+            if self._run_task_stage("reacquire", lambda: self._prepare_target(record, obs, candidate)):
                 self.set_phase("TRACK", target_id=record.target_id)
                 success = self._run_task_stage("track", self.track)
                 if success and self.last_track_observation:
@@ -441,6 +490,8 @@ class PatrolAgent(v20.TJKAgent):
         except v20.TaskFailure as exc:
             self.event("target_failed", target_id=record.target_id, reason=str(exc))
         self.memory.finish(record, success, refined)
+        record.finished_at = dt.datetime.now().isoformat()
+        self._write_targets_csv()
         self.event("target_finished", target_id=record.target_id, success=success,
                    targets=self.memory.snapshot())
         # No SCAN or waypoint SEARCH; return to the synchronized trigger pose.

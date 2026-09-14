@@ -34,6 +34,14 @@ class DetectionImageLog:
         # The same FIFO worker handles initial save and later trigger annotation.
         self.queue.put((name, None, None, Path(directory) if directory is not None else self.directory))
 
+    def mark_tracking_source(self, filename, source, directory):
+        if source not in {"TRIGGER", "DETECTION"}:
+            raise ValueError("Unknown tracking source")
+        if self.thread is None:
+            self.thread = threading.Thread(target=self._run, name="detection-image-log", daemon=True)
+            self.thread.start()
+        self.queue.put((filename, None, {"tracking_source": source}, Path(directory)))
+
     def _run(self):
         while True:
             item = self.queue.get()
@@ -42,6 +50,23 @@ class DetectionImageLog:
                     return
                 name, rgb, meta, directory = item
                 directory.mkdir(parents=True, exist_ok=True)
+                if rgb is None and meta is not None:
+                    path = directory / name
+                    annotated = cv2.imread(str(path))
+                    if annotated is None:
+                        raise OSError(f"Cannot mark missing tracking image {path}")
+                    label = "USING " + meta["tracking_source"]
+                    (width, _height), _baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, .7, 2)
+                    cv2.rectangle(annotated, (0,0), (width+16,32), (0,0,0), -1)
+                    cv2.putText(annotated, label, (8,23), cv2.FONT_HERSHEY_SIMPLEX,
+                                .7, (0,255,255), 2, cv2.LINE_AA)
+                    if not cv2.imwrite(str(path), annotated):
+                        raise OSError(f"Failed to save {path}")
+                    metadata_path = directory / (path.stem.removesuffix("_top3") + ".json")
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    metadata.update(meta)
+                    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+                    continue
                 if rgb is None:
                     path = directory / f"{name}_top3.png"
                     trigger_path = directory / f"{name}_top3_trigger.png"
@@ -58,10 +83,15 @@ class DetectionImageLog:
                     if path != trigger_path:
                         path.replace(trigger_path)
                     metadata_path = directory / f"{name}.json"
+                    trigger_metadata_path = directory / f"{name}_trigger.json"
+                    if not metadata_path.exists():
+                        metadata_path = trigger_metadata_path
                     meta = json.loads(metadata_path.read_text(encoding="utf-8"))
                     meta["trigger"] = True
                     meta["image_file"] = trigger_path.name
                     metadata_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                    if metadata_path != trigger_metadata_path:
+                        metadata_path.replace(trigger_metadata_path)
                     continue
                 original = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                 annotated = original.copy()

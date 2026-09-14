@@ -176,8 +176,8 @@ patrol:
   observation_max_age_s: 0.5
   observation_max_sync_error_s: 0.05
   dedup_distance_cm: 100.0
-  retry_cooldown_s: 30.0
-  max_target_attempts: 2
+  # Failed targets can be revisited immediately on a new patrol detection.
+  # After these SAM3 attempts fail, seed SAM2 from the trigger image and box.
   reacquire_attempts: 3
   min_depth_pixels: 16
   max_relative_depth_mad: 0.3

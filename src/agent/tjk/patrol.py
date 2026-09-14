@@ -69,15 +69,18 @@ class TargetRecord:
     position_cm: list
     status: str = "pending"
     attempts: int = 1
-    retry_after: float = 0.0
+    first_detected_at: str = ""
+    last_detected_at: str = ""
+    detection_count: int = 0
+    tracking_source: str = ""
+    phase: str = ""
+    finished_at: str = ""
 
 
 class TargetMemory:
-    """One mission/localization epoch only; failures have bounded retries."""
-    def __init__(self, distance_cm=100.0, retry_cooldown_s=30.0, max_attempts=2):
+    """One mission/epoch; only pending and completed targets suppress visits."""
+    def __init__(self, distance_cm=100.0):
         self.distance_cm = distance_cm
-        self.retry_cooldown_s = retry_cooldown_s
-        self.max_attempts = max_attempts
         self.records = []
 
     def nearest(self, position):
@@ -86,24 +89,30 @@ class TargetMemory:
         record = min(self.records, key=lambda r: np.linalg.norm(np.asarray(r.position_cm)-position))
         return record if np.linalg.norm(np.asarray(record.position_cm)-position) < self.distance_cm else None
 
-    def claim(self, position, now=None):
-        now = time.monotonic() if now is None else now
+    def note_detection(self, record, detected_at):
+        if not record.first_detected_at:
+            record.first_detected_at = detected_at
+        record.last_detected_at = detected_at
+        record.detection_count += 1
+
+    def claim(self, position, now=None, *, detected_at=""):
         existing = self.nearest(position)
         if existing:
-            if (existing.status != "failed" or existing.attempts >= self.max_attempts
-                    or now < existing.retry_after):
+            self.note_detection(existing, detected_at)
+            if existing.status != "failed":
                 return None
             existing.status = "pending"
             existing.attempts += 1
+            existing.position_cm = np.asarray(position).tolist()
+            existing.tracking_source = existing.finished_at = ""
             return existing
         record = TargetRecord(len(self.records)+1, np.asarray(position).tolist())
         self.records.append(record)
+        self.note_detection(record, detected_at)
         return record
 
     def finish(self, record, success, position=None, now=None):
-        now = time.monotonic() if now is None else now
         record.status = "completed" if success else "failed"
-        record.retry_after = now + self.retry_cooldown_s
         if position is not None:
             record.position_cm = np.asarray(position).tolist()
 

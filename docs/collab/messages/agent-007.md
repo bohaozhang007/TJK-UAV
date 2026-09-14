@@ -20,3 +20,46 @@ Client 现在对单次 POST /land 返回的原 task_id 独立查询终态，不�
 禁止新运动/重发降落、不恢复租约、任务不匹配、失败/取消、缺少 task_id、
 arrived 但未停稳超时，以及既有心跳与本地 HTTP 模拟回归。
 最终 Agent 55 项通过（17.761 s）；git diff --check 通过。没有运行实际 ROS/无人机。
+
+## 同轮补充：2026-09-14 失败重试与 trigger 跟踪
+
+用户要求优先减少漏检：取消失败目标的冷却与访问次数上限，失败后的下一次
+巡航检测即可重新访问，ID/attempts 保留，位置更新为新触发估计。pending 和
+completed 的空间去重保持。删除 YAML retry_cooldown_s/max_target_attempts，
+旧自定义配置需移除这两项；本次只修改 Agent，不改变 Robot 契约接口或状态。
+
+返回曝光点后的 SAM3 重捕获仍先尝试 3 次（reacquire_attempts）。若无框、
+仅检测到其他位置目标或 mask 几何匹配未通过，改用内存中的原始 trigger RGB
+及 candidate box 重置/初始化 SAM2，日志记录 trigger_track_fallback。
+初始化 mask 有效后进入既有 TRACK，先采当前图和深度再运动；不根据旧 trigger
+画面直接旋转或前进。空 mask 记录失败，后续仍可重试。原 DA3 前进限制、
+运动授权、TRACK 结束位置检查保留，不承诺零漏检；持续失败可能反复打断航线。
+
+验证：Agent 58 项通过（17.728 s），含立即重试超过原次数上限、pending/completed
+去重、trigger 原图/框传入 SAM2 并进入 TRACK、空 mask 拒绝及正常重捕获不回退。
+既有本地 HTTP 模拟链路同时通过；日志 logs/trigger_fallback_agent.log。
+Robot 无需配合改接口；待现场验证 SAM2 跨 trigger/当前视角的实际跟踪效果。
+未部署、未实飞、未外发。
+
+同轮图片命名补充：触发检测的 JSON 同步改名为 <原名>_trigger.json，
+image_file 继续指向 <原名>_top3_trigger.png；同线程处理，重复标记兼容，
+不保留旧名 JSON。目标阶段独立的 trigger.json 保持原名。4 项图片测试通过
+（0.420 s），包含重复标记与旧文件消失检查；历史运行文件不改写。
+
+同轮跟踪来源标记：成功重捕获时，在实际选中的 reacquire_*_top3.png 左上角
+写 USING DETECTION；回退 trigger 初始化 SAM2 成功时，在目标阶段 trigger.jpg
+左上角写 USING TRIGGER。对应 JSON 增加 tracking_source，其他重检图片不标记。
+复用同一 FIFO 写盘线程，避免异步初次保存覆盖标记，不修改模型输入图片。
+5 项图片测试通过（0.455 s），Agent 回归结果见 logs/tracking_source_agent.log。
+
+同轮实时目标记录：按用户要求新增 targets.csv，不生成 targets.json。
+字段 target_id,position_cm,status,first_detected_at,last_detected_at,detection_count,
+attempts,tracking_source,phase,finished_at。每个内部目标一行，世界位置 cm 三元组
+保留两位小数。新目标、已处理候选的重复匹配、重新访问、重检匹配统计、跟踪来源
+和访问结果变化时同步更新小表，临时文件写完替换，不新增线程或网络请求。
+失败写盘记录 targets_csv_write_failed。初始化创建表头，fresh session 清空旧记忆表。
+重复匹配仅更新统计，位置仍按原重试/完成逻辑更新；检测次数为已处理匹配候选数。
+检测时间取 Robot 曝光时间，访问结束取 Agent 本机时间，格式化为本机时区；未宣称
+两机时钟同步。只更新日志元数据，不改变匹配/运动逻辑。59 项 Agent 测试通过
+（17.780 s，logs/targets_csv_agent.log），5 项图片测试通过（0.437 s），diff check通过。
+Robot 无需改接口，未部署或实飞。
