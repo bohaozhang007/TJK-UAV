@@ -4,7 +4,7 @@
 # Runtime timing and Robot request limits.
 runtime:
   # Wait after every motion action before reading the resulting pose (seconds).
-  action_sleep_s: 0.01
+  action_sleep_s: 0.1
   # Timeout for individual blocking TRACK movements; route navigation is asynchronous.
   motion_timeout_s: 15.0
   # --http-timeout-s can override this for one run without changing the YAML.
