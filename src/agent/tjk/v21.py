@@ -18,6 +18,7 @@ import numpy as np
 
 from agent.tjk import v20
 from agent.tjk.detection_log import DetectionImageLog
+from agent.tjk.track_log import TrackImageLog
 from agent.tjk.patrol import PerceptionPipeline, TargetGeometryError, TargetMemory, target_position
 from robot_client.owl_ego import OwlEgoClient
 from robot_client.base import BaseClient
@@ -75,6 +76,8 @@ class PatrolAgent(v20.TJKAgent):
         self.event_path = self._mission_vis_dir.parent / "events.jsonl"
         self.client.event = self.event
         self.detection_images = DetectionImageLog(self._mission_vis_dir / "detections", self.event)
+        self.track_images = TrackImageLog(self.event)
+        self.tracker.set_vis_mode(False)
         self.motion_csv_path = self.event_path.with_name("motions.csv")
         self._csv_lock = threading.Lock()
         self._csv_navigation = {}
@@ -407,6 +410,11 @@ class PatrolAgent(v20.TJKAgent):
                 raise v20.FlightSafetyError(f"Arrival outside tolerances after recheck: {distance}cm/{yaw_error}deg")
             time.sleep(min(0.2, deadline-now))
 
+    def _save_track_frame(self, frame_rgb, depth_raw, bbox, mask, frame_idx):
+        self.track_images.submit(self.capture_observation, bbox, mask,
+                                 directory=self.vis_dir,
+                                 depth=depth_raw if self.save_depth else None)
+
     def _reacquire(self, record):
         for _ in range(self.patrol["reacquire_attempts"]):
             obs = self.client.observe()
@@ -422,6 +430,7 @@ class PatrolAgent(v20.TJKAgent):
                 box = np.asarray(matches[0]["box"])
                 self.tracker.reset()
                 bbox, mask = self.tracker.track_with_mask(obs.rgb, box=box)
+                self.track_images.submit(obs, bbox, mask, directory=self.vis_dir, source="detection_init")
                 if not np.any(mask):
                     continue
                 # Refine box-based identity with foreground depth before TRACK.
@@ -460,6 +469,7 @@ class PatrolAgent(v20.TJKAgent):
         self.tracker.reset()
         _bbox, mask = self.tracker.track_with_mask(
             trigger_obs.rgb, box=np.asarray(candidate["box"]))
+        self.track_images.submit(trigger_obs, _bbox, mask, directory=self.vis_dir, source="trigger_init")
         if not np.any(mask):
             self.event("trigger_track_fallback_failed", target_id=record.target_id,
                        reason="empty_trigger_mask")
@@ -671,6 +681,7 @@ def main():
             finally:
                 # Drain disk work after flight/session cleanup, including mission failures.
                 agent.detection_images.close()
+                agent.track_images.close()
         if mission_error is None and cleanup_error is not None:
             raise cleanup_error
 

@@ -3,6 +3,13 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-14。
 最新消息：[agent-007](messages/agent-007.md)，回复 [robot-006](messages/robot-006.md)。
 
+TRACK帧留档已后台化：目标阶段内保存track_序号_曝光毫秒.png及同名.json，
+含frame_id/timestamp_s/曝光pose/epoch/source/box/mask；mask是可逆行优先RLE。
+trigger/detection初始化帧也留档，source区分。v21关闭SAM2同步绘图，复用v20
+保存hook改为主线程复制数组并非阻塞入队，后台绘制/JSON编码/保存可选depth.npy。
+录盘线程在降落及会话清理后排空；无丢帧策略，磁盘长期慢于处理时队列会占内存。
+68项Agent、5项检测图片、2项TRACK留档测试通过；未实飞。
+
 17:56运行导航准入竞态已修复：仅HTTP409精确previous motion not confirmed stopped
 且无task_id时，等待0.2 s后重新wait_stopped再提交，最多三次提交；每次仍受既有
 停稳超时/租约检查约束。其他错误、超时不重发。mission异常退出将pending目标标failed

@@ -439,6 +439,7 @@ class MissionTests(unittest.TestCase):
         self.agent.track=Mock(return_value=True)
     def tearDown(self):
         self.agent.detection_images.close()
+        self.agent.track_images.close()
         self.temp.cleanup()
 
     def test_full_route_target_return_dedup_and_home(self):
@@ -1231,6 +1232,7 @@ class LocalRobotIntegrationTests(unittest.TestCase):
             def reset(self): self.frame_idx=0
             def set_vis_dir(self,*args): pass
             def set_img_size(self,*args): pass
+            def set_vis_mode(self,*args): pass
             def track_with_mask(self,frame,box=None):
                 self.frame_idx+=1
                 # Init, one forward adjustment, then centred at the desired size.
@@ -1311,6 +1313,7 @@ class LocalRobotIntegrationTests(unittest.TestCase):
                                                         for h,c in zip(claimed,cancels)]),indent=2),encoding="utf-8")
             finally:
                 client.close();server.shutdown();server.server_close()
+                agent.track_images.close()
 
 
 if __name__=="__main__": unittest.main()

@@ -1907,8 +1907,7 @@ class TJKAgent:
                 time.perf_counter() - tracker_started,
             )
             save_depth_started = time.perf_counter()
-            if self.save_depth:
-                self.save_track_depth(depth_raw, track_frame_idx)
+            self._save_track_frame(frame_rgb, depth_raw, bbox, mask, track_frame_idx)
             save_depth_s = time.perf_counter() - save_depth_started
 
             # get box state
@@ -2962,6 +2961,10 @@ class TJKAgent:
             axis: float(pose[axis])
             for axis in ("x", "y", "z", "yaw")
         }
+
+    def _save_track_frame(self, frame_rgb, depth_raw, bbox, mask, frame_idx):
+        if self.save_depth:
+            self.save_track_depth(depth_raw, frame_idx)
 
     def save_track_depth(self, depth_raw, frame_idx):
         depth_path = os.path.join(self.vis_dir, f"track_{frame_idx:02d}.npy")

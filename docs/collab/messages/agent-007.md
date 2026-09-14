@@ -121,3 +121,19 @@ FFmpeg进程组，输入q并等15 s收尾；超时强制退出并提示文件可
 68项Agent回归通过（18.747 s），覆盖拒绝后成功/新ID、持续拒绝上限、超时不重试、
 其他409不重试以及异常退出CSV终态；logs/admission_retry_agent.log，diff check通过。
 无需Robot代码变更，待现场验证，未实飞。
+
+同轮TRACK结构化留档：新增track_log.py后台线程；v21禁用SAM2内部同步绘图，
+通过v20默认保存hook复用原TRACK控制。v20独立运行保留原depth保存语义。
+每个目标阶段保存track_<全局序号>_<曝光毫秒>.png/.json；JSON记录frame_id、
+timestamp_s（Robot曝光时间）、pose、localization_epoch、source、box、mask。
+source取track/detection_init/trigger_init，初始化使用各自真实输入帧曝光信息，
+不将旧trigger时间伪装为当前时间。mask为{size:[h,w],order:C,encoding:rle,counts:[]}
+交替背景/前景游程，从背景开始，可无损还原；绘图为原尺寸RGB加mask和box。
+save_depth开启时同线程写同名前缀_depth.npy，JSON引用文件并标cm。
+主线程只复制数组/元数据并SimpleQueue入队，不执行绘制、压缩或磁盘IO；未设置
+队列背压/丢帧，因此长期磁盘阻塞会积压内存。降落和会话清理后close排空。
+后台异常记track_image_save_failed，不改变飞行逻辑。检测图片线程维持原逻辑。
+TRACK留图（含初始化帧）左上角统一绘制黑底黄色TRACK，仍由后台线程完成。
+2项留档测试通过（0.090 s）：RLE全空/全满/稀疏还原、曝光元数据/深度快照、
+慢盘入队不阻塞；68项Agent回归通过（18.831 s，logs/track_artifacts_agent.log），
+5项检测图片测试通过（0.482 s）。未部署或实飞，Robot无需修改。
