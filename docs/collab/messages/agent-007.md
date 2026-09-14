@@ -103,3 +103,11 @@ diff check通过。无需Robot接口变更，未部署实飞。
 正常一次通过无额外等待，action_sleep_s不变。新增arrival_recheck_started/passed事件。
 65 项回归通过（18.639 s），包括5.17→4.85°恢复、持续超限、安全异常不重试；
 日志logs/arrival_recheck_agent.log，diff check通过。无Robot代码变更，未部署实飞。
+
+同轮独立FPV录像：新增run_record_fpv.bat和scripts/record_fpv.py。用户已验证FFmpeg
+RTSP录制正常，默认rtsp://192.168.2.20:8554/live/0，TCP/原编码/MKV，自动命名
+fpv_时间.mkv及同名.log于Documents/QGroundControl/Video。可用--url、--output-dir、
+--ffmpeg覆盖。不启动Agent或运控，不修改相机/QGC。Ctrl+C由Python处理，隔离
+FFmpeg进程组，输入q并等15 s收尾；超时强制退出并提示文件可能不完整，不自动重连。
+测试test_record_fpv.py用真实FFmpeg合成流模拟Ctrl+C，成功收尾并全片解码无错，
+1项通过（1.663 s），未连接实际相机、未实飞。Robot无需改动。

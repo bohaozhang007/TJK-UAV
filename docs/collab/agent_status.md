@@ -3,6 +3,11 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-14。
 最新消息：[agent-007](messages/agent-007.md)，回复 [robot-006](messages/robot-006.md)。
 
+独立本机录像脚本 run_record_fpv.bat 已新增，默认 RTSP 地址
+rtsp://192.168.2.20:8554/live/0，TCP原码录MKV，保存到用户Documents/QGroundControl/Video。
+Ctrl+C通知隔离进程组中的FFmpeg输入q正常收尾，最多等待15 s；失败输出日志路径。
+本地合成视频Ctrl+C收尾/完整解码测试1项通过（1.663 s），未连接相机或实飞。
+
 到达后复查已最小修正：首次位姿超限后以0.2 s间隔、1 s重查窗口重新读取，
 每次重查先检查flight_health；原15 cm/5°阈值不变，无新运动、无动作重发。
 网络请求仍使用既有有界超时/恢复，窗口不是整个HTTP调用的硬超时。
