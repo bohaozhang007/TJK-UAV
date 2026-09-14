@@ -11,6 +11,22 @@ from replace_detection_frames import (fit_clock, synchronize, load_records,
 
 
 class SynchronizationTests(unittest.TestCase):
+    def test_timestamp_resolves_static_scene_with_precise_clock(self):
+        rng = np.random.default_rng(73)
+        matrix = rng.normal(size=(1201, 64)).astype(np.float32)
+        matrix /= np.linalg.norm(matrix, axis=1, keepdims=True)
+        slots = np.array([100, 300, 500, 700, 900, 1100])
+        queries = matrix[slots].copy()
+        # A static burst cannot provide an exact visual frame, but has a capture timestamp.
+        matrix[497:504] = queries[2]
+        records = [dict(timestamp_s=1000. + i * 20, image='unused', kind='track') for i in range(6)]
+        report = synchronize(records, queries, matrix, np.arange(1201) / 10, .94, .01)
+        row = report['frames'][2]
+        # The earliest identical frame should not contaminate the clock fit.
+        self.assertEqual(row['status'], 'matched')
+        self.assertEqual(row['video_frame'], 500)
+        self.assertEqual(row['frame_selection'], 'calibrated_timestamp')
+
     def test_cli_default_and_custom_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

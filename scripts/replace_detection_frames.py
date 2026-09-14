@@ -11,8 +11,9 @@ All image types, including track, require paired JSON with timestamp_s (image ca
 Unix seconds, on the same clock as detection metadata). Images are resolved using
 image_file or the JSON stem (track_00.json -> track_00.png, for example).
 All timestamped images share one clock-and-visual alignment pipeline. Images without
-metadata are reported and skipped; there is no visual-only fallback. Static/ambiguous
-matches and unsupported clock discontinuities are conservatively rejected.
+metadata are reported and skipped; there is no visual-only fallback. Static scenes
+use the nearest calibrated timestamp when clock residuals are within half a frame
+and the predicted frame is visually consistent. Unresolved ambiguity is rejected.
 Output is H.264 MP4, resampled to source nominal FPS using decoded timestamps;
 each accepted image occupies one frame. This is an offline visualization tool,
 not a guarantee of exact sensor synchronization. Distorted/cropped images or
@@ -155,7 +156,9 @@ def synchronize(records, queries, matrix, times, min_score, min_margin):
     for i, k in enumerate(peaks):
         outside = np.abs(times - times[k]) > 2.
         margin = float(scores[i, k] - scores[i, outside].max()) if outside.any() else 0.
-        if scores[i, k] >= min_score and margin >= min_margin:
+        tied = np.flatnonzero((~outside) & (scores[i] >= scores[i, k] - 1e-6))
+        # Identical peaks do not establish the clock, even when the scene is globally unique.
+        if scores[i, k] >= min_score and margin >= min_margin and np.ptp(times[tied]) <= .2:
             strong.append(i)
     if len(strong) < 4:
         raise ValueError(f'Only {len(strong)} unambiguous visual anchors')
@@ -168,6 +171,9 @@ def synchronize(records, queries, matrix, times, min_score, min_margin):
         raise ValueError('Conflicting anchors: possible timestamp discontinuity; manual review needed')
     lo, hi = float(x[anchors].min()), float(x[anchors].max())
     residuals = times[peaks[anchors]] - (a * x[anchors] + b)
+    residual_p95 = float(np.percentile(np.abs(residuals), 95))
+    frame_interval = float(np.median(np.diff(times)))
+    clock_precise = residual_p95 <= frame_interval / 2
     output = []
     for i, record in enumerate(records):
         pred = float(a * x[i] + b)
@@ -180,16 +186,25 @@ def synchronize(records, queries, matrix, times, min_score, min_margin):
         else:
             k = int(window[np.argmax(scores[i, window])])
             score = float(scores[i, k])
-            # Flat local maxima are temporally ambiguous even with a good clock fit.
+            # A precise clock can disambiguate static scenes with known capture times.
             plausible = window[scores[i, window] >= score - .001]
             ambiguity = float(np.ptp(times[plausible]))
+            clock_selected = False
+            if ambiguity > .2 and clock_precise:
+                nearest = int(window[np.argmin(np.abs(times[window] - pred))])
+                if (abs(times[nearest] - pred) <= frame_interval and
+                        scores[i, nearest] >= min_score and scores[i, nearest] >= score - .001):
+                    k = nearest
+                    score = float(scores[i, k])
+                    clock_selected = True
             row.update(video_frame=k, video_s=float(times[k]), score=score,
-                       local_ambiguity_s=ambiguity)
+                       local_ambiguity_s=ambiguity,
+                       frame_selection='calibrated_timestamp' if clock_selected else 'visual_peak')
             if score < min_score:
                 row['reason'] = 'low visual similarity'
             elif abs(times[k] - pred) > .3:
                 row['reason'] = 'visual match disagrees with clock fit'
-            elif ambiguity > .2:
+            elif ambiguity > .2 and not clock_selected:
                 row['reason'] = 'repetitive or static scene'
             else:
                 row['status'] = 'matched'
@@ -197,7 +212,8 @@ def synchronize(records, queries, matrix, times, min_score, min_margin):
     return dict(timestamp_origin_s=origin, clock_scale=a, video_offset_s=b,
                 formula='video_s = clock_scale * (timestamp_s - timestamp_origin_s) + video_offset_s',
                 anchor_count=len(anchors), anchor_span_s=[lo, hi],
-                anchor_residual_p95_s=float(np.percentile(np.abs(residuals), 95)), frames=output)
+                anchor_residual_p95_s=residual_p95, clock_precise_to_half_frame=clock_precise,
+                frames=output)
 
 
 def render(video, output, report, times, fps, ffmpeg):
@@ -315,6 +331,12 @@ def main(argv=None):
     if not args.analyze_only:
         render(args.video, args.output, report, times, fps, args.ffmpeg)
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        for kind in sorted({r.get('kind', 'snapshot') for r in report['frames']}):
+            rows = [r for r in report['frames'] if r.get('kind', 'snapshot') == kind]
+            inserted = sum(r['status'] == 'matched' for r in rows)
+            superseded = sum(r['status'] == 'superseded' for r in rows)
+            print(f'{kind}: {inserted} replaced, {superseded} same-frame duplicates, '
+                  f'{len(rows) - inserted - superseded} skipped', flush=True)
     print(f'Report: {report_path}', flush=True)
 
 
