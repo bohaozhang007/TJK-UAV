@@ -26,16 +26,22 @@ mission:
   # the OWL navigation system and the Agent safety limit before deployment.
   waypoints:
     - name: waypoint_1
-      x_cm: 500.0
+      x_cm: 400.0
       y_cm: 0.0
       z_cm: 0.0
       yaw_deg: 0.0
 
-    # - name: waypoint_2
-    #   x_cm: 0.0
-    #   y_cm: -150.0
-    #   z_cm: 0.0
-    #   yaw_deg: 0.0
+    - name: waypoint_2
+      x_cm: 200.0
+      y_cm: 0.0
+      z_cm: 0.0
+      yaw_deg: 90.0
+
+    - name: waypoint_3
+      x_cm: 300.0
+      y_cm: 500.0
+      z_cm: 0.0
+      yaw_deg: 90.0
 
 
 # Motion limits and pixel-error conversion used while tracking the target.
