@@ -98,6 +98,29 @@ class GeometryTests(unittest.TestCase):
 
 
 class MemoryTests(unittest.TestCase):
+    def test_each_dedup_pose_can_be_disabled_independently(self):
+        keys=('dedup_use_detection','dedup_use_reacquire','dedup_use_track')
+        positions=([0,0,100],[300,0,100],[600,0,100])
+        for bits in range(8):
+            options={key:bool(bits & (1<<i)) for i,key in enumerate(keys)}
+            memory=TargetMemory(100,**options)
+            record=memory.claim(positions[0])
+            record.reacquire_position_cm=list(positions[1])
+            memory.finish(record,True,position=positions[2])
+            for i,position in enumerate(positions):
+                self.assertEqual(memory.nearest(position) is record,options[keys[i]])
+
+    def test_reacquire_pose_participates_in_dedup_and_resets_on_retry(self):
+        memory=TargetMemory(100)
+        record=memory.claim([0,0,100])
+        record.reacquire_position_cm=[600,0,100]
+        memory.finish(record,True,position=[300,0,100])
+        self.assertIsNone(memory.claim([699,0,100]))
+        self.assertIsNone(memory.nearest([700,0,100]))
+        memory.finish(record,False)
+        self.assertIs(memory.claim([650,0,100]),record)
+        self.assertIsNone(record.reacquire_position_cm)
+
     def test_completed_target_matches_either_pose_strictly_within_one_meter(self):
         memory = TargetMemory(100)
         record = memory.claim([0,0,100])
@@ -363,6 +386,7 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(len(rows),1)
         self.assertEqual(rows[0]['position_cm'],'(2.00, 2.00, 100.00)')
         self.assertEqual(rows[0]['track_position_cm'],'(4.57, 2.00, 100.00)')
+        self.assertEqual(rows[0]['reacquire_position_cm'],'null')
         self.assertEqual(rows[0]['detection_count'],'3')
         self.assertEqual(rows[0]['attempts'],'2')
         self.assertEqual(rows[0]['status'],'completed')
@@ -372,6 +396,10 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(rows[0]['phase'],record.phase)
         self.assertEqual(rows[0]['finished_at'],record.finished_at)
         self.assertFalse(path.with_suffix('.csv.tmp').exists())
+        record.reacquire_position_cm=[3.456,2,100]
+        self.agent._write_targets_csv()
+        with path.open(encoding='utf-8-sig',newline='') as stream:
+            self.assertEqual(next(csv.DictReader(stream))['reacquire_position_cm'],'(3.46, 2.00, 100.00)')
 
     def test_csv_uses_robot_target_instead_of_before_plus_action(self):
         self.client.motion_targets['global-z']=dict(x=100.,y=20.,z=105.,yaw=179.)

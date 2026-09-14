@@ -4,7 +4,7 @@
 # Runtime timing and Robot request limits.
 runtime:
   # Wait after every motion action before reading the resulting pose (seconds).
-  action_sleep_s: 0.2
+  action_sleep_s: 0.01
   # Timeout for individual blocking TRACK movements; route navigation is asynchronous.
   motion_timeout_s: 15.0
   # --http-timeout-s can override this for one run without changing the YAML.
@@ -26,19 +26,19 @@ mission:
   # the OWL navigation system and the Agent safety limit before deployment.
   waypoints:
     - name: waypoint_1
-      x_cm: 400.0
+      x_cm: 500.0
       y_cm: 0.0
       z_cm: 0.0
       yaw_deg: 0.0
 
     - name: waypoint_2
-      x_cm: 200.0
+      x_cm: 400.0
       y_cm: 0.0
       z_cm: 0.0
       yaw_deg: 90.0
 
     - name: waypoint_3
-      x_cm: 300.0
+      x_cm: 400.0
       y_cm: 500.0
       z_cm: 0.0
       yaw_deg: 90.0
@@ -65,6 +65,7 @@ motion:
   # Yaw action.
   max_rotate_deg: 30.0 # 45.0
   rotate_deg_per_pixel: 0.1
+  
   # OWL supports yaw control without an added forward component.
   pure_rotate_forward_cm: 0.0
 
@@ -182,6 +183,10 @@ patrol:
   observation_max_age_s: 0.5
   observation_max_sync_error_s: 0.05
   dedup_distance_cm: 100.0
+  # Positions used for spatial deduplication; all false disables deduplication.
+  dedup_use_detection: true
+  dedup_use_reacquire: true
+  dedup_use_track: true
   # Failed targets can be revisited immediately on a new patrol detection.
   # After these SAM3 attempts fail, seed SAM2 from the trigger image and box.
   reacquire_attempts: 3

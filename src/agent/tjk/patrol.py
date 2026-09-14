@@ -76,22 +76,27 @@ class TargetRecord:
     phase: str = ""
     finished_at: str = ""
     track_position_cm: list | None = None
+    reacquire_position_cm: list | None = None
 
 
 class TargetMemory:
     """One mission/epoch; only pending and completed targets suppress visits."""
-    def __init__(self, distance_cm=100.0):
+    def __init__(self, distance_cm=100.0, *, dedup_use_detection=True,
+                 dedup_use_reacquire=True, dedup_use_track=True):
         self.distance_cm = distance_cm
+        self.dedup_positions = tuple(key for key, enabled in (
+            ("position_cm", dedup_use_detection),
+            ("reacquire_position_cm", dedup_use_reacquire),
+            ("track_position_cm", dedup_use_track)) if enabled)
         self.records = []
 
     def nearest(self, position):
         if not self.records:
             return None
         def distance(record):
-            poses = [record.position_cm]
-            if record.track_position_cm is not None:
-                poses.append(record.track_position_cm)
-            return min(np.linalg.norm(np.asarray(pose)-position) for pose in poses)
+            poses = [getattr(record, key) for key in self.dedup_positions]
+            return min((np.linalg.norm(np.asarray(pose)-position)
+                        for pose in poses if pose is not None), default=float("inf"))
         record = min(self.records, key=distance)
         return record if distance(record) < self.distance_cm else None
 
@@ -111,6 +116,7 @@ class TargetMemory:
             existing.attempts += 1
             existing.position_cm = np.asarray(position).tolist()
             existing.track_position_cm = None
+            existing.reacquire_position_cm = None
             existing.tracking_source = existing.finished_at = ""
             return existing
         record = TargetRecord(len(self.records)+1, np.asarray(position).tolist())

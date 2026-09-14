@@ -37,10 +37,15 @@ def validate_patrol_config(config):
         "min_depth_pixels": (1, 1000000, True), "max_relative_depth_mad": (0, 1, False),
         "box_core_ratio": (0.01, 1, False),
     }
-    if set(section) != set(spec):
+    switches = {"dedup_use_detection", "dedup_use_reacquire", "dedup_use_track"}
+    if set(section)-switches != set(spec):
         raise ValueError(f"Invalid patrol keys: missing={set(spec)-set(section)}, "
-                         f"unknown={set(section)-set(spec)}")
+                         f"unknown={set(section)-set(spec)-switches}")
     parsed = {}
+    for key in switches:
+        parsed[key] = section.get(key, True)
+        if type(parsed[key]) is not bool:
+            raise ValueError(f"patrol.{key} must be boolean")
     for key, (minimum, maximum, integer) in spec.items():
         parsed[key] = v20._config_number(section, key, minimum=minimum,
                                        maximum=maximum, integer=integer)
@@ -58,7 +63,8 @@ class PatrolAgent(v20.TJKAgent):
     def __init__(self, *, config, **kwargs):
         self.patrol = validate_patrol_config(config)
         super().__init__(config=config, **kwargs)
-        self.memory = TargetMemory(self.patrol["dedup_distance_cm"])
+        self.memory = TargetMemory(self.patrol["dedup_distance_cm"], **{
+            key: self.patrol[key] for key in ("dedup_use_detection", "dedup_use_reacquire", "dedup_use_track")})
         self.pipeline = None
         self.active_navigation = None
         self.capture_observation = None
@@ -81,7 +87,7 @@ class PatrolAgent(v20.TJKAgent):
     def _write_targets_csv(self):
         path = self.event_path.with_name("targets.csv")
         temporary = path.with_suffix(".csv.tmp")
-        fields = ["target_id", "position_cm", "track_position_cm", "status", "first_detected_at",
+        fields = ["target_id", "position_cm", "reacquire_position_cm", "track_position_cm", "status", "first_detected_at",
                   "last_detected_at", "detection_count", "attempts",
                   "tracking_source", "phase", "finished_at"]
         try:
@@ -89,9 +95,9 @@ class PatrolAgent(v20.TJKAgent):
                 writer = csv.DictWriter(stream, fieldnames=fields)
                 writer.writeheader()
                 for record in self.memory.snapshot():
-                    for key in ("position_cm", "track_position_cm"):
+                    for key in ("position_cm", "reacquire_position_cm", "track_position_cm"):
                         pose = record[key]
-                        record[key] = "(" + ", ".join(f"{v:.2f}" for v in pose) + ")" if pose is not None else ""
+                        record[key] = "(" + ", ".join(f"{v:.2f}" for v in pose) + ")" if pose is not None else ("null" if key == "reacquire_position_cm" else "")
                     writer.writerow(record)
             temporary.replace(path)
         except OSError as exc:
@@ -179,7 +185,8 @@ class PatrolAgent(v20.TJKAgent):
     def connect(self):
         # A fresh session establishes fresh world coordinates and target memory.
         result = super().connect()
-        self.memory = TargetMemory(self.patrol["dedup_distance_cm"])
+        self.memory = TargetMemory(self.patrol["dedup_distance_cm"], **{
+            key: self.patrol[key] for key in ("dedup_use_detection", "dedup_use_reacquire", "dedup_use_track")})
         self.capture_observation = None
         self._write_targets_csv()
         return result
@@ -414,6 +421,7 @@ class PatrolAgent(v20.TJKAgent):
                 self.event("reacquired", target_id=record.target_id,
                            frame_id=obs.frame_id, position_cm=refined.tolist())
                 record.tracking_source = "detection"
+                record.reacquire_position_cm = refined.tolist()
                 self._write_targets_csv()
                 if matches[0].get("detection_image"):
                     self.detection_images.mark_tracking_source(

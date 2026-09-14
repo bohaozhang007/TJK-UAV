@@ -81,3 +81,17 @@ track_position_cm 两位小数三元组列，空值留空。无 Robot 接口变�
 61 项 Agent 回归通过（17.854 s，logs/dual_pose_agent.log），覆盖双位置任一命中、
 100 cm边界、CSV两列、结束位置相距300 cm仍完成及深度无效仍完成；diff check通过。
 未实飞、未部署，历史日志未改写。
+
+同轮新增重检位置：TargetRecord.reacquire_position_cm 记录 _reacquire 成功匹配后
+使用该新曝光帧、DA3 与 SAM2 mask 精化的世界位置。无成功重检则 None，CSV列写
+null；放在 position_cm 与 track_position_cm 之间。nearest 对三个有效位置取最小
+距离，任一小于100 cm匹配；失败重试清空旧重检/结束位置，其他成功状态语义保持。
+62 项 Agent 回归通过（17.878 s，logs/three_pose_agent.log），含仅重检位置命中、
+100 cm边界、重试清空及CSV的null/两位小数。diff check通过，未部署实飞。
+
+同轮去重来源配置：patrol 增加 dedup_use_detection/reacquire/track 三个布尔开关，
+默认true，旧配置缺省也true；非法非布尔值拒绝。仅所选且非空的位置参与nearest，
+三项全false不做空间去重。记录三个位置的计算不变，重检时的身份验证仍保留，
+不将去重开关解释为放弃重检验证。构造与新会话重建memory均读取配置。
+63 项Agent测试通过（17.784 s），含全部8种开关组合，logs/dedup_switches_agent.log；
+diff check通过。无需Robot接口变更，未部署实飞。

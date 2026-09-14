@@ -3,6 +3,18 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-14。
 最新消息：[agent-007](messages/agent-007.md)，回复 [robot-006](messages/robot-006.md)。
 
+去重来源开关已加入 Agent v21 YAML patrol：dedup_use_detection、
+dedup_use_reacquire、dedup_use_track，均默认true，缺省也兼容true。仅启用的位置
+参与去重，三项全false关闭空间去重；位置仍计算记录，重检身份验证不受这些开关控制。
+阈值沿用dedup_distance_cm=100.0，严格小于。63 项测试通过（17.784 s），
+日志 logs/dedup_switches_agent.log；未实飞。
+
+目标位置现扩展为三个：检测 position_cm、重检 reacquire_position_cm、TRACK结束
+track_position_cm。重检位置使用返回后新帧与 SAM2 mask/DA3 精化且通过匹配的位置，
+没有成功重检时为 None，targets.csv 对应列写 null。任一位置距离小于100 cm即匹配。
+失败目标重新访问时清空上次重检/结束位置。62 项 Agent 回归通过（17.878 s），
+日志 logs/three_pose_agent.log；未实飞。
+
 最新目标语义：position_cm 保留本次触发检测位置，新增 track_position_cm 保存
 TRACK 成功后的估计位置。空间匹配取两位置中的最小距离，严格小于100 cm算同目标。
 TRACK 成功不再被结束位置差距或 TargetGeometryError 改判失败；无法估计时第二位置
