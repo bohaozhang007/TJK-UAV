@@ -3,6 +3,12 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-14。
 最新消息：[agent-007](messages/agent-007.md)，回复 [robot-006](messages/robot-006.md)。
 
+到达后复查已最小修正：首次位姿超限后以0.2 s间隔、1 s重查窗口重新读取，
+每次重查先检查flight_health；原15 cm/5°阈值不变，无新运动、无动作重发。
+网络请求仍使用既有有界超时/恢复，窗口不是整个HTTP调用的硬超时。
+持续超限或安全异常仍失败。65 项Agent测试通过（18.639 s），
+logs/arrival_recheck_agent.log；未部署实飞。
+
 去重来源开关已加入 Agent v21 YAML patrol：dedup_use_detection、
 dedup_use_reacquire、dedup_use_track，均默认true，缺省也兼容true。仅启用的位置
 参与去重，三项全false关闭空间去重；位置仍计算记录，重检身份验证不受这些开关控制。

@@ -540,6 +540,27 @@ class MissionTests(unittest.TestCase):
         with self.assertRaises(FlightSafetyError):
             self.agent._verify_arrival(dict(x=1000,y=0,z=100,yaw=0))
 
+    def test_arrival_recheck_recovers_boundary_jitter_without_motion(self):
+        target=dict(x=0,y=0,z=100,yaw=0)
+        self.agent._get_pose_for_flight=Mock(side_effect=[dict(target,yaw=5.17),dict(target,yaw=4.85)])
+        self.agent._ensure_flight_safety=Mock()
+        before=list(self.client.calls)
+        with patch('agent.tjk.v21.time.sleep') as sleep:
+            actual=self.agent._verify_arrival(target)
+        self.assertEqual(actual['yaw'],4.85)
+        sleep.assert_called_once_with(0.2)
+        self.agent._ensure_flight_safety.assert_called_once()
+        self.assertEqual(self.client.calls,before)
+
+    def test_arrival_recheck_does_not_retry_safety_failure(self):
+        target=dict(x=0,y=0,z=100,yaw=0)
+        self.agent._get_pose_for_flight=Mock(return_value=dict(target,yaw=5.17))
+        self.agent._ensure_flight_safety=Mock(side_effect=FlightSafetyError('operator takeover'))
+        with patch('agent.tjk.v21.time.sleep'):
+            with self.assertRaisesRegex(FlightSafetyError,'operator takeover'):
+                self.agent._verify_arrival(target)
+        self.agent._get_pose_for_flight.assert_called_once()
+
     def test_config_rejects_legacy_semantics_and_nonfinite_values(self):
         for key,value in (("capture_fps",float('nan')), ("det_interval",0), ("det_interval",1.5)):
             config=copy.deepcopy(self.config)

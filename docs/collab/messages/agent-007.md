@@ -95,3 +95,11 @@ null；放在 position_cm 与 track_position_cm 之间。nearest 对三个有效
 不将去重开关解释为放弃重检验证。构造与新会话重建memory均读取配置。
 63 项Agent测试通过（17.784 s），含全部8种开关组合，logs/dedup_switches_agent.log；
 diff check通过。无需Robot接口变更，未部署实飞。
+
+同轮到达复查：11:44:30运行中Robot已arrived/stopped，yaw误差4.85°，Agent随后
+单次采样5.17°导致异常降落。现_verify_arrival首次超限后每0.2 s只读重查，1 s窗口，
+每次复查先检查flight_health，容差不变、不重发导航、不发送纠偏动作；窗口内恢复
+则继续，持续超限或安全异常失败。HTTP读取仍沿用既有超时，因此不是端到端1 s硬期限。
+正常一次通过无额外等待，action_sleep_s不变。新增arrival_recheck_started/passed事件。
+65 项回归通过（18.639 s），包括5.17→4.85°恢复、持续超限、安全异常不重试；
+日志logs/arrival_recheck_agent.log，diff check通过。无Robot代码变更，未部署实飞。

@@ -386,12 +386,26 @@ class PatrolAgent(v20.TJKAgent):
         raise v20.FlightSafetyError(f"Navigation timed out: {context}")
 
     def _verify_arrival(self, target):
-        actual = self._get_pose_for_flight("verify arrival")
-        distance = np.linalg.norm([actual[k]-target[k] for k in ("x", "y", "z")])
-        yaw_error = abs(self._normalize_angle_deg(actual["yaw"]-target["yaw"]))
-        if distance > self.position_tolerance_cm or yaw_error > self.yaw_tolerance_deg:
-            raise v20.FlightSafetyError(f"Arrival outside tolerances: {distance}cm/{yaw_error}deg")
-        return actual
+        # Robot already confirmed arrived/stopped. Allow brief boundary jitter
+        # in our later pose sample without changing tolerances or replaying motion.
+        deadline = None
+        while True:
+            if deadline is not None:
+                self._ensure_flight_safety("arrival recheck")
+            actual = self._get_pose_for_flight("verify arrival")
+            distance = np.linalg.norm([actual[k]-target[k] for k in ("x", "y", "z")])
+            yaw_error = abs(self._normalize_angle_deg(actual["yaw"]-target["yaw"]))
+            if distance <= self.position_tolerance_cm and yaw_error <= self.yaw_tolerance_deg:
+                if deadline is not None:
+                    self.event("arrival_recheck_passed", position_error_cm=float(distance), yaw_error_deg=yaw_error)
+                return actual
+            now = time.monotonic()
+            if deadline is None:
+                deadline = now + 1.0
+                self.event("arrival_recheck_started", position_error_cm=float(distance), yaw_error_deg=yaw_error)
+            if now >= deadline:
+                raise v20.FlightSafetyError(f"Arrival outside tolerances after recheck: {distance}cm/{yaw_error}deg")
+            time.sleep(min(0.2, deadline-now))
 
     def _reacquire(self, record):
         for _ in range(self.patrol["reacquire_attempts"]):
