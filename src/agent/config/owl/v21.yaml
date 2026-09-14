@@ -32,13 +32,13 @@ mission:
       yaw_deg: 0.0
 
     - name: waypoint_2
-      x_cm: 400.0
+      x_cm: 350.0
       y_cm: 0.0
       z_cm: 0.0
       yaw_deg: 90.0
 
     - name: waypoint_3
-      x_cm: 400.0
+      x_cm: 350.0
       y_cm: 500.0
       z_cm: 0.0
       yaw_deg: 90.0
