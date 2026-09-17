@@ -137,3 +137,13 @@ TRACK留图（含初始化帧）左上角统一绘制黑底黄色TRACK，仍由�
 2项留档测试通过（0.090 s）：RLE全空/全满/稀疏还原、曝光元数据/深度快照、
 慢盘入队不阻塞；68项Agent回归通过（18.831 s，logs/track_artifacts_agent.log），
 5项检测图片测试通过（0.482 s）。未部署或实飞，Robot无需修改。
+
+同轮20:13过期观测修复：原decode后的age+请求解码耗时检查移入循环，单帧传输后
+过期则丢弃，在原observation_retry_s期限（若已有真实网络恢复则原2 s上限）内重取。
+不刷新期限，不延长0.5 s新鲜度；无效源帧/标定/同步数据继续失败，epoch/尺寸变化
+在重试前立即拒绝。预算耗尽由observe锁存错误；恢复期间_observation_ready清除，
+新运动暂停，心跳/取消/降落保持独立。收到响应已超预算不再被误分类为传输故障
+而扩展为2 s。记录observation_stale_discarded的age_s/request_decode_s/total_age_s/
+max_age_s/attempt/remaining_s。70项测试通过（19.171 s），包含过期后新帧成功、
+持续过期预算不扩展以及原通信回归，logs/stale_frame_retry_agent.log；diff check通过。
+无需Robot更新，未实飞。请求临近期限才过期时可能没有足够时间成功获取下一帧。

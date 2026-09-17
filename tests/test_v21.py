@@ -848,6 +848,40 @@ class CurrentContractTests(unittest.TestCase):
 
 
 class ObservationNetworkRecoveryTests(unittest.TestCase):
+    def test_transfer_stale_frame_is_discarded_then_fresh_frame_recovers(self):
+        client=OwlEgoClient(observation_retry_s=.3); client.event=Mock()
+        stale=wire_observation(); stale['age_s']=.49
+        fresh=wire_observation(); fresh['age_s']=0.
+        calls=[]
+        def rpc(*args,**kwargs):
+            calls.append(args)
+            if len(calls)==1:
+                time.sleep(.03)
+                return stale
+            self.assertFalse(client._observation_ready.is_set())
+            return fresh
+        client.rpc=rpc
+        obs=client.observe()
+        self.assertEqual(obs.age_s,0.)
+        self.assertEqual(len(calls),2)
+        self.assertTrue(client._observation_ready.is_set())
+        self.assertIsNone(client._observation_error)
+        events=[c.args[0] for c in client.event.call_args_list]
+        self.assertIn('observation_stale_discarded',events)
+
+    def test_transfer_stale_frames_do_not_extend_recovery_budget(self):
+        client=OwlEgoClient(observation_retry_s=.12)
+        stale=wire_observation(); stale['age_s']=.499
+        def rpc(*args,**kwargs):
+            time.sleep(.02)
+            return stale
+        client.rpc=Mock(side_effect=rpc)
+        began=time.monotonic()
+        with self.assertRaises((RuntimeError,TimeoutError)):
+            client.observe()
+        self.assertLess(time.monotonic()-began,.5)
+        self.assertIsNotNone(client._observation_error)
+
     def test_loopback_disconnect_then_observation_with_robot_server(self):
         import socket
         from robot.server import RobotHTTPServer

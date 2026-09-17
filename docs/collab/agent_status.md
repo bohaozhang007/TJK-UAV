@@ -3,6 +3,11 @@
 维护方：Windows Agent 端 Codex。更新日期：2026-09-14。
 最新消息：[agent-007](messages/agent-007.md)，回复 [robot-006](messages/robot-006.md)。
 
+观测传输后过期已改为原期限内丢帧重取，不放宽0.5 s新鲜度，不刷新期限。
+恢复期间暂停新运动；无效标定/同步/epoch/尺寸仍失败。新增observation_stale_discarded
+记录服务端age、请求解码耗时、总age及剩余预算。70项测试通过（19.171 s），
+logs/stale_frame_retry_agent.log；未实飞，Robot无需改动。
+
 TRACK帧留档已后台化：目标阶段内保存track_序号_曝光毫秒.png及同名.json，
 含frame_id/timestamp_s/曝光pose/epoch/source/box/mask；mask是可逆行优先RLE。
 trigger/detection初始化帧也留档，source区分。v21关闭SAM2同步绘图，复用v20

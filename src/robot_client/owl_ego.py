@@ -552,9 +552,6 @@ class OwlEgoClient(BaseClient):
             try:
                 data = self.rpc("GET", "/v21/observation",
                                 timeout_s=min(0.5, deadline-started))
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Observation response exceeded recovery budget")
-                break
             except Exception as exc:
                 transport = self._transport_failure(exc)
                 transient = (isinstance(exc, RobotHTTPError) and exc.status == 503
@@ -568,12 +565,31 @@ class OwlEgoClient(BaseClient):
                            elapsed_s=time.monotonic()-began,
                            remaining_s=deadline-time.monotonic())
                 time.sleep(0.05)
-        obs = decode_observation(data,
+                continue
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Observation response exceeded recovery budget")
+            obs = decode_observation(data,
                                  max_age_s=self.observation_max_age_s,
                                  max_sync_error_s=self.observation_max_sync_error_s,
                                  allow_approximate_geometry=self.allow_approximate_geometry)
-        if obs.age_s + time.monotonic() - started > self.observation_max_age_s:
-            raise RuntimeError("Observation is stale after network transfer")
+            if self._frame_identity is not None and (obs.world_frame, obs.localization_epoch) != self._frame_identity:
+                raise RuntimeError("Localization frame/epoch changed; mission must abort")
+            if self._image_shape is not None and self._image_shape != obs.rgb.shape:
+                raise RuntimeError("RGB resolution changed during mission")
+            elapsed = time.monotonic() - started
+            if obs.age_s + elapsed <= self.observation_max_age_s:
+                break
+            self._observation_ready.clear()
+            remaining = deadline - time.monotonic()
+            self.event("observation_stale_discarded", frame_id=obs.frame_id,
+                       age_s=obs.age_s, request_decode_s=elapsed,
+                       total_age_s=obs.age_s+elapsed, max_age_s=self.observation_max_age_s,
+                       attempt=attempts, remaining_s=max(0., remaining))
+            if remaining <= 0:
+                raise RuntimeError("Observation is stale after network transfer; recovery budget exhausted")
+            # Do not refresh either deadline or promote a stale frame to a
+            # transport failure (which has a separate two-second allowance).
+            time.sleep(min(0.05, remaining/2))
         identity = (obs.world_frame, obs.localization_epoch)
         if self._frame_identity is None:
             self._frame_identity = identity
