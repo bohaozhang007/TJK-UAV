@@ -1,5 +1,5 @@
 """POST /detect: base64 image + reference_image, box_xyxy, optional frame_id.
-Returns top-three boxes, confidence > 0.5 and original-image masks (row-major RLE).
+Returns top-three boxes after NMS, confidence > 0.5 and original-image masks (row-major RLE).
 """
 import argparse
 import base64

@@ -7,6 +7,14 @@ from PIL import Image
 
 
 class Sam3Detector:
+    nms_iou_threshold = 0.8
+
+    @staticmethod
+    def box_iou(a, b):
+        overlap = max(0., min(a[2], b[2]) - max(a[0], b[0])) * max(0., min(a[3], b[3]) - max(a[1], b[1]))
+        union = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - overlap
+        return overlap / union if union > 0 else 0.
+
     def __init__(self, model_root, checkpoint, device="cuda"):
         root, checkpoint = Path(model_root).resolve(), Path(checkpoint).resolve()
         if not root.is_dir() or not checkpoint.is_file():
@@ -82,6 +90,10 @@ class Sam3Detector:
             clipped = [float(np.clip(x1, tx1, tx2) - tx1), float(np.clip(y1, ty1, ty2) - ty1),
                        float(np.clip(x2, tx1, tx2) - tx1), float(np.clip(y2, ty1, ty2) - ty1)]
             if clipped[2] <= clipped[0] or clipped[3] <= clipped[1]:
+                continue
+            # Within-frame NMS before top3, matching v21's 0.80 box-IoU rule.
+            if any(Sam3Detector.box_iou(clipped, item['box']) >= Sam3Detector.nms_iou_threshold
+                   for item in results):
                 continue
             # Copy only selected instance masks, cropped to target-frame pixels.
             mask = masks[int(index), ty1:ty2, tx1:tx2].detach().cpu().numpy()

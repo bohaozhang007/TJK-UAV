@@ -1,3 +1,34 @@
-# Task framework is pending. Distances are metres, measured along planned paths.
+# Run on OWL: app/run_agent_v22.sh --detector-host WINDOWS_IP --img reference.jpg --box reference.txt
+robot:
+  type: owl_ego
+  url: http://127.0.0.1:8765
+  allow_approximate_geometry: true
+  attach_timeout_s: 120.0
+  stop_timeout_s: 8.0
+  preview_timeout_s: 12.0
+  navigation_timeout_s: 180.0
+  min_target_voxels: 2
+  target_depth_gap_m: 0.3
+detector:
+  port: 8790
+  timeout_s: 20.0
+runtime:
+  read_attempts: 2
+  retry_delay_s: 0.5
+safety:
+  safe_z_cm: 20.0 # Same world-height floor as v21; orbit Z = max(this, target Z).
 patrol:
   detection_stop_interval_m: 1.0
+  dedup_distance_cm: 100.0
+  waypoint_tolerance_cm: 10.0
+  max_stops_per_waypoint: 100
+orbit:
+  radius_m: 1.0
+  dwell_s: 1.0
+mission:
+  # Relative to the initial post-console-takeoff hover, including its yaw.
+  # Zero Z keeps that hover altitude. Public Y is right; yaw is clockwise.
+  waypoints:
+    - {x_cm: 500.0, y_cm: 0.0, z_cm: 0.0, yaw_deg: 0.0}
+    - {x_cm: 350.0, y_cm: 0.0, z_cm: 0.0, yaw_deg: 90.0}
+    - {x_cm: 350.0, y_cm: 500.0, z_cm: 0.0, yaw_deg: 90.0}
