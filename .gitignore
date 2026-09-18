@@ -5,7 +5,3 @@ __pycache__/
 /assets/
 # Runtime artifacts.
 /logs/
-/captures/
-/test_*/
-/tjk_vis*/
-/.log*/
