@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run after console init/takeoff. Required: --detector-host IP --img FILE --box FILE
+# Run after console init/takeoff. Required: --detector-host IP
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

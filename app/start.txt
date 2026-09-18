@@ -1,7 +1,7 @@
 win: 
 t0 - Detector
 cd ~\Desktop\project\TJK-UAV
-.\app\run_detector.bat --det sam3
+.\app\run_detector.bat --det sam3 --target moli3
 
 uav: 
 t0 - bridge
@@ -22,4 +22,4 @@ wait
 
 t3 - Agent
 cd ~/TJK-UAV
-bash app/run_agent_v22.sh --detector-host WINDOWS_IP --img assets/moli3.jpg --box assets/moli3.txt
+bash app/run_agent_v22.sh --detector-host WINDOWS_IP

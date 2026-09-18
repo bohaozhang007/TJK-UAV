@@ -1,6 +1,5 @@
 """Stop-and-detect mission. All physical operations use the public Robot interface."""
 import argparse
-import base64
 import enum
 import json
 import math
@@ -90,23 +89,13 @@ def stopping_point(path, goal, interval_cm, tolerance_cm):
 
 
 class Detector:
-    def __init__(self, url, image, box):
+    def __init__(self, url):
         self.url = url.rstrip('/') + '/detect'
-        self.reference = base64.b64encode(Path(image).read_bytes()).decode()
-        self.box = [float(v) for v in Path(box).read_text(encoding='utf-8').split()]
-        if len(self.box) != 4:
-            raise ValueError('reference box requires x1 y1 x2 y2')
-        with Image.open(image) as reference:
-            x1, y1, x2, y2 = self.box
-            if (not all(math.isfinite(v) for v in self.box)
-                    or not 0 <= x1 < x2 <= reference.width or not 0 <= y1 < y2 <= reference.height):
-                raise ValueError('reference box is outside the reference image')
         self.timeout = DETECTOR_TIMEOUT_S
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def detect(self, obs):
-        body = dict(image=obs.jpeg_base64, reference_image=self.reference,
-                    box_xyxy=self.box, frame_id=obs.frame_id)
+        body = dict(image=obs.jpeg_base64, frame_id=obs.frame_id)
         request = urllib.request.Request(self.url, json.dumps(body).encode(), {'Content-Type': 'application/json'})
         with self.http.open(request, timeout=self.timeout) as response:
             data = json.load(response)
@@ -416,8 +405,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, default=Path(__file__).resolve().parents[1]/'config/v22.yaml')
     parser.add_argument('--detector-host', required=True, help='Windows detector IP')
-    parser.add_argument('--img', type=Path, required=True, help='reference image on this machine')
-    parser.add_argument('--box', type=Path, required=True, help='reference xyxy pixel box text file')
     parser.add_argument('--output', type=Path, default=Path('logs')/('v22_'+time.strftime('%Y%m%d_%H%M%S')))
     args = parser.parse_args()
     with args.config.open(encoding='utf-8') as file:
@@ -427,7 +414,7 @@ def main():
         robot = create_robot(config['localization'])
     except (ValueError,KeyError,TypeError) as exc:
         parser.error(str(exc))
-    detector = Detector(f'http://{args.detector_host}:{DETECTOR_PORT}', args.img, args.box)
+    detector = Detector(f'http://{args.detector_host}:{DETECTOR_PORT}')
     Mission(robot, detector, config, args.output).run()
 
 
