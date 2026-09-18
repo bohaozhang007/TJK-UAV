@@ -1,0 +1,50 @@
+{
+  "info": {
+    "description": "SAM3 Annotator COCO RLE export",
+    "sam3_annotator": true
+  },
+  "licenses": [],
+  "images": [
+    {
+      "id": 1,
+      "file_name": "../../moli3.jpg",
+      "width": 1706,
+      "height": 1279
+    }
+  ],
+  "annotations": [
+    {
+      "id": 1,
+      "image_id": 1,
+      "category_id": 1,
+      "segmentation": {
+        "size": [
+          1279,
+          1706
+        ],
+        "counts": "jZRQ1>]W1>D;oiNjNeT1k1\\jNeN1?[T1i2G4L5K4K4N2GeKjlN^4PS1<I7L5M2M3M2O101N100O1000001N10000000001O01O0000000000001O1N2O1N104kJ]mNe4SS1L5J2O1N2N2N2N3M3L3N3L4J6K6fM_lNMeT1kNlkN4cNNmfVo0"
+      },
+      "area": 8973,
+      "bbox_xyxy": [
+        847,
+        374,
+        907,
+        555
+      ],
+      "bbox": [
+        847.0,
+        374.0,
+        60.0,
+        181.0
+      ],
+      "iscrowd": 0
+    }
+  ],
+  "categories": [
+    {
+      "id": 1,
+      "name": "object",
+      "supercategory": ""
+    }
+  ]
+}

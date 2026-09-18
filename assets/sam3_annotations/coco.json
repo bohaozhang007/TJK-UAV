@@ -1,0 +1,114 @@
+{
+  "info": {
+    "description": "SAM3 Annotator COCO RLE export",
+    "sam3_annotator": true
+  },
+  "licenses": [],
+  "images": [
+    {
+      "id": 1,
+      "file_name": "../moli.jpg",
+      "width": 1706,
+      "height": 1279
+    },
+    {
+      "id": 2,
+      "file_name": "../moli2.jpg",
+      "width": 1706,
+      "height": 1279
+    },
+    {
+      "id": 3,
+      "file_name": "../moli3.jpg",
+      "width": 1706,
+      "height": 1279
+    }
+  ],
+  "annotations": [
+    {
+      "id": 1,
+      "image_id": 1,
+      "category_id": 1,
+      "segmentation": {
+        "size": [
+          1279,
+          1706
+        ],
+        "counts": "jfUP1?e27[Q17WlNUOf1n0mQ1j0]lN[N6L1V1WS1U3M3M3L4M2N3M1O2N1O1N2O1N2O1^OUKkmNP5PR1b0N2O2N1O1O1O10000O101O000000000000O100000000O101O000O2O1N2O1N2O3Le0[O3M4L2N1N4M2N3L3M4]NflNZN^S1X1\\mNWNjR1R1^2D=F;CWfjo0"
+      },
+      "area": 10729,
+      "bbox_xyxy": [
+        824,
+        475,
+        890,
+        674
+      ],
+      "bbox": [
+        824.0,
+        475.0,
+        66.0,
+        199.0
+      ],
+      "iscrowd": 0
+    },
+    {
+      "id": 2,
+      "image_id": 2,
+      "category_id": 1,
+      "segmentation": {
+        "size": [
+          1279,
+          1706
+        ],
+        "counts": "RUaS1=`W1:A>@=E:_O?G9F:^Oa0@a0WOh0L4M4L3N3M2N3M2O1N3M2O1O2N1O1O1O1O1O101N1O1_OVJlnNk5oP1e0L4O1O1O1O010O10000000000000O1000001N100O1O1O1N3M2O2N2L3O2M4M3M2`JXnNe4lQ1VKYnNm3G]LkR1U3mmN[LYR1W3`1C<H9C=]Od0C<J7K4L5J7GkSok0"
+      },
+      "area": 12708,
+      "bbox_xyxy": [
+        910,
+        383,
+        989,
+        605
+      ],
+      "bbox": [
+        910.0,
+        383.0,
+        79.0,
+        222.0
+      ],
+      "iscrowd": 0
+    },
+    {
+      "id": 3,
+      "image_id": 3,
+      "category_id": 1,
+      "segmentation": {
+        "size": [
+          1279,
+          1706
+        ],
+        "counts": "jZRQ1>]W1>D;oiNjNeT1k1\\jNeN1?[T1i2G4L5K4K4N2GeKjlN^4PS1<I7L5M2M3M2O101N100O1000001N10000000001O01O0000000000001O1N2O1N104kJ]mNe4SS1L5J2O1N2N2N2N3M3L3N3L4J6K6fM_lNMeT1kNlkN4cNNmfVo0"
+      },
+      "area": 8973,
+      "bbox_xyxy": [
+        847,
+        374,
+        907,
+        555
+      ],
+      "bbox": [
+        847.0,
+        374.0,
+        60.0,
+        181.0
+      ],
+      "iscrowd": 0
+    }
+  ],
+  "categories": [
+    {
+      "id": 1,
+      "name": "object",
+      "supercategory": ""
+    }
+  ]
+}
