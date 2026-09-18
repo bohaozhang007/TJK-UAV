@@ -1,0 +1,3 @@
+# Task framework is pending. Distances are metres, measured along planned paths.
+patrol:
+  detection_stop_interval_m: 1.0
