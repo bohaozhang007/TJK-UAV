@@ -16,6 +16,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import PointCloud2, Image, Imu
 from app.robot.sensor_geometry import CameraPreflight
+from app.robot.config_loader import load_robot_config
 from std_msgs.msg import String, Empty, Int32
 from owl_nav_v22.srv import Command, CommandResponse
 from owl_nav_v22.core import FlightCore, Polynomial, Rejected, validate_terminal_stop
@@ -27,13 +28,10 @@ from owl_nav_v22.cloud import validate as validate_cloud
 
 class Node:
     def __init__(self):
-        with open(rospy.get_param('~config')) as f:
-            self.c = yaml.safe_load(f)
+        self.c = load_robot_config('owl_ego', rospy.get_param('~config'))
         self.lock = threading.RLock()
         self.camera_preflight = CameraPreflight(self.c)
-        self.core = FlightCore(self.c['control'],
-                              global_z_enabled=self.c.get('global_z_enabled', False),
-                              vertical_tolerance_enabled=self.c.get('vertical_tolerance_enabled', False))
+        self.core = FlightCore(self.c['control'])
         self.frames = Frames(self.c['control'].get('mavros_frame_profile','standard_enu'))
         with open(self.c['planner']['parameters']) as f:
             planner_params=yaml.safe_load(f)

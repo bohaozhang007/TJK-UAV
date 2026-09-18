@@ -8,7 +8,7 @@ import threading
 import time
 import numpy as np
 import rospy
-import yaml
+from app.robot.config_loader import load_robot_config
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2
@@ -22,7 +22,7 @@ def main():
     p.add_argument('--output')
     a=p.parse_args()
     if not 2<=a.duration<=30:p.error('duration must be 2..30 seconds')
-    cfg=yaml.safe_load(Path(a.config).read_text())
+    cfg=load_robot_config('owl_ego',a.config)
     if cfg['control'].get('mavros_frame_profile')!='owl_vendor_world':
         p.error('this report checks the owl_vendor_world profile')
     rospy.init_node('owl_frame_check',anonymous=True,disable_signals=True)

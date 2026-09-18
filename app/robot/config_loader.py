@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -28,7 +29,20 @@ def load_robot_config(
         raise RuntimeError(f"Failed to load Robot config: {path}") from exc
     if not isinstance(config, dict):
         raise ValueError(f"Robot config must be a mapping: {path}")
+    if name == 'owl_ego':
+        from .owl_ego.defaults import DEFAULTS
+        return _merge(DEFAULTS, config)
     return config
+
+
+def _merge(defaults, overrides):
+    result = deepcopy(defaults)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
 
 
 def required_section(config: Mapping[str, Any], key: str) -> dict[str, Any]:

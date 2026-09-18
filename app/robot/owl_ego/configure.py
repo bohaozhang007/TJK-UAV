@@ -28,7 +28,7 @@ params.update({'fsm/realworld_experiment':True,'fsm/fail_safe':False,
 # Depth topics are private and unused; fx/fy above are never observation calibration.
 (ws/'planner.yaml').write_text(yaml.safe_dump(params,sort_keys=True))
 config_path=root/'app/robot/config/owl_ego.yaml'
-config_text=config_path.read_text()
+config_text=config_path.read_text(encoding='utf-8')
 c=yaml.safe_load(config_text)
 binary=ws/'devel/lib/ego_planner/ego_planner_node'
 c['planner'].update(executable=str(binary),sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
@@ -39,5 +39,5 @@ updated,count=re.subn(r'^planner:\n.*?(?=^[^\s#]|\Z)',lambda _:planner_block,
                       config_text,flags=re.MULTILINE|re.DOTALL)
 if count != 1:
     raise RuntimeError('Expected one top-level planner section in Robot config')
-config_path.write_text(updated)
+config_path.write_text(updated,encoding='utf-8')
 print('Robot configuration (planner artifacts refreshed):',config_path)

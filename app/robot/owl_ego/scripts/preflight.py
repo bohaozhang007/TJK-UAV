@@ -8,18 +8,18 @@ import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[4]))
 from app.robot.controllers.owl_ego_observation import camera_intrinsics,fixed_optical_rotation
+from app.robot.config_loader import load_robot_config
 from types import SimpleNamespace
 import rospy
 import rosgraph
 from sensor_msgs.msg import CameraInfo,Image,PointCloud2
 from nav_msgs.msg import Odometry
 from mavros_msgs.msg import State,ExtendedState
-import yaml
 p=argparse.ArgumentParser()
 p.add_argument('--config',required=True)
 p.add_argument('--require-flight-ready',action='store_true')
 a=p.parse_args()
-with open(a.config) as f:c=yaml.safe_load(f)
+c=load_robot_config('owl_ego',a.config)
 rospy.init_node('owl_ego_readonly_preflight',anonymous=True,disable_signals=True)
 report={'ros_master':os.environ.get('ROS_MASTER_URI'),'errors':[],'warnings':[],'sensors':{}}
 report['mavros_frame_profile']=c['control'].get('mavros_frame_profile','standard_enu')

@@ -1,0 +1,25 @@
+win: 
+t0 - Detector
+cd ~\Desktop\project\TJK-UAV
+.\app\run_detector.bat --det sam3
+
+uav: 
+t0 - bridge
+cd ~/TJK-UAV
+bash app/robot/owl_ego/build.sh # First use only.
+bash app/run_owl_ego.sh bridge
+
+t1 - server
+cd ~/TJK-UAV
+bash app/run_owl_ego.sh server
+
+t2 - Console
+cd ~/TJK-UAV
+bash app/run_owl_ego_console.sh
+init
+takeoff
+wait
+
+t3 - Agent
+cd ~/TJK-UAV
+bash app/run_agent_v22.sh --detector-host WINDOWS_IP --img assets/moli3.jpg --box assets/moli3.txt

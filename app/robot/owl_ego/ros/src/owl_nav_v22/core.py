@@ -55,16 +55,10 @@ def validate_terminal_stop(trajectory, goal):
 
 
 class FlightCore:
-    def __init__(self, config, *, global_z_enabled=False, vertical_tolerance_enabled=False):
+    def __init__(self, config):
         config = dict(config)
-        config.pop('global_z_enabled', None)
-        self.motion_options = dict(global_z_enabled=global_z_enabled, vertical_tolerance_enabled=vertical_tolerance_enabled)
-        if any(type(v) is not bool for v in self.motion_options.values()):
-            raise ValueError("Z options must be booleans")
-        # Retired setting: old deployment YAML must not restore the Z-only gate.
-        config.pop('vertical_tolerance_m', None)
         for key,value in config.items():
-            if key in ('flight_enabled','failsafe_validated','sensors_validated','global_z_enabled'):
+            if key in ('flight_enabled','failsafe_validated','sensors_validated'):
                 if type(value) is not bool:
                     raise ValueError(key+' must be boolean')
             elif key == 'mavros_frame_profile':
@@ -277,8 +271,6 @@ class FlightCore:
         if t['kind'] == 'land':
             return
         good = (self.enabled and self.mode == 'OFFBOARD' and self.armed and self.airborne and self.stopped and np.linalg.norm(self.pose[:3]-np.array(t['goal'][:3])) <= self.c['position_tolerance_m']
-                and (not self.motion_options['vertical_tolerance_enabled']
-                     or abs(self.pose[2]-t['goal'][2]) <= 0.08)
                 and abs(wrap(yaw-t['goal'][3])) <= self.c['yaw_tolerance_rad'])
         if good:
             self.hold = np.array(t['goal'])
@@ -467,19 +459,13 @@ class FlightCore:
                 self.invalidate()
                 t.update(status='stopping', stopped=False)
             return {'ok': True, 'task_id': tid}
-        retain_altitude = False
         if op == 'relative':
             relative = data.get('relative')
             if not isinstance(relative,list) or len(relative)!=4 or not finite(relative) or self.pose is None:
                 raise Rejected('invalid relative movement')
             x,y,z,yaw = relative
-            # A zero Z command keeps the established hold reference. Rebasing
-            # it on measured altitude accumulates a persistent hover error.
-            retain_altitude = z == 0 and self.hold is not None
-            if self.motion_options['global_z_enabled'] and self.hold is not None:
-                altitude = float(self.hold[2]) + z
-            else:
-                altitude = float(self.hold[2]) if retain_altitude else self.pose[2]+z
+            # Use the held altitude reference to avoid accumulating hover error.
+            altitude = float(self.hold[2] if self.hold is not None else self.pose[2]) + z
             c,s = math.cos(self.pose[3]),math.sin(self.pose[3])
             data = dict(data,goal=[self.pose[0]+c*x-s*y,self.pose[1]+s*x+c*y,
                                    altitude,wrap(self.pose[3]+yaw)])

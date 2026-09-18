@@ -1,176 +1,76 @@
-# ===== Z CONTROL OPTIONS (Robot; restart bridge + HTTP after changes) =====
-# Accumulate relative dz on the retained world target Z instead of measured Z.
-global_z_enabled: true
-# Add an independent 8 cm Z arrival constraint to the 15 cm 3D tolerance.
-vertical_tolerance_enabled: false
-
-queries:
-  preview_timeout_s: 12.0
-controller:
-  motion_timeout_s: 15.0
-  takeoff_timeout_s: 60.0
-  landing_timeout_s: 90.0
-hardware:
-  bridge_timeout_s: 1.0
-  rgb_max_age_s: 0.4
-  sync_max_s: 0.05
-  long_edge_px: 640
-  intrinsics_mode: configured_calibration
-  calibration:
-    image_size:
-    - 1280
-    - 720
-    K:
-    - - 697.4651534182339
-      - 0.0
-      - 620.5961334574399
-    - - 0.0
-      - 697.2569487112386
-      - 387.86385915688874
-    - - 0.0
-      - 0.0
-      - 1.0
-    D:
-    - -0.0035654592874208844
-    - 0.00789647714740566
-    - 0.0007123365403213933
-    - -0.000556373229472051
-    - -0.015200276049590199
-    distortion_model: plumb_bob
-  camera_optical_frame: camera_link
-  extrinsics_mode: sensor_geometry
+camera_preflight:
+  pitch_range_deg: [18, 21]
 
 control:
-  # Vendor world odometry -> map setpoint rotation; not a camera offset.
-  mavros_frame_profile: owl_vendor_world
-  flight_enabled: true
-  # Set true only after validating PX4 offboard-loss action on this firmware.
-  failsafe_validated: true
-  sensors_validated: true
-  control_hz: 50.0
-  odom_timeout_s: 0.5
-  state_timeout_s: 2.0
-  planner_timeout_s: 1.0
-  planning_timeout_s: 10.0
-  task_timeout_s: 120.0
-  trajectory_grace_s: 5.0
+  takeoff_height_m: 1
+  takeoff_speed_m_s: 0.3
+  yaw_rate_rad_s: 0.523598776 # 30 deg/s
+
+  position_tolerance_m: 0.15
+  yaw_tolerance_rad: 0.0872664626 # 5 deg
+
+  # Allowed pose span = rate threshold * stable_duration_s.
+  stop_speed_m_s: 0.1
+  stop_yaw_rate_rad_s: 0.0872664626
+  stable_duration_s: 0.5
+
+  # Motion limits and localization resets.
+  max_speed_m_s: 2
+  max_acceleration_m_s2: 3
+  max_tracking_error_m: 0.5
+  world_limit_m: 30
   reset_jump_m: 0.5
   reset_yaw_rad: 0.7853981634
-  max_speed_m_s: 2.0
-  max_acceleration_m_s2: 3.0
-  max_tracking_error_m: 0.5
-  world_limit_m: 30.0
-  position_tolerance_m: 0.15
-  yaw_tolerance_rad: 0.0872664626
-  # Pose stability: allowed XYZ/yaw span = these rates * stable_duration_s.
-  # Raw odometry twist remains diagnostic; it does not gate stopped.
-  stop_speed_m_s: 0.10
-  stop_yaw_rate_rad_s: 0.0872664626
-  stable_samples: 5
-  stable_duration_s: 0.5
-  yaw_rate_rad_s: 0.523598776
-  takeoff_height_m: 1.0
-  takeoff_max_lead_m: 0.2
-  takeoff_progress_timeout_s: 10.0
-  takeoff_speed_m_s: 0.3
-  cloud_timeout_s: 0.5
-  cloud_sync_max_s: 0.1
-  world_frame: world
-planner:
-  # Local EGO build artifacts; configure.py refreshes only this section.
-  executable: /home/visbot/owl_ego_v22_ws/devel/lib/ego_planner/ego_planner_node
-  sha256: ""
-  parameters: /home/visbot/owl_ego_v22_ws/planner.yaml
-  commit: 9d85475ea7b9bf5c112cf7c3c3d0d3f9e96d9010
-topics:
-  odom: /mavros/local_position/odom
-  rgb: /visbot_media_g/gimbal_camera/image_raw
-  gimbal_imu: /gimbal_controller/imu
-  camera_info: /visbot_media_g/gimbal_camera/camera_info
-  state: /mavros/state
-  extended_state: /mavros/extended_state
-  cloud: /ego_planner_node/grid_map/cloud
-  localization_reset: /owl_ego_v22/localization_reset
-  vision_pose_reset: /mavros/vision_pose/pose_reset
-  bridge_status: /owl_ego_v22/status
-  command: /owl_ego_v22/command
-  setpoint: /mavros/setpoint_raw/local
 
-# Measured intrinsics + user-accepted tentative extrinsics; not pixel-validated.
-camera_preflight:
-  profile: owl_fixed_gimbal
-  pitch_range_deg:
-  - 18.0
-  - 21.0
-  max_age_s: 0.5
+  # Deployment authorization.
+  flight_enabled: true
+  failsafe_validated: true
+  sensors_validated: true
+
+hardware:
+  long_edge_px: 640
+
+  # Update after camera calibration.
+  calibration:
+    image_size: [1280, 720]
+    K:
+      - [697.4651534182339, 0, 620.5961334574399]
+      - [0, 697.2569487112386, 387.86385915688874]
+      - [0, 0, 1]
+    D: [-0.0035654592874208844, 0.00789647714740566, 0.0007123365403213933, -0.000556373229472051, -0.015200276049590199]
+    distortion_model: "plumb_bob"
+
+# Update after sensor calibration. Translations: m; T_target_from_source.
 sensor_geometry:
-  profile_id: owl_20260918_candidate
-  quality: approximate
-  units: m
-  frames:
-    camera_optical: camera_link
-    lidar: livox_frame
-    imu: flight_controller_imu_flu
-    body: base_link
-  axes:
-    camera_optical: right, down, forward
-    imu: forward, left, up
-    body: forward, left, up
-  source: calibration/owl_20260918/sensor_extrinsics.yaml
+  profile_id: "owl_20260918_candidate"
+  quality: "approximate"
+  source: "calibration/owl_20260918/sensor_extrinsics.yaml"
   limitations:
-  - User accepted tentative extrinsic; box edges still differ by roughly 10-22 pixels.
-  - body_from_imu identity is an odometry reference assumption, not independently
-    measured.
-  - Fixed gimbal feedback around 20 degrees; no dynamic gimbal transform.
-  - imu_from_lidar is the fixed FAST-LIO configuration, rounded to 6 decimals.
+    - "User accepted tentative extrinsic; box edges still differ by roughly 10-22 pixels."
+    - "body_from_imu identity is an odometry reference assumption, not independently measured."
+    - "Fixed gimbal feedback around 20 degrees; no dynamic gimbal transform."
+    - "imu_from_lidar is the fixed FAST-LIO configuration, rounded to 6 decimals."
+
   imu_from_lidar:
-  - - -0.907428
-    - 0.011099
-    - 0.420061
-    - 0.000814
-  - - -0.005456
-    - -0.999878
-    - 0.014634
-    - 0.02823
-  - - 0.420172
-    - 0.010988
-    - 0.907378
-    - 0.103396
-  - - 0.0
-    - 0.0
-    - 0.0
-    - 1.0
+    - [-0.907428, 0.011099, 0.420061, 0.000814]
+    - [-0.005456, -0.999878, 0.014634, 0.02823]
+    - [0.420172, 0.010988, 0.907378, 0.103396]
+    - [0, 0, 0, 1]
+
   camera_optical_from_lidar:
-  - - 0.004224738413535757
-    - 0.999936059513905
-    - -0.010486477713868325
-    - -0.0075016113718002
-  - - -0.10168198227439049
-    - -0.010003031233914727
-    - -0.9947667687600313
-    - -0.17333226260621643
-  - - -0.994807910488295
-    - 0.005268308925843537
-    - 0.10163337107900848
-    - -0.09743231153412382
-  - - 0.0
-    - 0.0
-    - 0.0
-    - 1.0
+    - [0.004224738413535757, 0.999936059513905, -0.010486477713868325, -0.0075016113718002]
+    - [-0.10168198227439049, -0.010003031233914727, -0.9947667687600313, -0.17333226260621643]
+    - [-0.994807910488295, 0.005268308925843537, 0.10163337107900848, -0.09743231153412382]
+    - [0, 0, 0, 1]
+
   body_from_imu:
-  - - 1.0
-    - 0.0
-    - 0.0
-    - 0.0
-  - - 0.0
-    - 1.0
-    - 0.0
-    - 0.0
-  - - 0.0
-    - 0.0
-    - 1.0
-    - 0.0
-  - - 0.0
-    - 0.0
-    - 0.0
-    - 1.0
+    - [1, 0, 0, 0]
+    - [0, 1, 0, 0]
+    - [0, 0, 1, 0]
+    - [0, 0, 0, 1]
+
+# Updated by the build script.
+planner:
+  executable: "/home/visbot/owl_ego_v22_ws/devel/lib/ego_planner/ego_planner_node"
+  sha256: ""
+  parameters: "/home/visbot/owl_ego_v22_ws/planner.yaml"

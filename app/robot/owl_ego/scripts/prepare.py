@@ -58,7 +58,7 @@ def handover(graph, sample, shutdown, clock=time.monotonic, sleep=time.sleep):
 
 
 def main():
-    import yaml
+    from app.robot.config_loader import load_robot_config
     import rospy
     import rosgraph
     import rosnode
@@ -67,8 +67,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
     args = parser.parse_args()
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
+    config = load_robot_config('owl_ego', args.config)
     socket.setdefaulttimeout(2.)
     rospy.init_node('owl_ego_prepare', anonymous=True, disable_signals=True)
     lock = threading.Lock()

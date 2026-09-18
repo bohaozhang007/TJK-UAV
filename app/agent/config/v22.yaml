@@ -1,28 +1,9 @@
-# Hardware-independent mission parameters that may need field tuning.
-localization:
-  # Minimum supported occupied cells and foreground/background depth separation.
-  min_target_voxels: 2
-  target_depth_gap_m: 0.3
-
-safety:
-  safe_z_cm: 50.0 # Absolute world-height floor; orbit Z = max(this, target Z).
-
-patrol:
-  detection_stop_interval_m: 1.0
-  dedup_distance_cm: 100.0
-  waypoint_tolerance_cm: 30.0
-
-orbit:
-  radius_m: 1.0
-  dwell_s: 1.0
-
 mission:
   frame: takeoff_world
   position_unit: cm
   yaw_unit: deg
 
-  # Relative to the initial post-console-takeoff hover, including its yaw.
-  # Zero Z keeps that hover altitude. Public Y is right; yaw is clockwise.
+  # Origin/heading: initial hover. Y right; yaw clockwise; z=0 keeps hover height.
   waypoints:
     - name: waypoint_1
       x_cm: 500.0
@@ -41,3 +22,19 @@ mission:
       y_cm: 500.0
       z_cm: 0.0
       yaw_deg: 90.0
+
+safety:
+  safe_z_cm: 50.0 # World-height floor; orbit Z = max(this, target Z).
+
+patrol:
+  detection_stop_interval_m: 1.0
+  dedup_distance_cm: 100.0
+  waypoint_tolerance_cm: 30.0
+
+orbit:
+  radius_m: 1.0
+  dwell_s: 1.0
+
+localization:
+  min_target_voxels: 2
+  target_depth_gap_m: 0.3 # Depth gap between surface groups.
