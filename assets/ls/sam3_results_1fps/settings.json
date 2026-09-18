@@ -1,0 +1,15 @@
+{
+  "fps": 1.0,
+  "confidence_threshold": 0.3,
+  "nms_iou": 0.5,
+  "top_k": 3,
+  "red_box_threshold_exclusive": 0.5,
+  "layout": "frame above reference; reference scaled to frame width",
+  "frame_size": [
+    960,
+    720
+  ],
+  "annotations_in_model_input": false,
+  "checkpoint": "C:\\Users\\colab999\\Desktop\\project\\sam3\\sam3.pt",
+  "total_frames": 183
+}
