@@ -254,6 +254,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         body = self._read_json_body() if self.command == "POST" else {}
         params = self._request_params(query, body)
 
+        if path in ('/sensor_geometry', '/v21/sensor_geometry'):
+            if self.command != 'GET':
+                self._json_response(405, dict(ok=False,error='method not allowed'))
+                return
+            from .sensor_geometry import sensor_geometry
+            try:
+                config = getattr(self.controller, 'sensor_geometry_config',
+                                 getattr(self.controller, 'config', {}))
+                self._json_response(200, dict(ok=True,sensor_geometry=sensor_geometry(config)))
+            except (ValueError, KeyError, TypeError) as exc:
+                self._json_response(503, dict(ok=False,error_code='sensor_geometry_unavailable',error=str(exc)))
+            return
+
         if getattr(self.controller, "backend", None) == "owl_ego":
             try:
                 result = self.controller.handle_http(self.command, path, body if self.command == "POST" else params,
@@ -531,6 +544,17 @@ def run_console(
 
 
 def build_controller(
+    robot: str,
+    image_dir: str,
+    config_path: str | Path | None = None,
+) -> RobotController:
+    config = load_robot_config(robot, config_path)
+    controller = _build_controller(robot, image_dir, config_path)
+    controller.sensor_geometry_config = config
+    return controller
+
+
+def _build_controller(
     robot: str,
     image_dir: str,
     config_path: str | Path | None = None,

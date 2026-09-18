@@ -1,0 +1,144 @@
+# User-accepted tentative extrinsics, 2026-09-18; not pixel-accuracy validated.
+# IMU is the flight-controller IMU reference (FLU), not the internal Livox IMU.
+profile_id: owl_20260918_candidate
+status: user_accepted_tentative
+quality: approximate
+units: m
+direction: P_target = T_target_from_source @ P_source (homogeneous)
+frames:
+  camera_optical: camera_link
+  lidar: livox_frame
+  imu: flight_controller_imu_flu
+  body: base_link
+axes:
+  camera_optical: right, down, forward
+  imu: forward, left, up
+  body: forward, left, up
+gimbal_feedback_pitch_deg: 20.0
+lidar_intrinsics_status: No independent LiDAR intrinsic calibration performed; factory
+  parameters used.
+limitations:
+- User accepted tentative extrinsic; box edges still differ by roughly 10-22 pixels.
+- body_from_imu identity is an odometry reference assumption, not independently measured.
+- Fixed gimbal feedback around 20 degrees; no dynamic gimbal transform.
+- imu_from_lidar is the fixed FAST-LIO configuration, rounded to 6 decimals.
+R_camera_from_lidar:
+- - 0.004224738413535757
+  - 0.999936059513905
+  - -0.010486477713868325
+- - -0.10168198227439049
+  - -0.010003031233914727
+  - -0.9947667687600313
+- - -0.994807910488295
+  - 0.005268308925843537
+  - 0.10163337107900848
+t_camera_from_lidar_m:
+- -0.0075016113718002
+- -0.17333226260621643
+- -0.09743231153412382
+camera_position_in_imu_m:
+- 0.03649943176252045
+- 0.020195363692270984
+- -0.0921938702478517
+imu_from_lidar:
+- - -0.907428
+  - 0.011099
+  - 0.420061
+  - 0.000814
+- - -0.005456
+  - -0.999878
+  - 0.014634
+  - 0.02823
+- - 0.420172
+  - 0.010988
+  - 0.907378
+  - 0.103396
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+camera_optical_from_lidar:
+- - 0.004224738413535757
+  - 0.999936059513905
+  - -0.010486477713868325
+  - -0.0075016113718002
+- - -0.10168198227439049
+  - -0.010003031233914727
+  - -0.9947667687600313
+  - -0.17333226260621643
+- - -0.994807910488295
+  - 0.005268308925843537
+  - 0.10163337107900848
+  - -0.09743231153412382
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+imu_from_camera_optical:
+- - 0.002860137235967849
+  - -0.32570444967833806
+  - 0.9454673083056455
+  - 0.03649943176252049
+- - -0.9999906393440094
+  - -0.0040011998883583534
+  - 0.0016467008873174854
+  - 0.02019536369227097
+- - 0.0032466658821502957
+  - -0.9454631679019462
+  - -0.3257128448518197
+  - -0.09219387024785168
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+camera_optical_from_imu:
+- - 0.002860137235968119
+  - -0.9999906393440098
+  - 0.0032466658821504496
+  - 0.02039010395962029
+- - -0.3257044496783385
+  - -0.004001199888358124
+  - -0.9454631679019466
+  - -0.07519707560294021
+- - 0.9454673083056452
+  - 0.0016467008873172811
+  - -0.3257128448518194
+  - -0.06457100298283486
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+body_from_imu:
+- - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+- - 0.0
+  - 1.0
+  - 0.0
+  - 0.0
+- - 0.0
+  - 0.0
+  - 1.0
+  - 0.0
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+body_from_camera_optical:
+- - 0.002860137235967849
+  - -0.32570444967833806
+  - 0.9454673083056455
+  - 0.03649943176252049
+- - -0.9999906393440094
+  - -0.0040011998883583534
+  - 0.0016467008873174854
+  - 0.02019536369227097
+- - 0.0032466658821502957
+  - -0.9454631679019462
+  - -0.3257128448518197
+  - -0.09219387024785168
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0

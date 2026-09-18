@@ -1,0 +1,57 @@
+# Measured 1280x720 gimbal calibration, 2026-09-18. K applies to raw images with D.
+# Raw images require distortion correction; this file does not configure the factory driver.
+image_width: 1280
+image_height: 720
+camera_name: gimbal_camera
+camera_matrix:
+  rows: 3
+  cols: 3
+  data:
+  - 697.4651534182339
+  - 0.0
+  - 620.5961334574399
+  - 0.0
+  - 697.2569487112386
+  - 387.86385915688874
+  - 0.0
+  - 0.0
+  - 1.0
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data:
+  - -0.0035654592874208844
+  - 0.00789647714740566
+  - 0.0007123365403213933
+  - -0.000556373229472051
+  - -0.015200276049590199
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data:
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+projection_matrix:
+  rows: 3
+  cols: 4
+  data:
+  - 697.4651534182339
+  - 0.0
+  - 620.5961334574399
+  - 0.0
+  - 0.0
+  - 697.2569487112386
+  - 387.86385915688874
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  - 0.0

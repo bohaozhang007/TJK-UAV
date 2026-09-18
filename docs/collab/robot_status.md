@@ -1,9 +1,28 @@
 # Robot 端状态
 
-维护方：OWL Robot 端。更新：2026-09-11。
-最新回复：[robot-006](messages/robot-006.md)，对应 [agent-006](messages/agent-006.md)。
+维护方：OWL Robot 端。更新：2026-09-18。
+最新回复：[robot-007](messages/robot-007.md)，对应 [agent-007](messages/agent-007.md)。
 
 ## 当前结论
+
+标定结果已独立保存到 calibration/owl_20260918/（camera_intrinsics.yaml、sensor_extrinsics.yaml，
+共4139字节），含相机K/D和相机/雷达/飞控IMU变换，不含采集数据。运行配置参数已内嵌，
+source说明已指向仓库副本，不依赖gimbal_calibration目录；原始目录未移动或删除。
+
+新增传感器常驻消费脚本 `./run_sensor_heartbeat.sh`（owl.txt ter0），持续订阅并报告
+流量/时间戳活性，日志轮转，不保存图像点云、不自动重启驱动。5项离线测试通过。
+本轮只读试跑相机约10Hz、雷达0帧，独立hz检查雷达IMU也无消息；尚未修复雷达。
+已启动后台消费者（本次PID 129816，单实例锁有效），未设开机自启；详见robot-007。
+
+新增当前配置：owl.txt启动链路已接入图像/云台反馈起飞门禁（18–21°、0.5s新鲜度），
+并使用实测K/D及本次暂定外参，替代下文历史90°FOV/零杆臂/水平相机假设。
+统一GET /sensor_geometry返回相机、雷达、飞控IMU相对变换（米）；缺失返回503。
+OWL图像实际畸变校正，观测含相机杆臂，但quality仍approximate，像素验证尚未通过。
+Windows Agent旧decoder不支持新几何模式，需按robot-007适配后联调；未改Agent实现。
+本轮未重启bridge/server，未解锁/起飞，需落地后按owl.txt重载才生效。
+验证：170项既有Robot相关测试+8项新几何/门禁测试通过；现场只读反馈pitch=20.00337°，
+1280x720/camera_link图像符合新门禁，ready=true。完整ROS/Windows联调尚未重跑。
+
 
 22:15降落失败报告已定位：console在22:15:53.415输入land，53.444接管Agent同一个
 降落任务并换租约，解释Agent53.458 invalid session。Robot任务55.464到达，console

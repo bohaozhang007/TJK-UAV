@@ -1,3 +1,9 @@
+ter0（传感器常驻订阅，先启动并保持运行；Ctrl-C停止，不控制飞行）:
+cd /home/visbot/TJK-UAV
+./run_sensor_heartbeat.sh
+# 最新状态：cat logs/sensor_heartbeat/status.json
+# 只试跑15秒：./run_sensor_heartbeat.sh --duration 15
+
 ter1:
 cd /home/visbot/TJK-UAV
 ./run_owl_ego.sh bridge

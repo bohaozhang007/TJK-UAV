@@ -99,7 +99,7 @@ class OwlEgoController:
         return copy.deepcopy(entry['result'])
 
     def handle_http(self, method, path, data, *, local_operator=False):
-        gets = {'/v21/capabilities','/v21/observation','/v21/navigation/status',
+        gets = {'/v21/sensor_geometry','/sensor_geometry','/v21/capabilities','/v21/observation','/v21/navigation/status',
                 '/health','/get_pose','/motion_tolerances','/v21/motion_log'}
         posts = {'/v21/session','/v21/heartbeat','/v21/session/release',
                  '/v21/navigation','/v21/navigation/cancel','/init','/takeoff',
@@ -109,6 +109,9 @@ class OwlEgoController:
         if (method == 'GET') != (path in gets):
             raise ApiError('method not allowed',405)
         if method == 'GET':
+            if path in ('/sensor_geometry','/v21/sensor_geometry'):
+                from ..sensor_geometry import sensor_geometry
+                return dict(ok=True,sensor_geometry=sensor_geometry(self.config))
             if path == '/v21/motion_log':
                 if not local_operator:
                     raise ApiError('motion log is local only',403)
@@ -120,7 +123,8 @@ class OwlEgoController:
             if path == '/v21/capabilities':
                 return dict(ok=True,backend='owl_ego',protocol_version=1,async_navigation=True,
                             cancel_and_hold=True,synchronized_observation=True,
-                            control_lease=True,relative_xyz_yaw=True,software_takeoff=True,operator_override=True,operator_stop=True)
+                            control_lease=True,relative_xyz_yaw=True,software_takeoff=True,operator_override=True,operator_stop=True,
+                            sensor_geometry=True)
             if path == '/v21/observation':
                 result = self.observation()
                 with self.lock:

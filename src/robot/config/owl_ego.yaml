@@ -13,16 +13,30 @@ hardware:
   rgb_max_age_s: 0.4
   sync_max_s: 0.05
   long_edge_px: 640
-  # User-approved approximate geometry. 90 degrees is an INITIAL ASSUMPTION,
-  # not a measured OWL lens FOV; fx=fy=W/(2*tan(FOV/2)), cx=W/2, cy=H/2.
-  intrinsics_mode: approximate_fov
-  assumed_horizontal_fov_deg: 90.0
-  camera_optical_frame: ''
-  # User requests a horizontal, body-aligned camera approximation.
-  # This models pitch as zero; it does not command the physical gimbal.
-  extrinsics_mode: body_coincident_fixed
-  fixed_camera_pitch_deg: 0.0
-  body_from_camera_optical_rotation: null
+  intrinsics_mode: configured_calibration
+  calibration:
+    image_size:
+    - 1280
+    - 720
+    K:
+    - - 697.4651534182339
+      - 0.0
+      - 620.5961334574399
+    - - 0.0
+      - 697.2569487112386
+      - 387.86385915688874
+    - - 0.0
+      - 0.0
+      - 1.0
+    D:
+    - -0.0035654592874208844
+    - 0.00789647714740566
+    - 0.0007123365403213933
+    - -0.000556373229472051
+    - -0.015200276049590199
+    distortion_model: plumb_bob
+  camera_optical_frame: camera_link
+  extrinsics_mode: sensor_geometry
 
 control:
   # Vendor world odometry -> map setpoint rotation; not a camera offset.
@@ -69,6 +83,7 @@ planner:
 topics:
   odom: /mavros/local_position/odom
   rgb: /visbot_media_g/gimbal_camera/image_raw
+  gimbal_imu: /gimbal_controller/imu
   camera_info: /visbot_media_g/gimbal_camera/camera_info
   state: /mavros/state
   extended_state: /mavros/extended_state
@@ -78,3 +93,82 @@ topics:
   bridge_status: /owl_ego/status
   command: /owl_ego/command
   setpoint: /mavros/setpoint_raw/local
+
+# Measured intrinsics + user-accepted tentative extrinsics; not pixel-validated.
+camera_preflight:
+  profile: owl_fixed_gimbal
+  pitch_range_deg:
+  - 18.0
+  - 21.0
+  max_age_s: 0.5
+sensor_geometry:
+  profile_id: owl_20260918_candidate
+  quality: approximate
+  units: m
+  frames:
+    camera_optical: camera_link
+    lidar: livox_frame
+    imu: flight_controller_imu_flu
+    body: base_link
+  axes:
+    camera_optical: right, down, forward
+    imu: forward, left, up
+    body: forward, left, up
+  source: calibration/owl_20260918/sensor_extrinsics.yaml
+  limitations:
+  - User accepted tentative extrinsic; box edges still differ by roughly 10-22 pixels.
+  - body_from_imu identity is an odometry reference assumption, not independently
+    measured.
+  - Fixed gimbal feedback around 20 degrees; no dynamic gimbal transform.
+  - imu_from_lidar is the fixed FAST-LIO configuration, rounded to 6 decimals.
+  imu_from_lidar:
+  - - -0.907428
+    - 0.011099
+    - 0.420061
+    - 0.000814
+  - - -0.005456
+    - -0.999878
+    - 0.014634
+    - 0.02823
+  - - 0.420172
+    - 0.010988
+    - 0.907378
+    - 0.103396
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  camera_optical_from_lidar:
+  - - 0.004224738413535757
+    - 0.999936059513905
+    - -0.010486477713868325
+    - -0.0075016113718002
+  - - -0.10168198227439049
+    - -0.010003031233914727
+    - -0.9947667687600313
+    - -0.17333226260621643
+  - - -0.994807910488295
+    - 0.005268308925843537
+    - 0.10163337107900848
+    - -0.09743231153412382
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  body_from_imu:
+  - - 1.0
+    - 0.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 1.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0

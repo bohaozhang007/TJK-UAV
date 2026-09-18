@@ -87,7 +87,7 @@ try:
     from geometry_msgs.msg import TransformStamped,PoseStamped
     from mavros_msgs.msg import State,ExtendedState,PositionTarget
     from mavros_msgs.srv import SetMode,SetModeResponse,CommandBool,CommandBoolResponse
-    from sensor_msgs.msg import Image,CameraInfo,PointCloud2
+    from sensor_msgs.msg import Image,CameraInfo,PointCloud2,Imu
     from sensor_msgs import point_cloud2
     from std_msgs.msg import Header, String, Empty
     import tf2_ros
@@ -101,6 +101,14 @@ try:
     cfg['hardware'].update(intrinsics_mode='approximate_fov',extrinsics_mode='body_coincident_fixed',
                            fixed_camera_pitch_deg=0.,assumed_horizontal_fov_deg=90.,body_from_camera_optical_rotation=None)
     cfg['hardware']['camera_optical_frame']='mock_camera_optical'
+    cfg['hardware'].pop('calibration',None)  # synthetic 320x240 image, not the OWL lens
+    mock_body_camera=np.array([[0.,0.,1.,.1],[-1.,0.,0.,0.],[0.,-1.,0.,0.],[0.,0.,0.,1.]])
+    cfg['sensor_geometry']=dict(profile_id='isolated_mock',quality='approximate',units='m',
+        frames=dict(camera_optical='mock_camera_optical',lidar='mock_lidar',imu='mock_imu',body='base_link'),
+        imu_from_lidar=np.eye(4).tolist(),body_from_imu=np.eye(4).tolist(),
+        camera_optical_from_lidar=np.linalg.inv(mock_body_camera).tolist())
+    cfg['camera_preflight']=dict(profile='owl_fixed_gimbal',pitch_range_deg=[18.,21.],max_age_s=.5)
+    cfg['topics']['gimbal_imu']='/mock/gimbal_imu'
     config=temp/'config.yaml';config.write_text(yaml.safe_dump(cfg))
     diagnostics_process=None
     if a.record_diagnostics:
@@ -120,6 +128,7 @@ try:
     ext_pub=rospy.Publisher(topics['extended_state'],ExtendedState,queue_size=5)
     cloud_pub=rospy.Publisher(topics['cloud'],PointCloud2,queue_size=1)
     image_pub=rospy.Publisher(topics['rgb'],Image,queue_size=1)
+    gimbal_pub=rospy.Publisher(topics['gimbal_imu'],Imu,queue_size=1)
     info_pub=rospy.Publisher(topics['camera_info'],CameraInfo,queue_size=1)
     mock_lock=threading.Lock()
     xyz=np.zeros(3);yaw=0.;target=np.zeros(3);target_yaw=0.;mode='OFFBOARD';armed=True
@@ -249,6 +258,10 @@ try:
             odom_pub.publish(odom)
             while pending_maps and pending_maps[0][0]<=time.monotonic():map_pub.publish(pending_maps.pop(0)[1])
             state_pub.publish(State(header=header,connected=True,armed=is_armed,mode=current_mode))
+            gimbal_msg=Imu(header=header)
+            gimbal_msg.orientation.y=math.sin(math.radians(20.)/2)
+            gimbal_msg.orientation.w=math.cos(math.radians(20.)/2)
+            gimbal_pub.publish(gimbal_msg)
             if ext_enabled:
                 ext_pub.publish(ExtendedState(header=header,landed_state=landed_override if landed_override is not None else (2 if pos[2]>.05 else 1)))
             if seq%5==0:

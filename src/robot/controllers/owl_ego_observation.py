@@ -2,6 +2,7 @@
 import base64
 import math
 import numpy as np
+from ..sensor_geometry import sensor_geometry
 
 class ObservationUnavailable(ValueError):
     code = 503
@@ -93,6 +94,15 @@ def transform_sync_error(edges, source, target, stamp, maximum):
 def camera_intrinsics(hardware, image, info):
     """Return K, D, rectification truth and explicit source metadata."""
     mode = hardware.get('intrinsics_mode','camera_info')
+    if mode == 'configured_calibration':
+        from types import SimpleNamespace
+        c = hardware['calibration']
+        info = SimpleNamespace(width=c['image_size'][0],height=c['image_size'][1],
+            header=image.header,binning_x=0,binning_y=0,roi=SimpleNamespace(width=0,height=0),
+            K=c['K'],D=c['D'],distortion_model=c['distortion_model'])
+        k,d,rectified,geometry = camera_intrinsics(dict(intrinsics_mode='camera_info'),image,info)
+        geometry['intrinsics'] = 'configured_calibration'
+        return k,d,rectified,geometry
     if mode == 'approximate_fov':
         fov = hardware.get('assumed_horizontal_fov_deg')
         if isinstance(fov,bool) or not isinstance(fov,(int,float)) or not math.isfinite(fov) or not 1 < fov < 179:
@@ -158,6 +168,13 @@ def build_observation(hw):
         # User-authorized approximation: zero camera lever arm. Orientation is
         # independent of that approximation and must be explicitly supplied.
         body_camera[:3,:3] = fixed_optical_rotation(config['hardware'])
+    elif mode == 'sensor_geometry':
+        g = sensor_geometry(config)
+        if body != g['frames']['body'] or m.header.frame_id != g['frames']['camera_optical']:
+            raise ValueError('sensor geometry/image/odometry frame mismatch')
+        body_camera = np.asarray(g['body_from_camera_optical'])
+        geometry['profile_id'] = g['profile_id']
+        geometry['limitations'] = g.get('limitations', [])
     elif mode == 'tf':
         optical = config['hardware']['camera_optical_frame']
         if not optical or m.header.frame_id != optical:
@@ -192,11 +209,11 @@ def build_observation(hw):
     if not 0 <= hw.now_s()-stamp <= config['hardware']['rgb_max_age_s']:
         raise ObservationUnavailable('RGB expired during observation assembly')
     geometry['extrinsics'] = mode
-    geometry['camera_translation'] = 'body_coincident_assumption' if mode == 'body_coincident_fixed' else 'tf'
+    geometry['camera_translation'] = ('body_coincident_assumption' if mode == 'body_coincident_fixed'
+                                      else 'configured_sensor_geometry' if mode == 'sensor_geometry' else 'tf')
     quality = 'approximate' if not rectified or mode != 'tf' else 'calibrated'
     return dict(ok=True,calibration_quality=quality,geometry_assumptions=geometry,frame_id=epoch+':'+str(m.header.stamp.to_nsec()),timestamp_s=stamp,
                 age_s=hw.now_s()-stamp,sync_error_s=sync,
                 localization_epoch=epoch,world_frame=world,pose=public_pose([*world_body[:3,3],yaw]),
                 image_size=[w,h],rectified=rectified,rgb_jpeg_base64=base64.b64encode(encoded).decode('ascii'),
                 intrinsics=k.tolist(),world_from_camera_optical_cm=transform.tolist())
-

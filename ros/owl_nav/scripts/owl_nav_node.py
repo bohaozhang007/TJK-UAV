@@ -14,7 +14,8 @@ from mavros_msgs.msg import State, ExtendedState, PositionTarget
 from mavros_msgs.srv import SetMode, CommandBool
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, Image, Imu
+from robot.sensor_geometry import CameraPreflight
 from std_msgs.msg import String, Empty, Int32
 from owl_nav.srv import Command, CommandResponse
 from owl_nav.core import FlightCore, Polynomial, Rejected
@@ -29,6 +30,7 @@ class Node:
         with open(rospy.get_param('~config')) as f:
             self.c = yaml.safe_load(f)
         self.lock = threading.RLock()
+        self.camera_preflight = CameraPreflight(self.c)
         self.core = FlightCore(self.c['control'],
                               global_z_enabled=self.c.get('global_z_enabled', False),
                               vertical_tolerance_enabled=self.c.get('vertical_tolerance_enabled', False))
@@ -65,11 +67,14 @@ class Node:
         self.odom_pub = rospy.Publisher('/owl_ego/planner_odom',Odometry,queue_size=5)
         self.cloud_pub = rospy.Publisher('/owl_ego/validated_cloud',PointCloud2,queue_size=1)
         self.subs = [rospy.Subscriber(topics['odom'],Odometry,self.odom,queue_size=5),
+            rospy.Subscriber(topics['rgb'],Image,self.camera_image,queue_size=1,buff_size=8*1024*1024),
             rospy.Subscriber(topics['state'],State,self.state,queue_size=5),
             rospy.Subscriber(topics['extended_state'],ExtendedState,self.ext,queue_size=5),
             rospy.Subscriber(topics['cloud'],PointCloud2,self.cloud,queue_size=1),
             rospy.Subscriber(topics['localization_reset'],Empty,self.reset,queue_size=1),
             rospy.Subscriber(topics['vision_pose_reset'],Int32,self.reset,queue_size=1)]
+        if self.camera_preflight.owl:
+            self.subs.append(rospy.Subscriber(topics['gimbal_imu'],Imu,self.gimbal_imu,queue_size=1))
         if self.frames.vendor:
             self.subs += [rospy.Subscriber('/mavros/local_position/pose',PoseStamped,lambda m:self.reference('map',m),queue_size=5),
                           rospy.Subscriber('/mavros/vision_pose/pose',PoseStamped,lambda m:self.reference('lio',m),queue_size=5)]
@@ -81,6 +86,14 @@ class Node:
             self.workers.append(worker)
             worker.start()
         rospy.on_shutdown(self.shutdown)
+
+    def camera_image(self, msg):
+        with self.lock:
+            self.camera_preflight.on_image(msg, time.monotonic())
+
+    def gimbal_imu(self, msg):
+        with self.lock:
+            self.camera_preflight.on_gimbal(msg, time.monotonic())
 
     def shutdown(self):
         self.stop.set()
@@ -198,6 +211,8 @@ class Node:
                     raise Rejected('command deadline expired')
                 now = time.monotonic()
                 op = data.pop('op')
+                if op in ('init', 'takeoff'):
+                    self.camera_preflight.require_ready(now, rospy.Time.now().to_sec())
                 if op in ('init','takeoff','navigate','relative'):
                     if not self.authorized(now):
                         raise Rejected('flight disabled, competing controllers, or unvalidated/stale sensors/planner')
@@ -230,6 +245,7 @@ class Node:
     def publish_status(self,now):
         c = self.core
         h = c.status(now)
+        h['camera_preflight'] = self.camera_preflight.status(now, rospy.Time.now().to_sec())
         h['control_ready'] = h['control_ready'] and self.authorized(now)
         h['hold_ready'] = h['hold_ready'] and self.authorized(now)
         h['conflicting_publishers'] = self.conflicts
@@ -408,6 +424,7 @@ class Node:
                 c = self.core
                 now = time.monotonic()
                 c.watchdog(now)
+                self.camera_preflight.require_ready(now, rospy.Time.now().to_sec())
                 task = c.tasks.get(tid,{})
                 if (self.stop.is_set() or c.active != tid or c.session != sid or c.epoch != epoch
                         or c.manual or not c.enabled or not c.fresh(now) or not self.authorized(now)

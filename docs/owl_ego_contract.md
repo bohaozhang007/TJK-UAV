@@ -468,11 +468,12 @@ to right-handed ROS world, with translation in cm and full exposure body attitud
 Reflect world Y only when converting a projected point into public navigation
 coordinates. DA3 depth is Agent-side; no image/depth path is shared over Wi-Fi.
 
-Current user-approved profile assumes camera/body centres coincide, fixed camera
+The previous user-approved profile assumed camera/body centres coincide, fixed camera
 horizontal forward (pitch=0), unknown distortion, centred principal point and
 square pixels. K uses fx=fy=W/(2*tan(HFOV/2)), cx=W/2, cy=H/2, with HFOV=90°
 an explicit assumption. This does not claim calibration or command the gimbal.
-Raw resized RGB has rectified=false and calibration_quality=approximate.
+That legacy raw resized RGB has rectified=false and calibration_quality=approximate.
+The current OWL default supersedes it with the 2026-09-18 profile below.
 
 Agent must keep strict geometry as its default and explicitly opt into this
 profile (suggested allow_approximate_geometry), validate/log assumptions and
@@ -618,3 +619,56 @@ actual Agent reaction to this new override still needs joint verification.
 
 Implemented with Robot 117 and console 39 offline tests; no live deployment or
 flight validation. Restart bridge, HTTP and console while grounded to load it.
+
+## 2026-09-18: configured sensor geometry and OWL camera preflight
+
+Previous behavior: OWL used an approximate 90-degree FOV, centred principal point,
+zero camera translation and fixed pitch=0. Current Robot default uses measured
+1280x720 K/D and the user-accepted tentative LiDAR/camera extrinsic. The fixed
+FAST-LIO LiDAR/flight-controller-IMU transform composes the camera lever arm.
+The body/IMU identity is an explicit odometry-origin assumption. Fixed geometry
+is valid only at the reproduced gimbal position; no dynamic gimbal TF is inferred.
+
+All Robot HTTP backends expose session-free GET `/sensor_geometry`, with alias
+`/v21/sensor_geometry`. Success is `{ok:true,sensor_geometry:{...}}`. The object
+contains `profile_id`, `quality`, `units:"m"`, `frames`, `limitations`, and 4x4
+`imu_from_lidar`, `camera_optical_from_lidar`, `body_from_imu`,
+`imu_from_camera_optical`, `body_from_camera_optical` matrices. Each matrix maps
+source homogeneous coordinates into target coordinates, without public-Y
+reflection. OWL IMU/body axes are FLU; camera optical axes are RDF. IMU frame name
+is a semantic calibration reference, not a promise that a matching TF exists.
+Missing/invalid geometry returns HTTP503 `sensor_geometry_unavailable`; other
+methods return405. New platforms must configure their actual geometry before use;
+legacy controllers without geometry remain explicitly unavailable at this endpoint.
+OWL capability `sensor_geometry:true` advertises the interface.
+
+OWL bridge reads/validates geometry at startup and subscribes to RGB and
+`/gimbal_controller/imu`. `/init` and `/takeoff` reject missing, invalid, future or
+stale image/gimbal samples (both monotonic receive age and ROS source age <=0.5s),
+wrong calibrated image dimensions, or pitch outside inclusive [18,21] degrees.
+The software takeoff preparation guard rechecks before OFFBOARD and ordinary ARM.
+Failures return the existing409 command rejection with a `camera preflight:`
+reason. `/health.health.camera_preflight` reports `ready`, `errors`, `pitch_deg`,
+`pitch_range_deg` and `profile_id`. This is a pre-takeoff gate, not an automatic
+in-flight landing policy. Existing stop/land and authority checks remain independent.
+Only `camera_preflight.profile:owl_fixed_gimbal` enables the OWL pitch rule;
+other platforms do not inherit its numeric pitch range. Gimbal orientation encodes
+pitch feedback only; reported roll/yaw zeros are not a measured full attitude.
+
+New observation metadata: `intrinsics:configured_calibration`,
+`distortion:corrected`, `extrinsics:sensor_geometry`,
+`camera_translation:configured_sensor_geometry`, `profile_id` and `limitations`
+inside `geometry_assumptions`. Robot undistorts using K/D, then scales K to the
+JPEG dimensions. `rectified:true` is therefore real; `calibration_quality:approximate`
+remains mandatory for this tentative extrinsic (box edges still differ by roughly
+10–22 pixels). `world_from_camera_optical_cm` includes the lever arm rotated by
+the full exposure body attitude. Its translation remains cm, unlike the new
+static geometry endpoint's metres. Consumers must not apply the extrinsic twice.
+
+Robot implementation and offline tests are present. Agent implementation is
+pending: the current strict decoder rejects these new approximate modes even
+with approximate opt-in. It must explicitly validate/log this profile and retain
+strict defaults. The old geometry modes remain supported when explicitly
+configured, but are no longer OWL defaults. No compatibility claim is made for an
+unchanged Windows Agent with the new default; no joint/flight validation yet.
+See robot-007 for the exact handoff. Launch commands remain those in owl.txt.
