@@ -23,6 +23,14 @@ from app.robot_client.base import ControlLost, MissionError, Robot
 from app.robot_client.factory import create_robot
 
 
+# Fixed service settings and bounded retry/loop limits.
+DETECTOR_PORT = 8790
+DETECTOR_TIMEOUT_S = 20.0
+READ_ATTEMPTS = 2
+READ_RETRY_DELAY_S = 0.5
+MAX_STOPS_PER_WAYPOINT = 100
+
+
 class State(enum.Enum):
     WAIT_OPERATOR = 'wait_operator'
     PATROL_PLAN = 'patrol_plan'
@@ -82,7 +90,7 @@ def stopping_point(path, goal, interval_cm, tolerance_cm):
 
 
 class Detector:
-    def __init__(self, url, image, box, timeout_s):
+    def __init__(self, url, image, box):
         self.url = url.rstrip('/') + '/detect'
         self.reference = base64.b64encode(Path(image).read_bytes()).decode()
         self.box = [float(v) for v in Path(box).read_text(encoding='utf-8').split()]
@@ -93,7 +101,7 @@ class Detector:
             if (not all(math.isfinite(v) for v in self.box)
                     or not 0 <= x1 < x2 <= reference.width or not 0 <= y1 < y2 <= reference.height):
                 raise ValueError('reference box is outside the reference image')
-        self.timeout = timeout_s
+        self.timeout = DETECTOR_TIMEOUT_S
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def detect(self, obs):
@@ -158,7 +166,7 @@ class Mission:
 
     def retry_read(self, name, operation):
         # Only observation/detection/preview operations; never replay navigation.
-        for attempt in range(self.c['runtime']['read_attempts']):
+        for attempt in range(READ_ATTEMPTS):
             self.robot.health()
             try:
                 return operation()
@@ -166,9 +174,9 @@ class Mission:
                 raise
             except Exception as exc:
                 self.event('read_retry', operation=name, attempt=attempt+1, error=str(exc))
-                if attempt + 1 == self.c['runtime']['read_attempts']:
+                if attempt + 1 == READ_ATTEMPTS:
                     raise MissionError(f'{name}: {exc}') from exc
-                self.guarded_wait(self.c['runtime']['retry_delay_s'])
+                self.guarded_wait(READ_RETRY_DELAY_S)
 
     def attach(self):
         self.origin = self.robot.attach()
@@ -214,7 +222,7 @@ class Mission:
                 except Exception as exc:
                     outcome.put((False, exc))
             threading.Thread(target=worker, daemon=True).start()
-            deadline = time.monotonic() + self.c['detector']['timeout_s'] + 1.
+            deadline = time.monotonic() + DETECTOR_TIMEOUT_S + 1.
             while time.monotonic() < deadline:
                 self.robot.health()
                 try:
@@ -302,7 +310,7 @@ class Mission:
     def patrol(self):
         for waypoint in self.c['mission']['waypoints']:
             goal = self.mission_waypoint(waypoint)
-            for _ in range(self.c['patrol']['max_stops_per_waypoint']):
+            for _ in range(MAX_STOPS_PER_WAYPOINT):
                 stop, final = self.plan_stop(goal)
                 self.fly_to(stop, State.PATROL_MOVE)
                 observation = self.capture_observation()
@@ -382,9 +390,7 @@ class Mission:
 
 def validate_config(config):
     positive = {
-        'robot': ('attach_timeout_s','stop_timeout_s','preview_timeout_s','navigation_timeout_s',
-                  'target_depth_gap_m'),
-        'detector': ('timeout_s',), 'runtime': ('retry_delay_s',), 'safety': ('safe_z_cm',),
+        'localization': ('target_depth_gap_m',), 'safety': ('safe_z_cm',),
         'patrol': ('detection_stop_interval_m','dedup_distance_cm','waypoint_tolerance_cm'),
         'orbit': ('radius_m','dwell_s'),
     }
@@ -393,13 +399,9 @@ def validate_config(config):
             value = config[section][key]
             if type(value) not in (int,float) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{section}.{key} must be finite and positive')
-    for section, key, maximum in (('runtime','read_attempts',5), ('robot','min_target_voxels',1000),
-                                ('patrol','max_stops_per_waypoint',10000),('detector','port',65535)):
-        value = config[section][key]
-        if type(value) is not int or not 1 <= value <= maximum:
-            raise ValueError(f'invalid {section}.{key}')
-    if type(config['robot']['allow_approximate_geometry']) is not bool:
-        raise ValueError('allow_approximate_geometry must be boolean')
+    value = config['localization']['min_target_voxels']
+    if type(value) is not int or not 1 <= value <= 1000:
+        raise ValueError('invalid localization.min_target_voxels')
     waypoints = config['mission']['waypoints']
     if not isinstance(waypoints,list) or not waypoints:
         raise ValueError('mission needs at least one waypoint')
@@ -422,11 +424,10 @@ def main():
         config = yaml.safe_load(file)
     try:
         validate_config(config)
-        robot = create_robot(config['robot'])
+        robot = create_robot(config['localization'])
     except (ValueError,KeyError,TypeError) as exc:
         parser.error(str(exc))
-    detector = Detector(f'http://{args.detector_host}:{config["detector"]["port"]}',
-                        args.img, args.box, config['detector']['timeout_s'])
+    detector = Detector(f'http://{args.detector_host}:{DETECTOR_PORT}', args.img, args.box)
     Mission(robot, detector, config, args.output).run()
 
 

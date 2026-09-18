@@ -1,9 +1,7 @@
-"""Select a Robot implementation without exposing hardware details to missions."""
+"""Construct the current Robot adapter without exposing hardware choices to missions."""
 from .base import Robot
 
 
-def create_robot(config) -> Robot:
-    if config.get('type') == 'owl_ego':
-        from .owl_ego import OwlEgoClient
-        return OwlEgoClient(config)
-    raise ValueError(f"Unsupported Robot type: {config.get('type')!r}")
+def create_robot(localization) -> Robot:
+    from .owl_ego import OwlEgoClient
+    return OwlEgoClient(**localization)

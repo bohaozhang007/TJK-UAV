@@ -17,6 +17,15 @@ from .base import ControlLost, MissionError, Observation
 from app.robot.mapping import GridMap
 
 
+# Fixed local Robot deployment and control protocol timings.
+ROBOT_URL = 'http://127.0.0.1:8765'
+ALLOW_APPROXIMATE_GEOMETRY = True
+ATTACH_TIMEOUT_S = 120.0
+STOP_TIMEOUT_S = 8.0
+PREVIEW_TIMEOUT_S = 12.0
+NAVIGATION_TIMEOUT_S = 180.0
+
+
 class HttpError(MissionError):
     def __init__(self, status, result):
         super().__init__(result.get('error', str(result)))
@@ -24,9 +33,10 @@ class HttpError(MissionError):
 
 
 class OwlEgoClient:
-    def __init__(self, config):
-        self.c = config
-        self.url = config['url'].rstrip('/')
+    def __init__(self, *, min_target_voxels, target_depth_gap_m):
+        self.min_target_voxels = min_target_voxels
+        self.target_depth_gap_m = target_depth_gap_m
+        self.url = ROBOT_URL
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.session = self.epoch = None
         self.error = None
@@ -91,7 +101,7 @@ class OwlEgoClient:
             if caps.get(key) is not True:
                 raise MissionError('missing Robot capability: ' + key)
         self.rpc('GET', '/sensor_geometry')
-        deadline = time.monotonic() + self.c['attach_timeout_s']
+        deadline = time.monotonic() + ATTACH_TIMEOUT_S
         while True:
             h = self.rpc('GET', '/health')['health']
             if (h.get('airborne') and h.get('stopped') and not h.get('active_task_id')
@@ -136,7 +146,7 @@ class OwlEgoClient:
         return pose
 
     def wait_stopped(self):
-        deadline = time.monotonic() + self.c['stop_timeout_s']
+        deadline = time.monotonic() + STOP_TIMEOUT_S
         while time.monotonic() < deadline:
             h = self.health()
             if h.get('stopped') and h.get('active_task_id') is None:
@@ -159,7 +169,7 @@ class OwlEgoClient:
             raise MissionError('observation is stale or unsynchronized')
         quality = data.get('calibration_quality')
         if (data.get('rectified') is not True or quality not in ('calibrated', 'approximate')
-                or quality == 'approximate' and not self.c['allow_approximate_geometry']):
+                or quality == 'approximate' and not ALLOW_APPROXIMATE_GEOMETRY):
             raise MissionError('camera geometry is not accepted')
         if quality == 'approximate':
             g = data.get('geometry_assumptions', {})
@@ -195,8 +205,8 @@ class OwlEgoClient:
         yaw = abs((current['yaw'] - observation.pose['yaw'] + 180) % 360 - 180)
         if delta > self.tolerances['position_tolerance_cm'] or yaw > self.tolerances['yaw_tolerance_deg']:
             raise MissionError('vehicle moved while awaiting detection')
-        return self.grid().locate(observation, mask, min_voxels=self.c['min_target_voxels'],
-                                  depth_gap_m=self.c['target_depth_gap_m'])
+        return self.grid().locate(observation, mask, min_voxels=self.min_target_voxels,
+                                  depth_gap_m=self.target_depth_gap_m)
 
     def point_is_free(self, pose):
         return self.grid().free(pose)
@@ -204,7 +214,7 @@ class OwlEgoClient:
     def preview_path(self, goal, require_arrival=False):
         self.wait_stopped()
         result = self.rpc('POST', '/v22/preview', {'pose': goal, 'localization_epoch': self.epoch,
-                           'require_arrival': require_arrival}, timeout=self.c['preview_timeout_s'] + 2.)
+                           'require_arrival': require_arrival}, timeout=PREVIEW_TIMEOUT_S + 2.)
         self.health()
         if result.get('localization_epoch') != self.epoch:
             raise ControlLost('preview localization epoch changed')
@@ -218,7 +228,7 @@ class OwlEgoClient:
         # Never replay a navigation after a transport failure or uncertain acceptance.
         result = self.rpc('POST', '/v21/navigation', {'pose': goal, 'localization_epoch': self.epoch})
         task = self.navigation_id = result['task_id']
-        deadline = time.monotonic() + self.c['navigation_timeout_s']
+        deadline = time.monotonic() + NAVIGATION_TIMEOUT_S
         while time.monotonic() < deadline:
             self.health()
             state = self.rpc('GET', '/v21/navigation/status', {'task_id': task})
