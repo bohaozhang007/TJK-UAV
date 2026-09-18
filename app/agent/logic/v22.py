@@ -20,6 +20,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.robot_client.base import ControlLost, MissionError, Robot
+from app.robot_client.factory import create_robot
 
 
 class State(enum.Enum):
@@ -419,16 +420,14 @@ def main():
     args = parser.parse_args()
     with args.config.open(encoding='utf-8') as file:
         config = yaml.safe_load(file)
-    if config['robot']['type'] != 'owl_ego':
-        parser.error('only owl_ego is implemented')
     try:
         validate_config(config)
+        robot = create_robot(config['robot'])
     except (ValueError,KeyError,TypeError) as exc:
         parser.error(str(exc))
-    from app.robot_client.owl_ego import OwlEgoClient
     detector = Detector(f'http://{args.detector_host}:{config["detector"]["port"]}',
                         args.img, args.box, config['detector']['timeout_s'])
-    Mission(OwlEgoClient(config['robot']), detector, config, args.output).run()
+    Mission(robot, detector, config, args.output).run()
 
 
 if __name__ == '__main__':

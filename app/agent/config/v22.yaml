@@ -1,4 +1,4 @@
-# Run on OWL: app/run_agent_v22.sh --detector-host WINDOWS_IP --img reference.jpg --box reference.txt
+# Shared mission config; robot.type selects the Robot client implementation.
 robot:
   type: owl_ego
   url: http://127.0.0.1:8765
@@ -16,7 +16,7 @@ runtime:
   read_attempts: 2
   retry_delay_s: 0.5
 safety:
-  safe_z_cm: 20.0 # Same world-height floor as v21; orbit Z = max(this, target Z).
+  safe_z_cm: 50.0 # Absolute world-height floor; orbit Z = max(this, target Z).
 patrol:
   detection_stop_interval_m: 1.0
   dedup_distance_cm: 100.0
