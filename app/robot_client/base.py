@@ -17,7 +17,7 @@ class Observation:
     pose: dict
     epoch: str
     rgb: object
-    jpeg_base64: str
+    image_base64: str
     intrinsics: object
     world_from_camera_cm: object
     timestamp_s: float

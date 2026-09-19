@@ -112,7 +112,7 @@ class Detector:
 
     def detect(self, obs, timings=None):
         with measure(timings, 'request_encode'):
-            body = dict(image=obs.jpeg_base64, frame_id=obs.frame_id)
+            body = dict(image=obs.image_base64, frame_id=obs.frame_id)
             request = urllib.request.Request(self.url, json.dumps(body).encode(), {'Content-Type': 'application/json'})
         with measure(timings, 'http_round_trip'):
             try:

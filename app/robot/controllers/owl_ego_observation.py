@@ -194,13 +194,10 @@ def build_observation(hw):
     bgr = hw.rgb_array(m)
     if d is not None:
         bgr = cv2.undistort(bgr,k,d,None,k)
-    scale = min(1.,config['hardware']['long_edge_px']/max(m.width,m.height))
-    w,h = round(m.width*scale),round(m.height*scale)
-    bgr = cv2.resize(bgr,(w,h))
-    k = np.diag([w/m.width,h/m.height,1.])@k
-    success,encoded = cv2.imencode('.jpg',bgr,[cv2.IMWRITE_JPEG_QUALITY,80])
+    # Keep rectified pixels and intrinsics at the camera's native resolution.
+    success,encoded = cv2.imencode('.png',bgr,[cv2.IMWRITE_PNG_COMPRESSION,1])
     if not success:
-        raise ValueError('JPEG encoding failed')
+        raise ValueError('PNG encoding failed')
     transform = world_body@body_camera
     transform[:3,3] *= 100
     yaw = math.atan2(world_body[1,0],world_body[0,0])
@@ -215,5 +212,5 @@ def build_observation(hw):
     return dict(ok=True,calibration_quality=quality,geometry_assumptions=geometry,frame_id=epoch+':'+str(m.header.stamp.to_nsec()),timestamp_s=stamp,
                 age_s=hw.now_s()-stamp,sync_error_s=sync,
                 localization_epoch=epoch,world_frame=world,pose=public_pose([*world_body[:3,3],yaw]),
-                image_size=[w,h],rectified=rectified,rgb_jpeg_base64=base64.b64encode(encoded).decode('ascii'),
+                image_size=[m.width,m.height],rectified=rectified,rgb_image_base64=base64.b64encode(encoded).decode('ascii'),
                 intrinsics=k.tolist(),world_from_camera_optical_cm=transform.tolist())

@@ -28,8 +28,6 @@ control:
   sensors_validated: true
 
 hardware:
-  long_edge_px: 640
-
   # Update after camera calibration.
   calibration:
     image_size: [1280, 720]

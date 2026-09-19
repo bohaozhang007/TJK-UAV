@@ -167,7 +167,7 @@ class OwlEgoClient:
         if data.get('localization_epoch') != self.epoch:
             self.error = 'observation localization epoch changed'
             raise ControlLost(self.error)
-        with Image.open(io.BytesIO(base64.b64decode(data['rgb_jpeg_base64'], validate=True))) as im:
+        with Image.open(io.BytesIO(base64.b64decode(data['rgb_image_base64'], validate=True))) as im:
             rgb = np.array(im.convert('RGB'))
         age = float(data['age_s']) + time.monotonic() - sent
         sync = float(data['sync_error_s'])
@@ -193,7 +193,7 @@ class OwlEgoClient:
                 or data['image_size'] != [rgb.shape[1], rgb.shape[0]]):
             raise MissionError('invalid observation geometry')
         self.health()
-        return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_jpeg_base64'], k, t, data['timestamp_s'])
+        return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_image_base64'], k, t, data['timestamp_s'])
 
     def grid(self, timings=None):
         with measure(timings, 'wait_stopped'):
