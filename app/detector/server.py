@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import logging
+import socket
 import sys
 import time
 from datetime import datetime
@@ -21,6 +22,15 @@ if __package__ in (None, ""):
 from app.detector.image_log import ImageLog
 
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+
+
+def local_detector_ips():
+    try:
+        addresses = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+        return ", ".join(sorted({entry[4][0] for entry in addresses
+                                 if entry[4][0].startswith("192.168.2.")})) or "not found"
+    except OSError:
+        return "unavailable"
 
 
 def build_detector(name, model_root=None, checkpoint=None, device="cuda"):
@@ -151,6 +161,7 @@ def main():
                    / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
         server.image_log = ImageLog(log_dir)
         print(f"Detector ready at http://{args.host}:{args.port}/detect (target={args.target})", flush=True)
+        print(f"Local IP (192.168.2.*): {local_detector_ips()}", flush=True)
         print(f"Detection images: {log_dir}", flush=True)
         try:
             server.serve_forever()
