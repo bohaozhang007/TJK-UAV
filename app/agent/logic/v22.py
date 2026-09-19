@@ -304,8 +304,7 @@ class Mission:
             except TargetNotLocalizable as exc:
                 self.event('detection_skipped', **context, reason=str(exc))
                 continue
-            if any(np.linalg.norm(np.asarray(position)-record['position_cm']) < self.c['patrol']['dedup_distance_cm']
-                   for record in self.targets):
+            if self.is_duplicate(position):
                 self.event('duplicate', position_cm=position)
                 continue
             record = dict(id=len(self.targets)+1, position_cm=position, status='pending',
@@ -314,6 +313,19 @@ class Mission:
             new.append(record)
             self.event('new_target', target=record)
         return new
+
+    def is_duplicate(self, position):
+        threshold = self.c['patrol']['dedup_distance_cm']
+        mode = self.c['patrol'].get('dedup_mode', '3d')
+        for record in self.targets:
+            delta = np.asarray(position) - record['position_cm']
+            if mode == 'separate':
+                duplicate = np.all(np.abs(delta) < threshold)
+            else:
+                duplicate = np.linalg.norm(delta) < threshold
+            if duplicate:
+                return True
+        return False
 
     def orbit_points(self, target, exposure_pose):
         x, y, z = target['position_cm']
@@ -488,6 +500,8 @@ class Mission:
 
 
 def validate_config(config):
+    if config['patrol'].get('dedup_mode', '3d') not in ('3d', 'separate'):
+        raise ValueError('patrol.dedup_mode must be 3d or separate')
     if config['safety']['error_action'] not in ('hold', 'land'):
         raise ValueError('safety.error_action must be hold or land')
     positive = {

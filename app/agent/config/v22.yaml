@@ -36,6 +36,7 @@ safety:
 patrol:
   detection_stop_interval_m: 1.0
   dedup_distance_cm: 100.0
+  dedup_mode: separate # 3d or separate (each axis below the distance).
   waypoint_tolerance_cm: 30.0
 
 orbit:
