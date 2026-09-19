@@ -3,7 +3,6 @@ import argparse
 import re
 from pathlib import Path
 
-
 def patch_map(root):
     env = root / 'swarm-playground/main_ws/src/planner/plan_env'
     header = env / 'include/plan_env/grid_map.h'
