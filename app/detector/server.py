@@ -206,8 +206,13 @@ def main():
             logging.info("Loading detector=%s target=%s device=%s", args.det, args.target, args.device)
             started = time.perf_counter()
             server.detector = build_detector(args.det, args.model_root, args.checkpoint, args.device)
-            logging.info("Detector ready at http://%s:%s/detect load_s=%.3f",
-                         args.host, args.port, time.perf_counter() - started)
+            logging.info("Detector loaded load_s=%.3f", time.perf_counter() - started)
+            logging.info("Warmup started image=1280x960")
+            started = time.perf_counter()
+            server.detector.detect(np.zeros((960, 1280, 3), dtype=np.uint8), reference, box)
+            logging.info("Warmup finished warmup_s=%.3f", time.perf_counter() - started)
+            logging.info("Detector ready at http://%s:%s/detect",
+                         args.host, args.port)
             server.serve_forever()
         except KeyboardInterrupt:
             pass
