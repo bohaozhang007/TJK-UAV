@@ -11,7 +11,9 @@ import sys
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
+from queue import SimpleQueue
 
 import numpy as np
 from PIL import Image
@@ -22,6 +24,18 @@ if __package__ in (None, ""):
 from app.detector.image_log import ImageLog
 
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+
+
+def start_logging(directory):
+    events = SimpleQueue()
+    handlers = (logging.StreamHandler(), logging.FileHandler(directory / "server.log", encoding="utf-8"))
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[QueueHandler(events)], force=True)
+    listener = QueueListener(events, *handlers)
+    listener.start()
+    return listener
 
 
 def local_detector_ips():
@@ -91,6 +105,9 @@ def encode_mask(mask):
 
 
 class DetectorHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        logging.info("HTTP client=%s %s", self.client_address[0], format % args)
+
     def setup(self):
         super().setup()
         self.connection.settimeout(15)
@@ -103,10 +120,19 @@ class DetectorHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):
+        if self.path == "/health":
+            self.reply(200, {"ok": True})
+        else:
+            self.reply(404, {"ok": False, "error": "unknown endpoint"})
+
     def do_POST(self):
         if self.path != "/detect":
             self.reply(404, {"ok": False, "error": "unknown endpoint"})
             return
+        received = time.perf_counter()
+        logging.info("Request received client=%s content_length=%s", self.client_address[0],
+                     self.headers.get("Content-Length"))
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if self.headers.get("Transfer-Encoding") or not 0 < length <= 32 * 1024 * 1024:
@@ -119,22 +145,36 @@ class DetectorHandler(BaseHTTPRequestHandler):
             if frame_id is not None and not isinstance(frame_id, str):
                 raise ValueError("frame_id must be a string")
         except (ValueError, OSError) as exc:
+            logging.warning("Request rejected client=%s elapsed_s=%.3f error=%s",
+                            self.client_address[0], time.perf_counter() - received, exc)
             self.reply(400, {"ok": False, "error": str(exc)})
             return
         try:
+            logging.info("Inference started frame=%r image=%sx%s receive_decode_s=%.3f", frame_id,
+                         image.shape[1], image.shape[0], time.perf_counter() - received)
             started = time.perf_counter()
             detections = self.server.detector.detect(image, self.server.reference_image, self.server.reference_box)
+            inferred = time.perf_counter()
+            logging.info("Inference finished frame=%r detections=%s inference_s=%.3f",
+                         frame_id, len(detections), inferred - started)
             encoded = [{**item, "mask": encode_mask(item["mask"])} for item in detections]
+            logging.info("Masks encoded frame=%r encode_s=%.3f", frame_id, time.perf_counter() - inferred)
             result = {"ok": True, "image_size": [image.shape[1], image.shape[0]],
                       "detections": encoded, "elapsed_s": time.perf_counter() - started}
             if frame_id is not None:
                 result["frame_id"] = frame_id
         except Exception as exc:
-            logging.exception("Detection failed")
+            logging.exception("Detection failed frame=%r elapsed_s=%.3f", frame_id, time.perf_counter() - received)
             self.reply(500, {"ok": False, "error": str(exc)})
             return
         try:
+            sending = time.perf_counter()
             self.reply(200, result)
+            logging.info("Response written frame=%r send_s=%.3f total_s=%.3f",
+                         frame_id, time.perf_counter() - sending, time.perf_counter() - received)
+        except OSError as exc:
+            logging.warning("Response failed frame=%r total_s=%.3f client=%s error=%s",
+                            frame_id, time.perf_counter() - received, self.client_address[0], exc)
         finally:
             self.server.image_log.submit(image, detections)
 
@@ -156,19 +196,29 @@ def main():
     # A single HTTP worker serializes model calls; no prompt/session lifecycle.
     with HTTPServer((args.host, args.port), DetectorHandler) as server:
         server.reference_image, server.reference_box = reference, box
-        server.detector = build_detector(args.det, args.model_root, args.checkpoint, args.device)
         log_dir = (Path(__file__).resolve().parents[2] / "logs" / "detector"
                    / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
         server.image_log = ImageLog(log_dir)
-        print(f"Detector ready at http://{args.host}:{args.port}/detect (target={args.target})", flush=True)
-        print(f"Local IP (192.168.2.*): {local_detector_ips()}", flush=True)
-        print(f"Detection images: {log_dir}", flush=True)
+        listener = start_logging(log_dir)
         try:
+            logging.info("Local IP (192.168.2.*): %s", local_detector_ips())
+            logging.info("Detection images and server.log: %s", log_dir)
+            logging.info("Loading detector=%s target=%s device=%s", args.det, args.target, args.device)
+            started = time.perf_counter()
+            server.detector = build_detector(args.det, args.model_root, args.checkpoint, args.device)
+            logging.info("Detector ready at http://%s:%s/detect load_s=%.3f",
+                         args.host, args.port, time.perf_counter() - started)
             server.serve_forever()
         except KeyboardInterrupt:
             pass
+        except Exception:
+            logging.exception("Detector server failed")
+            raise
         finally:
             server.image_log.close()
+            listener.stop()
+            for handler in listener.handlers:
+                handler.close()
 
 
 if __name__ == "__main__":
