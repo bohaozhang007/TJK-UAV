@@ -7,4 +7,5 @@ geometry_msgs/Point goal
 bool success
 string error
 string error_code
+string diagnostics
 traj_utils/PolyTraj trajectory

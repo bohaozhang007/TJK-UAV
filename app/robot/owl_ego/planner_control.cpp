@@ -8,9 +8,9 @@ namespace ego_planner
     have_target_ = have_trigger_ = have_new_target_ = false;
     mandatory_stop_ = false;
     flag_escape_emergency_ = true;
-    planner_manager_->traj_.local_traj.traj_id = 0;
-    planner_manager_->traj_.local_traj.pts_chk.clear();
+    planner_manager_->v22Reset();
     changeFSMExecState(WAIT_TARGET, "V22");
+    continously_called_times_ = 1;
   }
 
   void EGOReplanFSM::v22Publish(const traj_utils::PolyTraj &trajectory)
@@ -53,16 +53,59 @@ namespace ego_planner
     }
     // ros::spin serializes this call with map, odometry and FSM callbacks.
     v22Idle();
+    auto map = planner_manager_->grid_map_;
+    auto &diagnostics = map->v22_diagnostics;
+    diagnostics.active = true;
+    diagnostics.clear();
+    const ros::WallTime started = ros::WallTime::now();
+    const Eigen::Vector3d goal(req.goal.x, req.goal.y, req.goal.z);
+    std::ostringstream report, attempts;
+    report << std::setprecision(12) << "{\"sequence\":" << req.sequence
+           << ",\"start\":" << map->v22PointInfo(odom_pos_)
+           << ",\"start_velocity_world_m_s\":" << v22Vector(odom_vel_)
+           << ",\"goal\":" << map->v22PointInfo(goal)
+           << ",\"map\":" << map->v22MapInfo();
+    int attempted = 0;
     try
     {
       // Keep execution output fenced until generation and deadline checks finish.
       v22_preview_ = true;
-      if (!planNextWaypoint(Eigen::Vector3d(req.goal.x, req.goal.y, req.goal.z)))
+      const std::string start_state = map->v22PointState(odom_pos_);
+      if (start_state != "free")
+      {
+        res.error_code = "planning_failed";
+        throw std::runtime_error("EGO start check failed: " + start_state);
+      }
+      const ros::WallTime global_started = ros::WallTime::now();
+      const bool global_ok = planNextWaypoint(goal);
+      report << ",\"global_planning_s\":" << (ros::WallTime::now()-global_started).toSec();
+      if (!global_ok)
       {
         res.error_code = "planning_failed";
         throw std::runtime_error("EGO global planning failed");
       }
-      if (!planFromGlobalTraj(10))
+      start_pt_ = odom_pos_;
+      start_vel_ = odom_vel_;
+      start_acc_.setZero();
+      bool planned = false;
+      for (int attempt = 1; attempt <= 10; ++attempt)
+      {
+        if (req.deadline < ros::Time::now())
+          throw std::runtime_error("planner command expired during planning");
+        diagnostics.clear();
+        planner_manager_->v22BeginAttempt(attempt-1);
+        const ros::WallTime attempt_started = ros::WallTime::now();
+        planned = callReboundReplan(true, attempt > 1);
+        if (attempted++) attempts << ',';
+        attempts << std::setprecision(12) << "{\"attempt\":" << attempt
+                 << ",\"initialization\":\"" << (attempt == 1 ? "normal" : "random")
+                 << "\",\"success\":" << (planned ? "true" : "false")
+                 << ",\"elapsed_s\":" << (ros::WallTime::now()-attempt_started).toSec()
+                 << ",\"stages\":" << diagnostics.json()
+                 << ",\"omitted_events\":" << diagnostics.omitted << '}';
+        if (planned) break;
+      }
+      if (!planned)
       {
         res.error_code = "planning_failed";
         throw std::runtime_error("EGO initial trajectory generation failed");
@@ -91,6 +134,10 @@ namespace ego_planner
       v22Idle();
       res.error = error.what();
     }
+    diagnostics.active = false;
+    report << ",\"attempts\":[" << attempts.str() << "],\"elapsed_s\":"
+           << (ros::WallTime::now()-started).toSec() << '}';
+    res.diagnostics = report.str();
     return true;
   }
 }

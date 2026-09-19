@@ -444,6 +444,9 @@ class Node:
                             with self.lock:
                                 if changing and g is not None and self.core.generation == g and self.core.active:
                                     self.core.tasks[self.core.active]['timing_s']['planning_service_s'] = time.monotonic()-planning_started
+                                    detail = process.last_diagnostics
+                                    if detail and detail['generation'] == g:
+                                        self.core.tasks[self.core.active]['planning_diagnostics'] = detail['details']
                     with self.lock:
                         if self.core.generation == g and self.core.active:
                             task = self.core.tasks[self.core.active]

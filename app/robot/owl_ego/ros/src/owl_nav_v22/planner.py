@@ -1,5 +1,6 @@
 """One persistent EGO map with separate preview replies and fenced execution output."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import signal
@@ -29,6 +30,7 @@ class PlannerProcess:
         self.identity = identity
         self.generation = None
         self.sequence = 0
+        self.last_diagnostics = None
         self.failed = None
         self.planning_timeout = config['control']['planning_timeout_s']
         self.ns = '/owl_ego_v22/planners/g_'+identity
@@ -120,11 +122,13 @@ class PlannerProcess:
                 self.milestones.setdefault('fsm_initialized',time.monotonic())
                 self.milestones.setdefault('fsm_log_confirmation',time.monotonic())
 
-    def command(self, mode, generation='', goal=None, timeout=1.):
+    def command(self, mode, generation='', goal=None, timeout=1., timings=None):
         from geometry_msgs.msg import Point
         from owl_nav_v22.srv import Plan, PlanRequest
         self.poll()
         self.sequence += 1
+        if mode == 'execute':
+            self.last_diagnostics = dict(generation=generation, details={})
         req = PlanRequest(sequence=self.sequence, mode=mode, generation=generation,
                           deadline=self.ros.Time.now()+self.ros.Duration(timeout),
                           goal=Point(*(goal[:3] if goal is not None else [0., 0., 0.])))
@@ -146,6 +150,13 @@ class PlannerProcess:
             self.failed = 'EGO command outcome uncertain: '+str(result['error'])
             raise RuntimeError(self.failed)
         response = result['value']
+        diagnostics = json.loads(response.diagnostics) if response.diagnostics else {}
+        if diagnostics:
+            diagnostics['planner_generation'] = self.identity
+        if mode == 'execute':
+            self.last_diagnostics = dict(generation=generation, details=diagnostics)
+        if timings is not None:
+            timings['planning_diagnostics'] = diagnostics
         if not response.success:
             if mode == 'execute' and response.error_code == 'planning_failed':
                 raise PlanningFailed(response.error)
@@ -166,7 +177,7 @@ class PlannerProcess:
         with measure(timings, 'planner_idle'):
             self.select(None, None)
         with measure(timings, 'ego_service'):
-            return self.command('preview', goal=goal, timeout=timeout).trajectory
+            return self.command('preview', goal=goal, timeout=timeout, timings=timings).trajectory
 
     def close(self):
         with self.callback_lock:

@@ -20,11 +20,31 @@ class GridMap:
                 or np.any(self.upper < self.lower)):
             raise ValueError('invalid grid dimensions')
 
-    def free(self, public_pose):
+    def free(self, public_pose, clearance_cm=0.):
         xyz = np.array([public_pose['x'], -public_pose['y'], public_pose['z']]) / 100
         index = np.floor(xyz / self.resolution).astype(int)
-        return bool(np.all(index >= self.lower) and np.all(index <= self.upper)
-                    and self.ground < xyz[2] < self.ceiling and tuple(index) not in self.inflated)
+        radius = clearance_cm / 100
+        if not np.isfinite(radius) or radius < 0:
+            raise ValueError('clearance must be finite and nonnegative')
+        if radius == 0:
+            return bool(np.all(index >= self.lower) and np.all(index <= self.upper)
+                        and self.ground < xyz[2] < self.ceiling and tuple(index) not in self.inflated)
+        if (np.any(xyz-radius < self.lower*self.resolution)
+                or np.any(xyz+radius >= (self.upper+1)*self.resolution)
+                or xyz[2]-radius <= self.ground or xyz[2]+radius >= self.ceiling):
+            return False
+        lower = np.floor((xyz-radius)/self.resolution).astype(int)-1
+        upper = np.floor((xyz+radius)/self.resolution).astype(int)
+        for offset in np.ndindex(tuple(upper-lower+1)):
+            cell = lower + offset
+            if tuple(cell) not in self.inflated:
+                continue
+            # Distance to the voxel box, including contact at the sphere boundary.
+            delta = np.maximum(np.maximum(cell*self.resolution-xyz,
+                                         xyz-(cell+1)*self.resolution), 0.)
+            if np.dot(delta, delta) <= radius*radius + 1e-12:
+                return False
+        return True
 
     def locate(self, obs, mask, *, min_voxels=2, depth_gap_m=.3):
         if mask.shape != obs.rgb.shape[:2] or mask.dtype != np.bool_:

@@ -240,8 +240,11 @@ class OwlEgoClient:
 
     def points_are_free(self, poses, timings=None):
         grid = self.grid(timings)
+        clearance = self.tolerances['position_tolerance_cm']
+        if timings is not None:
+            timings['point_clearance_cm'] = clearance
         with measure(timings, 'point_collision_check'):
-            return [grid.free(pose) for pose in poses]
+            return [grid.free(pose, clearance_cm=clearance) for pose in poses]
 
     def point_is_free(self, pose, timings=None):
         return self.points_are_free([pose], timings=timings)[0]
@@ -270,7 +273,8 @@ class OwlEgoClient:
             state = self.rpc('GET', '/v21/navigation/status', {'task_id': task})
             if timings is not None:
                 timings['navigation'] = dict(task_id=task, status=state['status'],
-                    error_code=state.get('error_code'), timing_s=state.get('timing_s', {}))
+                    error_code=state.get('error_code'), timing_s=state.get('timing_s', {}),
+                    planning_diagnostics=state.get('planning_diagnostics', {}))
             if state['status'] == 'arrived' and state.get('stopped'):
                 self.wait_stopped()
                 p = self.pose()

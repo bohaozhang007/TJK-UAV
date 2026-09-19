@@ -56,3 +56,41 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
   res.message = out.str();
   return true;
 }
+
+std::string GridMap::v22PointState(const Eigen::Vector3d &point)
+{
+  if (!mp_.have_initialized_ || !md_.has_odom_ || v22_cloud_stamp_.isZero())
+    return "map_not_ready";
+  if (!point.allFinite()) return "nonfinite_point";
+  const Eigen::Vector3i id = pos2GlobalIdx(point);
+  const Eigen::Vector3i end = md_.ringbuffer_lowbound3i_ + md_.ringbuffer_size3i_;
+  if ((id.array() < md_.ringbuffer_lowbound3i_.array()).any() || (id.array() >= end.array()).any())
+    return "outside_map";
+  if (mp_.enable_virtual_walll_ && (point.z() <= mp_.virtual_ground_ || point.z() >= mp_.virtual_ceil_))
+    return "outside_height";
+  if (md_.occupancy_buffer_[globalIdx2BufIdx(id)] >= mp_.min_occupancy_log_)
+    return "raw_occupied";
+  if (md_.occupancy_buffer_inflate_[globalIdx2InfBufIdx(id)])
+    return "inflated_occupied";
+  return "free";
+}
+
+std::string GridMap::v22PointInfo(const Eigen::Vector3d &point)
+{
+  return "{\"position_world_m\":" + v22Vector(point) + ",\"state\":\"" + v22PointState(point) + "\"}";
+}
+
+std::string GridMap::v22MapInfo()
+{
+  if (!mp_.have_initialized_ || !md_.has_odom_ || v22_cloud_stamp_.isZero())
+    return "{\"ready\":false}";
+  std::ostringstream out;
+  out << std::setprecision(12) << "{\"version\":" << v22_map_version_
+      << ",\"stamp_s\":" << v22_cloud_stamp_.toSec()
+      << ",\"age_s\":" << (ros::Time::now()-v22_cloud_stamp_).toSec()
+      << ",\"resolution_m\":" << mp_.resolution_
+      << ",\"lower\":" << v22Vector(md_.ringbuffer_lowbound3i_.cast<double>())
+      << ",\"upper\":" << v22Vector((md_.ringbuffer_lowbound3i_+md_.ringbuffer_size3i_-Eigen::Vector3i::Ones()).cast<double>())
+      << '}';
+  return out.str();
+}

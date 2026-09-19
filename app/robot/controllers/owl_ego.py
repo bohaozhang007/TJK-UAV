@@ -117,7 +117,8 @@ class OwlEgoController:
                     raise ApiError('motion log is local only',403)
                 snap = self.hw.snapshot()
                 keys = ('task_id','kind','status','goal','started_wall_s','finished_wall_s',
-                        'before_pose','after_pose','before_epoch','after_epoch','relative_command','source','error')
+                        'before_pose','after_pose','before_epoch','after_epoch','relative_command','source','error',
+                        'error_code','planning_diagnostics')
                 return dict(ok=True, bridge_id=snap.get('bridge_id'), tasks=[
                     {k:t[k] for k in keys if k in t} for t in snap.get('tasks',{}).values()])
             if path == '/v21/capabilities':
@@ -145,7 +146,7 @@ class OwlEgoController:
                 raise ApiError('unknown task_id',404)
             task = snap['tasks'][tid]
             result = {k:v for k,v in dict(ok=True,**task).items()
-                      if k in ('ok','task_id','status','stopped','error','error_code','generation','timing_s','diagnostics','execution_error','takeoff_reference','localization_error')}
+                      if k in ('ok','task_id','status','stopped','error','error_code','generation','timing_s','diagnostics','planning_diagnostics','execution_error','takeoff_reference','localization_error')}
             # Immutable accepted world goal; land has no fixed position target.
             if task.get('kind') != 'land' and task.get('goal') is not None:
                 result['target'] = public_pose(task['goal'])
