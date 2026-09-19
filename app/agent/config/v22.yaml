@@ -19,7 +19,7 @@ mission:
 
     - name: waypoint_3
       x_cm: 350.0
-      y_cm: 800.0
+      y_cm: 900.0
       z_cm: 0.0
       yaw_deg: 90.0
 
@@ -42,8 +42,8 @@ orbit:
   radius_m: 1.0
   dwell_s: 1.0
 
-  all_cand: 6 # Equally spaced candidates.
-  top: 3 # Nearest reachable candidates to visit.
+  all_cand: 8 # Equally spaced candidates.
+  top: 2 # Nearest reachable candidates to visit.
 
 localization:
   min_target_voxels: 2
