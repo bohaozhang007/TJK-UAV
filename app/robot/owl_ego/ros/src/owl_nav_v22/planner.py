@@ -1,8 +1,4 @@
-"""Disposable upstream EGO processes; each callback closes over immutable ownership.
-
-No traj_server, no mandatory_stop resume, and no vendor/global planning topics.
-Process creation/teardown runs outside the flight control lock.
-"""
+"""One persistent EGO map with separate preview replies and fenced execution output."""
 import hashlib
 import os
 from pathlib import Path
@@ -15,20 +11,21 @@ import yaml
 
 
 class PlannerProcess:
-    def __init__(self, config, generation, goal, on_trajectory, on_heartbeat):
+    def __init__(self, config, identity, on_trajectory, on_heartbeat):
         import rospy
-        from traj_utils.msg import PolyTraj, DataDisp
+        from traj_utils.msg import DataDisp
+        from owl_nav_v22.msg import PlannerTrajectory
         from nav_msgs.msg import Odometry
         from sensor_msgs.msg import PointCloud2
-        from quadrotor_msgs.msg import GoalSet
-        from std_msgs.msg import Empty
+        from std_msgs.msg import String
         self.callback_lock=threading.Lock()
         self.closed=False
         self.ros = rospy
-        self.generation = generation
-        self.ns = '/owl_ego_v22/planners/g_'+generation
-        self.goal = goal
-        self.sent = False
+        self.identity = identity
+        self.generation = None
+        self.sequence = 0
+        self.failed = None
+        self.ns = '/owl_ego_v22/planners/g_'+identity
         self.birth = time.monotonic()
         self.milestones = {'process_setup_started': self.birth}
         self.handles = []
@@ -47,12 +44,11 @@ class PlannerProcess:
         self.map_observed = False
         self.odom_pub = rospy.Publisher(self.ns+'/odom',Odometry,queue_size=5)
         self.data_sub = rospy.Subscriber(self.ns+'/fsm_initialized',DataDisp,self.initialized,queue_size=1)
-        self.goal_pub = rospy.Publisher(self.ns+'/goal',GoalSet,queue_size=1)
-        self.handles = [self.goal_pub,self.odom_pub,self.data_sub,
+        self.handles = [self.odom_pub,self.data_sub,
             rospy.Subscriber('/owl_ego_v22/planner_odom',Odometry,self.odometry,queue_size=5),
             rospy.Subscriber(self.ns+'/map_observed',PointCloud2,self.map_received,queue_size=1),
-            rospy.Subscriber(self.ns+'/trajectory',PolyTraj,lambda m:on_trajectory(generation,m),queue_size=2),
-            rospy.Subscriber(self.ns+'/heartbeat',Empty,lambda m:on_heartbeat(generation),queue_size=2)]
+            rospy.Subscriber(self.ns+'/trajectory',PlannerTrajectory,lambda m:on_trajectory(identity,m),queue_size=2),
+            rospy.Subscriber(self.ns+'/heartbeat',String,lambda m:on_heartbeat(identity,m.data),queue_size=2)]
         remaps = {'~odom_world':self.ns+'/odom','~grid_map/odom':self.ns+'/odom',
                   '~planning/data_display':self.ns+'/fsm_initialized',
                   '~grid_map/occupancy_inflate':self.ns+'/map_observed',
@@ -69,7 +65,7 @@ class PlannerProcess:
             self.temporary_logs=tempfile.TemporaryDirectory(prefix='owl_ego_planner_')
             log_dir=self.temporary_logs.name
         Path(log_dir).mkdir(parents=True,exist_ok=True)
-        log_path=Path(log_dir)/(generation+'.log')
+        log_path=Path(log_dir)/(identity+'.log')
         self.log = open(log_path,'w')
         self.state_log = open(log_path,'r')
         self.state_tail=''
@@ -103,7 +99,8 @@ class PlannerProcess:
             self.milestones.setdefault('first_map_output',time.monotonic())
 
     def poll(self):
-        from quadrotor_msgs.msg import GoalSet
+        if self.failed:
+            raise RuntimeError(self.failed)
         if self.process.poll() is not None:
             raise RuntimeError('EGO process exited: '+str(self.process.returncode))
         # DataDisp is one-shot and can be lost during ROS connection setup.
@@ -116,11 +113,50 @@ class PlannerProcess:
                 self.fsm_ready=True
                 self.milestones.setdefault('fsm_initialized',time.monotonic())
                 self.milestones.setdefault('fsm_log_confirmation',time.monotonic())
-        if (self.goal is not None and not self.sent and self.fsm_ready and self.map_observed
-                and self.goal_pub.get_num_connections()):
-            self.goal_pub.publish(GoalSet(drone_id=0,goal=self.goal[:3]))
-            self.sent = True
+
+    def command(self, mode, generation='', goal=None, timeout=1.):
+        from geometry_msgs.msg import Point
+        from owl_nav_v22.srv import Plan, PlanRequest
+        self.poll()
+        self.sequence += 1
+        req = PlanRequest(sequence=self.sequence, mode=mode, generation=generation,
+                          deadline=self.ros.Time.now()+self.ros.Duration(timeout),
+                          goal=Point(*(goal[:3] if goal is not None else [0., 0., 0.])))
+        result, event = {}, threading.Event()
+        def call():
+            try:
+                service = self.ns+'/ego/planning/command'
+                self.ros.wait_for_service(service, timeout=min(.5, timeout))
+                result['value'] = self.ros.ServiceProxy(service, Plan)(req)
+            except Exception as exc:
+                result['error'] = exc
+            finally:
+                event.set()
+        threading.Thread(target=call, daemon=True).start()
+        if not event.wait(timeout):
+            self.failed = 'EGO command timed out; restart bridge before further planning'
+            raise RuntimeError(self.failed)
+        if 'error' in result:
+            self.failed = 'EGO command outcome uncertain: '+str(result['error'])
+            raise RuntimeError(self.failed)
+        response = result['value']
+        if not response.success:
+            raise RuntimeError(response.error)
+        return response
+
+    def select(self, generation, goal):
+        if generation == self.generation:
+            return
+        self.command('idle')
+        self.generation = None
+        if generation is not None:
+            self.command('execute', generation, goal)
+            self.generation = generation
             self.milestones['goal_sent'] = time.monotonic()
+
+    def preview(self, goal, timeout):
+        self.select(None, None)
+        return self.command('preview', goal=goal, timeout=timeout).trajectory
 
     def close(self):
         with self.callback_lock:

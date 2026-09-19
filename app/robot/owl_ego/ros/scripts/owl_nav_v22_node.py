@@ -47,7 +47,11 @@ class Node:
         self.landed = None
         self.conflict_at = -math.inf
         self.conflicts = ['preflight not checked']
-        self.idle_generation = uuid.uuid4().hex
+        self.planner_lock = threading.Lock()
+        self.planner = None
+        self.planner_error = None
+        self.planner_epoch = None
+        self.preview_active = False
         self.planner_generation = None
         self.status_sequence = 0
         self.bridge_id = uuid.uuid4().hex
@@ -77,6 +81,7 @@ class Node:
             self.subs += [rospy.Subscriber('/mavros/local_position/pose',PoseStamped,lambda m:self.reference('map',m),queue_size=5),
                           rospy.Subscriber('/mavros/vision_pose/pose',PoseStamped,lambda m:self.reference('lio',m),queue_size=5)]
         self.service = rospy.Service(topics['command'],Command,self.command)
+        self.preview_service = rospy.Service('/owl_ego_v22/preview',Command,self.preview)
         # Wall-clock loops remain live when simulated ROS time pauses.
         self.workers = []
         for target in (self.control_loop,self.planner_loop,self.audit_loop,self.fcu_loop):
@@ -209,6 +214,8 @@ class Node:
                     raise Rejected('command deadline expired')
                 now = time.monotonic()
                 op = data.pop('op')
+                if self.preview_active and op in ('navigate', 'relative', 'takeoff', 'init'):
+                    raise Rejected('path preview is still running')
                 if op in ('init', 'takeoff'):
                     self.camera_preflight.require_ready(now, rospy.Time.now().to_sec())
                 if op in ('init','takeoff','navigate','relative'):
@@ -252,7 +259,7 @@ class Node:
         h['frame_alignment_error'] = self.alignment.error if self.frames.vendor else None
         self.status_sequence += 1
         data = dict(health=h,session_id=c.session,bridge_id=self.bridge_id,sequence=self.status_sequence,
-                    planner_generation=self.planner_generation,
+                    planner_generation=self.planner_generation if self.planner_epoch == c.epoch else None,
                     pose=c.pose.tolist() if c.pose is not None else None,tasks=copy.deepcopy(c.tasks))
         data['control_sample'] = copy.deepcopy(self.last_control_sample)
         data['control_sample_age_s'] = (now-self.last_control_sample['monotonic_s']
@@ -322,54 +329,132 @@ class Node:
                     self.core.enabled = False
                 rospy.logerr_throttle(1,str(e))
 
-    def trajectory(self,g,m):
+    def preview(self, req):
+        acquired = False
         try:
-            traj = Polynomial(m)
+            data = json.loads(req.json)
+            goal = data['goal']
+            deadline = data['deadline']
+            if (not isinstance(goal, list) or len(goal) != 4 or not np.isfinite(goal).all()
+                    or not math.isfinite(deadline)):
+                raise Rejected('invalid preview request')
+            def guard():
+                c = self.core
+                now = time.monotonic()
+                c.owner(data['session_id'], now)
+                h = c.status(now)
+                if (self.stop.is_set() or rospy.Time.now().to_sec() >= deadline
+                        or data['localization_epoch'] != c.epoch or c.active is not None
+                        or not self.authorized(now)
+                        or not all(h[k] for k in ('initialized', 'airborne', 'stopped', 'control_ready', 'hold_ready', 'odom_ok'))):
+                    raise Rejected('preview requires current owner, epoch and stopped hold')
+                if self.planner_error or self.planner is None or self.planner_epoch != c.epoch:
+                    raise Rejected(self.planner_error or 'EGO map process is not ready')
+            acquired = self.planner_lock.acquire(blocking=False)
+            if not acquired:
+                raise Rejected('planner is busy')
             with self.lock:
+                guard()
+                self.preview_active = True
+                process = self.planner
+            timeout = min(self.c['queries']['preview_timeout_s'], deadline-rospy.Time.now().to_sec())
+            trajectory = Polynomial(process.preview(goal, timeout))
+            n = min(20000, max(2, math.ceil(trajectory.duration/.02)+1))
+            points = [trajectory.sample(trajectory.start+t)[0].tolist()
+                      for t in np.linspace(0, trajectory.duration, n)]
+            _, velocity, _ = trajectory.sample(trajectory.start+trajectory.duration)
+            with self.lock:
+                guard()
+            return CommandResponse(json=json.dumps(dict(ok=True, points=points,
+                end_velocity=velocity.tolist(), planner_generation=process.identity,
+                localization_epoch=data['localization_epoch']), allow_nan=False))
+        except Exception as exc:
+            return CommandResponse(json=json.dumps(dict(ok=False, error=str(exc))))
+        finally:
+            if acquired:
+                with self.lock:
+                    self.preview_active = False
+                self.planner_lock.release()
+
+    def trajectory(self,identity,m):
+        g = m.generation
+        try:
+            traj = Polynomial(m.trajectory)
+            with self.lock:
+                if identity != self.planner_generation:
+                    return
                 if g == self.core.generation and self.core.active:
                     validate_terminal_stop(traj, self.core.tasks[self.core.active]['goal'])
                 self.core.trajectory_received(g,traj,rospy.Time.now().to_sec(),time.monotonic())
         except Exception as e:
             with self.lock:
-                if g == self.core.generation:
+                if identity == self.planner_generation and g == self.core.generation:
                     self.core.fail('invalid EGO trajectory: '+str(e))
 
-    def heartbeat(self,g):
+    def heartbeat(self,identity,g):
         with self.lock:
-            self.core.planner_heartbeat(g,time.monotonic())
+            if identity == self.planner_generation:
+                self.core.planner_heartbeat(g,time.monotonic())
 
     def planner_loop(self):
-        process = None
         try:
-            while not self.stop.wait(.05):
+            with self.planner_lock:
                 with self.lock:
-                    g = self.core.generation or self.idle_generation
-                    task = self.core.tasks.get(self.core.active)
-                    goal = list(task['goal']) if task and self.core.generation and task.get('planner_required') else None
-                    if goal is None:
-                        g = self.idle_generation
+                    epoch = self.core.epoch
+                process = PlannerProcess(self.c, uuid.uuid4().hex, self.trajectory, self.heartbeat)
+                with self.lock:
+                    self.planner = process
+                    self.planner_generation = process.identity
+                    self.planner_epoch = epoch
+            while not self.stop.wait(.05):
+                if not self.planner_lock.acquire(blocking=False):
+                    continue
+                g = None
                 try:
-                    if not process or process.generation != g:
-                        if process:
-                            process.close()
-                            process = None
+                    with self.lock:
+                        current_epoch = self.core.epoch
+                    if current_epoch != epoch:
+                        # Discard maps only when the localization world is invalidated.
                         with self.lock:
-                            self.planner_generation = g
-                        process = PlannerProcess(self.c,g,goal,self.trajectory,self.heartbeat)
+                            self.planner_generation = None
+                            self.planner = None
+                        process.close()
+                        process = PlannerProcess(self.c, uuid.uuid4().hex, self.trajectory, self.heartbeat)
+                        with self.lock:
+                            self.planner = process
+                            self.planner_generation = process.identity
+                            self.planner_error = None
+                            self.planner_epoch = current_epoch
+                        epoch = current_epoch
+                    with self.lock:
+                        task = self.core.tasks.get(self.core.active)
+                        goal = list(task['goal']) if task and self.core.generation and task.get('planner_required') else None
+                        g = self.core.generation if goal is not None else None
                     process.poll()
+                    if process.fsm_ready and process.map_observed:
+                        process.select(g, goal)
                     with self.lock:
                         if self.core.generation == g and self.core.active:
                             task = self.core.tasks[self.core.active]
-                            task['timing_s'].update({k:v-task['started'] for k,v in process.milestones.copy().items()})
+                            task['timing_s'].update({k:v-task['started'] for k,v in process.milestones.copy().items()
+                                                    if v >= task['started']})
                 except Exception as e:
                     with self.lock:
-                        if self.core.generation == g:
+                        if process.failed or process.process.poll() is not None:
+                            self.planner_error = str(e)
+                        if g is not None and self.core.generation == g:
                             self.core.fail('planner failure: '+str(e))
                     rospy.logwarn_throttle(5,str(e))
-                    self.stop.wait(.5)
+                finally:
+                    self.planner_lock.release()
+        except Exception as exc:
+            with self.lock:
+                self.planner_error = 'planner startup failed: '+str(exc)
+            rospy.logerr(self.planner_error)
         finally:
-            if process:
-                process.close()
+            with self.planner_lock:
+                if self.planner:
+                    self.planner.close()
 
     def audit_loop(self):
         while not self.stop.is_set():

@@ -1,0 +1,9 @@
+uint64 sequence
+string generation
+string mode
+time deadline
+geometry_msgs/Point goal
+---
+bool success
+string error
+traj_utils/PolyTraj trajectory
