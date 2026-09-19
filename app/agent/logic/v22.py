@@ -260,10 +260,11 @@ class Mission:
         x, y, z = target['position_cm']
         z = max(self.c['safety']['safe_z_cm'], z)
         radius = self.c['orbit']['radius_m'] * 100
+        count = self.c['orbit'].get('all_cand', 6)
         start = math.atan2(exposure_pose['y']-y, exposure_pose['x']-x)
         points = []
-        for i in range(6):
-            angle = start + i * math.tau / 6  # Clockwise in the public Y-right frame.
+        for i in range(count):
+            angle = start + i * math.tau / count  # Clockwise in the public Y-right frame.
             px, py = x + radius*math.cos(angle), y + radius*math.sin(angle)
             points.append(dict(x=px, y=py, z=z, yaw=wrap(math.degrees(math.atan2(y-py, x-px)))))
         return points
@@ -284,9 +285,12 @@ class Mission:
             reachable.append(point)
         if not reachable:
             raise MissionError('zero reachable orbit points')
-        nearest = min(range(len(reachable)), key=lambda i: sum(
+        ranked = sorted(range(len(reachable)), key=lambda i: sum(
             (reachable[i][k]-exposure_pose[k])**2 for k in ('x', 'y', 'z')))
-        return reachable[nearest:] + reachable[:nearest]
+        selected = sorted(ranked[:self.c['orbit'].get('top', 6)])
+        start = selected.index(ranked[0])
+        # Keep clockwise order, starting at the nearest selected point.
+        return [reachable[i] for i in selected[start:] + selected[:start]]
 
     def take_photo(self, target, index):
         self.transition(State.PHOTO)
@@ -425,6 +429,10 @@ def validate_config(config):
     value = config['localization']['min_target_voxels']
     if type(value) is not int or not 1 <= value <= 1000:
         raise ValueError('invalid localization.min_target_voxels')
+    all_cand = config['orbit'].get('all_cand', 6)
+    top = config['orbit'].get('top', 6)
+    if type(all_cand) is not int or type(top) is not int or not 1 <= top <= all_cand:
+        raise ValueError('orbit.all_cand and orbit.top must be integers with 1 <= top <= all_cand')
     waypoints = config['mission']['waypoints']
     if not isinstance(waypoints,list) or not waypoints:
         raise ValueError('mission needs at least one waypoint')

@@ -36,6 +36,9 @@ orbit:
   radius_m: 1.0
   dwell_s: 1.0
 
+  all_cand: 6 # Equally spaced candidates.
+  top: 3 # Nearest reachable candidates to visit.
+
 localization:
   min_target_voxels: 2
   target_depth_gap_m: 0.3 # Depth gap between surface groups.
