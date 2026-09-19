@@ -24,7 +24,7 @@ mission:
       yaw_deg: 90.0
 
 safety:
-  error_action: labd # hold or land
+  error_action: land # hold or land
   safe_z_cm: 50.0 # World-height floor; orbit Z = max(this, target Z).
 
 patrol:

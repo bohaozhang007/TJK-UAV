@@ -1,6 +1,7 @@
 """Stop-and-detect mission. All physical operations use the public Robot interface."""
 import argparse
 import enum
+from http.client import HTTPException
 import json
 import math
 from pathlib import Path
@@ -25,6 +26,7 @@ from app.robot_client.factory import create_robot
 # Fixed service settings and bounded retry/loop limits.
 DETECTOR_PORT = 8790
 DETECTOR_TIMEOUT_S = 20.0
+DETECTOR_HEALTH_TIMEOUT_S = 5.0
 READ_ATTEMPTS = 2
 READ_RETRY_DELAY_S = 0.5
 MAX_STOPS_PER_WAYPOINT = 100
@@ -94,8 +96,18 @@ def stopping_point(path, goal, interval_cm, tolerance_cm):
 class Detector:
     def __init__(self, url):
         self.url = url.rstrip('/') + '/detect'
+        self.health_url = url.rstrip('/') + '/health'
         self.timeout = DETECTOR_TIMEOUT_S
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def health(self):
+        try:
+            with self.http.open(self.health_url, timeout=DETECTOR_HEALTH_TIMEOUT_S) as response:
+                data = json.load(response)
+                if response.status != 200 or not isinstance(data, dict) or data.get('ok') is not True:
+                    raise ValueError('expected HTTP 200 with {"ok": true}')
+        except (OSError, ValueError, HTTPException) as exc:
+            raise MissionError(f'detector health check failed at {self.health_url}: {exc}') from exc
 
     def detect(self, obs):
         body = dict(image=obs.jpeg_base64, frame_id=obs.frame_id)
@@ -433,10 +445,20 @@ def main():
         config = yaml.safe_load(file)
     try:
         validate_config(config)
-        robot = create_robot(config['localization'])
     except (ValueError,KeyError,TypeError) as exc:
         parser.error(str(exc))
     detector = Detector(f'http://{args.detector_host}:{DETECTOR_PORT}')
+    print(f'Checking detector: {detector.health_url} (timeout={DETECTOR_HEALTH_TIMEOUT_S:g}s)', flush=True)
+    started = time.monotonic()
+    try:
+        detector.health()
+    except MissionError as exc:
+        parser.exit(1, f'Error: {exc}; mission not started.\n')
+    print(f'Detector health OK ({time.monotonic()-started:.3f}s)', flush=True)
+    try:
+        robot = create_robot(config['localization'])
+    except (ValueError,KeyError,TypeError) as exc:
+        parser.error(str(exc))
     Mission(robot, detector, config, args.output).run()
 
 
