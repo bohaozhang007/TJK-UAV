@@ -19,7 +19,7 @@ mission:
 
     - name: waypoint_3
       x_cm: 350.0
-      y_cm: 700.0
+      y_cm: 800.0
       z_cm: 0.0
       yaw_deg: 90.0
 

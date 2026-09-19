@@ -338,9 +338,8 @@ class Mission:
             self.event('orbit_candidate', target_id=target['id'], candidate_index=index+1,
                        pose=point, available=available)
             if available:
-                distance = sum((point[k]-exposure_pose[k])**2 for k in ('x', 'y', 'z'))
-                candidates.append(dict(index=index, pose=point, distance=distance))
-        return sorted(candidates, key=lambda p: p['distance'])
+                candidates.append(dict(index=index, pose=point))
+        return candidates
 
     def take_photo(self, target, index):
         self.transition(State.PHOTO)
@@ -354,31 +353,35 @@ class Mission:
         self.current_target = target
         candidates = self.orbit_candidates(target, target['exposure_pose'])
         limit = self.c['orbit'].get('top', 6)
-        count = self.c['orbit'].get('all_cand', 6)
-        photos, last_index = 0, None
+        photos = 0
+        reference_pose = dict(target['exposure_pose'])
         while candidates and photos < limit:
             self.transition(State.ORBIT_PLAN)
-            batch, candidates = candidates[:limit-photos], candidates[limit-photos:]
-            start = batch[0]['index'] if last_index is None else last_index
-            batch.sort(key=lambda p: (p['index']-start) % count)
+            candidates.sort(key=lambda p: (
+                abs(wrap(p['pose']['yaw']-reference_pose['yaw'])),
+                sum((p['pose'][k]-reference_pose[k])**2 for k in ('x', 'y', 'z')),
+                p['index']))
+            candidate = candidates.pop(0)
+            point = candidate['pose']
             self.event('orbit_selection', target_id=target['id'],
-                       candidate_indices=[p['index']+1 for p in batch], completed_photos=photos)
-            for candidate in batch:
-                point = candidate['pose']
-                context = dict(target_id=target['id'], candidate_index=candidate['index']+1, pose=point)
-                if not self.retry_read('map point recheck',
-                        lambda t: self.robot.point_is_free(point, timings=t),
-                        pose=point, candidate_index=candidate['index']+1):
-                    self.event('orbit_point_skipped', **context, reason='point no longer free in current map')
-                    continue
+                       candidate_indices=[candidate['index']+1], completed_photos=photos,
+                       reference_pose=reference_pose,
+                       yaw_delta_deg=abs(wrap(point['yaw']-reference_pose['yaw'])))
+            context = dict(target_id=target['id'], candidate_index=candidate['index']+1, pose=point)
+            if not self.retry_read('map point recheck',
+                    lambda t: self.robot.point_is_free(point, timings=t),
+                    pose=point, candidate_index=candidate['index']+1):
+                self.event('orbit_point_skipped', **context, reason='point no longer free in current map')
+            else:
                 try:
                     self.fly_to(point, State.ORBIT_MOVE)
                 except NavigationPlanningFailed as exc:
                     self.event('orbit_point_skipped', **context, reason=str(exc))
-                    continue
-                photos += 1
-                last_index = candidate['index']
-                self.take_photo(target, photos)
+                else:
+                    photos += 1
+                    self.take_photo(target, photos)
+            if candidates and photos < limit:
+                reference_pose = self.robot.pose()
         if not photos:
             raise MissionError('zero reachable orbit points')
         self.fly_to(target['exposure_pose'], State.RETURN_CAPTURE)
