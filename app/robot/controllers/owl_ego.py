@@ -145,7 +145,7 @@ class OwlEgoController:
                 raise ApiError('unknown task_id',404)
             task = snap['tasks'][tid]
             result = {k:v for k,v in dict(ok=True,**task).items()
-                      if k in ('ok','task_id','status','stopped','error','generation','timing_s','diagnostics','execution_error','takeoff_reference','localization_error')}
+                      if k in ('ok','task_id','status','stopped','error','error_code','generation','timing_s','diagnostics','execution_error','takeoff_reference','localization_error')}
             # Immutable accepted world goal; land has no fixed position target.
             if task.get('kind') != 'land' and task.get('goal') is not None:
                 result['target'] = public_pose(task['goal'])

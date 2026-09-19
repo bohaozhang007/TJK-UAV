@@ -11,6 +11,10 @@ import yaml
 from app.timing import measure
 
 
+class PlanningFailed(RuntimeError):
+    """EGO confirmed no trajectory was published and reset its planning state."""
+
+
 class PlannerProcess:
     def __init__(self, config, identity, on_trajectory, on_heartbeat):
         import rospy
@@ -26,6 +30,7 @@ class PlannerProcess:
         self.generation = None
         self.sequence = 0
         self.failed = None
+        self.planning_timeout = config['control']['planning_timeout_s']
         self.ns = '/owl_ego_v22/planners/g_'+identity
         self.birth = time.monotonic()
         self.milestones = {'process_setup_started': self.birth}
@@ -142,6 +147,8 @@ class PlannerProcess:
             raise RuntimeError(self.failed)
         response = result['value']
         if not response.success:
+            if mode == 'execute' and response.error_code == 'planning_failed':
+                raise PlanningFailed(response.error)
             raise RuntimeError(response.error)
         return response
 
@@ -151,9 +158,9 @@ class PlannerProcess:
         self.command('idle')
         self.generation = None
         if generation is not None:
-            self.command('execute', generation, goal)
-            self.generation = generation
             self.milestones['goal_sent'] = time.monotonic()
+            self.command('execute', generation, goal, timeout=self.planning_timeout)
+            self.generation = generation
 
     def preview(self, goal, timeout, timings=None):
         with measure(timings, 'planner_idle'):

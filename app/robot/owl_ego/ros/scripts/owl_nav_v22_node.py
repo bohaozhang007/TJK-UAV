@@ -21,7 +21,7 @@ from app.robot.config_loader import load_robot_config
 from std_msgs.msg import String, Empty, Int32
 from owl_nav_v22.srv import Command, CommandResponse
 from owl_nav_v22.core import FlightCore, Polynomial, Rejected, validate_terminal_stop
-from owl_nav_v22.planner import PlannerProcess
+from owl_nav_v22.planner import PlannerProcess, PlanningFailed
 from owl_nav_v22.software_takeoff import prepare
 from owl_nav_v22.frames import Frames, Alignment
 from owl_nav_v22.cloud import validate as validate_cloud
@@ -436,7 +436,14 @@ class Node:
                         g = self.core.generation if goal is not None else None
                     process.poll()
                     if process.fsm_ready and process.map_observed:
-                        process.select(g, goal)
+                        planning_started = time.monotonic()
+                        changing = g != process.generation
+                        try:
+                            process.select(g, goal)
+                        finally:
+                            with self.lock:
+                                if changing and g is not None and self.core.generation == g and self.core.active:
+                                    self.core.tasks[self.core.active]['timing_s']['planning_service_s'] = time.monotonic()-planning_started
                     with self.lock:
                         if self.core.generation == g and self.core.active:
                             task = self.core.tasks[self.core.active]
@@ -447,6 +454,9 @@ class Node:
                         if process.failed or process.process.poll() is not None:
                             self.planner_error = str(e)
                         if g is not None and self.core.generation == g:
+                            task = self.core.tasks[self.core.active]
+                            if isinstance(e, PlanningFailed) and 'first_trajectory' not in task['timing_s']:
+                                task['error_code'] = 'planning_failed'
                             self.core.fail('planner failure: '+str(e))
                     rospy.logwarn_throttle(5,str(e))
                 finally:

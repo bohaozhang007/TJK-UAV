@@ -540,6 +540,9 @@ class FlightCore:
         if trajectory.start > stamp + .5 or trajectory.start + trajectory.duration < stamp:
             return False
         task = self.tasks[self.active]
+        if 'first_trajectory' not in task['timing_s']:
+            # A valid first trajectory may arrive before its heartbeat callback.
+            self.planner_at = now
         task['timing_s'].setdefault('first_trajectory', now-task['started'])
         if 'yaw_reference_end_stamp' not in task:
             turn_s = abs(wrap(task['goal'][3]-self.yaw))/self.c['yaw_rate_rad_s']

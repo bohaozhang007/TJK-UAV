@@ -55,24 +55,35 @@ namespace ego_planner
     v22Idle();
     try
     {
-      v22_preview_ = req.mode == "preview";
+      // Keep execution output fenced until generation and deadline checks finish.
+      v22_preview_ = true;
       if (!planNextWaypoint(Eigen::Vector3d(req.goal.x, req.goal.y, req.goal.z)))
-        throw std::runtime_error("EGO global planning failed");
-      if (v22_preview_)
       {
-        if (!planFromGlobalTraj(10))
-          throw std::runtime_error("EGO preview optimization failed");
-        traj_utils::MINCOTraj unused;
-        polyTraj2ROSMsg(res.trajectory, unused);
+        res.error_code = "planning_failed";
+        throw std::runtime_error("EGO global planning failed");
+      }
+      if (!planFromGlobalTraj(10))
+      {
+        res.error_code = "planning_failed";
+        throw std::runtime_error("EGO initial trajectory generation failed");
+      }
+      traj_utils::MINCOTraj broadcast;
+      polyTraj2ROSMsg(res.trajectory, broadcast);
+      if (req.deadline < ros::Time::now())
+        throw std::runtime_error("planner command expired during planning");
+      if (req.mode == "preview")
+      {
         v22Idle();
       }
       else
       {
+        v22_preview_ = false;
         v22_generation_ = req.generation;
         have_trigger_ = true;
+        changeFSMExecState(EXEC_TRAJ, "V22");
+        v22Publish(res.trajectory);
+        broadcast_ploytraj_pub_.publish(broadcast);
       }
-      if (req.deadline < ros::Time::now())
-        throw std::runtime_error("planner command expired during planning");
       res.success = true;
     }
     catch (const std::exception &error)

@@ -20,7 +20,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.timing import measure
-from app.robot_client.base import ControlLost, MissionError, Robot, TargetNotLocalizable
+from app.robot_client.base import ControlLost, MissionError, Robot, TargetNotLocalizable, NavigationPlanningFailed
 from app.robot_client.factory import create_robot
 
 
@@ -58,9 +58,9 @@ NEXT = {
     State.PATROL_MOVE: {State.DETECT},
     State.DETECT: {State.LOCALIZE},
     State.LOCALIZE: {State.ORBIT_PLAN, State.PATROL_PLAN, State.RETURN_HOME},
-    State.ORBIT_PLAN: {State.ORBIT_MOVE},
-    State.ORBIT_MOVE: {State.PHOTO},
-    State.PHOTO: {State.ORBIT_MOVE, State.RETURN_CAPTURE},
+    State.ORBIT_PLAN: {State.ORBIT_MOVE, State.RETURN_CAPTURE},
+    State.ORBIT_MOVE: {State.PHOTO, State.ORBIT_PLAN, State.RETURN_CAPTURE},
+    State.PHOTO: {State.ORBIT_MOVE, State.ORBIT_PLAN, State.RETURN_CAPTURE},
     State.RETURN_CAPTURE: {State.ORBIT_PLAN, State.PATROL_PLAN, State.RETURN_HOME},
     State.RETURN_HOME: {State.LANDING},
     State.LANDING: {State.COMPLETE},
@@ -250,8 +250,18 @@ class Mission:
             raise MissionError('navigation goal below safety height')
         self.transition(state)
         self.event('navigate', pose=pose)
-        self.robot.navigate(pose)
-        self.robot.wait_stopped()
+        started = time.monotonic()
+        timings = {}
+        try:
+            self.robot.navigate(pose, timings=timings)
+            self.robot.wait_stopped()
+        except BaseException as exc:
+            self.event('navigation_finished', pose=pose, status='error',
+                       elapsed_s=time.monotonic()-started, timings=timings,
+                       error=str(exc) or type(exc).__name__)
+            raise
+        self.event('navigation_finished', pose=pose, status='ok',
+                   elapsed_s=time.monotonic()-started, timings=timings)
 
     def capture_observation(self):
         return self.retry_read('observation', lambda t: self.robot.observe(timings=t))
@@ -319,28 +329,19 @@ class Mission:
             points.append(dict(x=px, y=py, z=z, yaw=wrap(math.degrees(math.atan2(y-py, x-px)))))
         return points
 
-    def reachable_orbit(self, target, exposure_pose):
+    def orbit_candidates(self, target, exposure_pose):
         self.transition(State.ORBIT_PLAN)
-        reachable = []
-        for point in self.orbit_points(target, exposure_pose):
-            if not self.retry_read('map point query', lambda t: self.robot.point_is_free(point, timings=t), pose=point):
-                continue
-            try:
-                self.retry_read('orbit preview', lambda t: self.robot.preview_path(point, require_arrival=True, timings=t), pose=point)
-            except ControlLost:
-                raise
-            except MissionError as exc:
-                self.event('unreachable_orbit_point', pose=point, error=str(exc))
-                continue
-            reachable.append(point)
-        if not reachable:
-            raise MissionError('zero reachable orbit points')
-        ranked = sorted(range(len(reachable)), key=lambda i: sum(
-            (reachable[i][k]-exposure_pose[k])**2 for k in ('x', 'y', 'z')))
-        selected = sorted(ranked[:self.c['orbit'].get('top', 6)])
-        start = selected.index(ranked[0])
-        # Keep clockwise order, starting at the nearest selected point.
-        return [reachable[i] for i in selected[start:] + selected[:start]]
+        points = self.orbit_points(target, exposure_pose)
+        free = self.retry_read('orbit point batch query',
+            lambda t: self.robot.points_are_free(points, timings=t))
+        candidates = []
+        for index, (point, available) in enumerate(zip(points, free)):
+            self.event('orbit_candidate', target_id=target['id'], candidate_index=index+1,
+                       pose=point, available=available)
+            if available:
+                distance = sum((point[k]-exposure_pose[k])**2 for k in ('x', 'y', 'z'))
+                candidates.append(dict(index=index, pose=point, distance=distance))
+        return sorted(candidates, key=lambda p: p['distance'])
 
     def take_photo(self, target, index):
         self.transition(State.PHOTO)
@@ -352,17 +353,38 @@ class Mission:
 
     def visit_target(self, target):
         self.current_target = target
-        points = self.reachable_orbit(target, target['exposure_pose'])
-        for index, point in enumerate(points):
-            # Recheck each segment from the actual current stop, not only from P.
-            if not self.retry_read('map point recheck', lambda t: self.robot.point_is_free(point, timings=t), pose=point):
-                raise MissionError('orbit point became occupied or left map coverage')
-            self.retry_read('orbit segment preview', lambda t: self.robot.preview_path(point, require_arrival=True, timings=t), pose=point)
-            self.fly_to(point, State.ORBIT_MOVE)
-            self.take_photo(target, index+1)
+        candidates = self.orbit_candidates(target, target['exposure_pose'])
+        limit = self.c['orbit'].get('top', 6)
+        count = self.c['orbit'].get('all_cand', 6)
+        photos, last_index = 0, None
+        while candidates and photos < limit:
+            self.transition(State.ORBIT_PLAN)
+            batch, candidates = candidates[:limit-photos], candidates[limit-photos:]
+            start = batch[0]['index'] if last_index is None else last_index
+            batch.sort(key=lambda p: (p['index']-start) % count)
+            self.event('orbit_selection', target_id=target['id'],
+                       candidate_indices=[p['index']+1 for p in batch], completed_photos=photos)
+            for candidate in batch:
+                point = candidate['pose']
+                context = dict(target_id=target['id'], candidate_index=candidate['index']+1, pose=point)
+                if not self.retry_read('map point recheck',
+                        lambda t: self.robot.point_is_free(point, timings=t),
+                        pose=point, candidate_index=candidate['index']+1):
+                    self.event('orbit_point_skipped', **context, reason='point no longer free in current map')
+                    continue
+                try:
+                    self.fly_to(point, State.ORBIT_MOVE)
+                except NavigationPlanningFailed as exc:
+                    self.event('orbit_point_skipped', **context, reason=str(exc))
+                    continue
+                photos += 1
+                last_index = candidate['index']
+                self.take_photo(target, photos)
+        if not photos:
+            raise MissionError('zero reachable orbit points')
         self.fly_to(target['exposure_pose'], State.RETURN_CAPTURE)
         target['status'] = 'completed'
-        self.event('target_completed', target=target)
+        self.event('target_completed', target=target, photo_count=photos)
         self.current_target = None
 
     def patrol(self):

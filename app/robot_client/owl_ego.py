@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image
 
 from app.timing import measure
-from .base import ControlLost, MissionError, Observation, TargetNotLocalizable
+from .base import ControlLost, MissionError, Observation, TargetNotLocalizable, NavigationPlanningFailed
 from app.robot.mapping import GridMap, TargetSurfaceUnavailable
 
 
@@ -238,10 +238,13 @@ class OwlEgoClient:
             except TargetSurfaceUnavailable as exc:
                 raise TargetNotLocalizable(str(exc)) from exc
 
-    def point_is_free(self, pose, timings=None):
+    def points_are_free(self, poses, timings=None):
         grid = self.grid(timings)
         with measure(timings, 'point_collision_check'):
-            return grid.free(pose)
+            return [grid.free(pose) for pose in poses]
+
+    def point_is_free(self, pose, timings=None):
+        return self.points_are_free([pose], timings=timings)[0]
 
     def preview_path(self, goal, require_arrival=False, timings=None):
         with measure(timings, 'wait_stopped'):
@@ -256,7 +259,7 @@ class OwlEgoClient:
             raise MissionError('invalid preview path')
         return points
 
-    def navigate(self, goal):
+    def navigate(self, goal, timings=None):
         self.wait_stopped()
         # Never replay a navigation after a transport failure or uncertain acceptance.
         result = self.rpc('POST', '/v21/navigation', {'pose': goal, 'localization_epoch': self.epoch})
@@ -265,6 +268,9 @@ class OwlEgoClient:
         while time.monotonic() < deadline:
             self.health()
             state = self.rpc('GET', '/v21/navigation/status', {'task_id': task})
+            if timings is not None:
+                timings['navigation'] = dict(task_id=task, status=state['status'],
+                    error_code=state.get('error_code'), timing_s=state.get('timing_s', {}))
             if state['status'] == 'arrived' and state.get('stopped'):
                 self.wait_stopped()
                 p = self.pose()
@@ -275,6 +281,11 @@ class OwlEgoClient:
                 self.navigation_id = None
                 return
             if state['status'] in ('failed', 'cancelled'):
+                if state['status'] == 'failed' and state.get('error_code') == 'planning_failed':
+                    with measure(timings, 'failed_plan_hold'):
+                        self.wait_stopped()
+                    self.navigation_id = None
+                    raise NavigationPlanningFailed(state['error'])
                 raise MissionError('navigation ' + str(state))
             time.sleep(.1)
         raise MissionError('navigation timeout')
