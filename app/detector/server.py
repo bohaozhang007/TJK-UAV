@@ -131,6 +131,7 @@ class DetectorHandler(BaseHTTPRequestHandler):
             self.reply(404, {"ok": False, "error": "unknown endpoint"})
             return
         received = time.perf_counter()
+        timings = {}
         logging.info("Request received client=%s content_length=%s", self.client_address[0],
                      self.headers.get("Content-Length"))
         try:
@@ -147,25 +148,37 @@ class DetectorHandler(BaseHTTPRequestHandler):
         except (ValueError, OSError) as exc:
             logging.warning("Request rejected client=%s elapsed_s=%.3f error=%s",
                             self.client_address[0], time.perf_counter() - received, exc)
-            self.reply(400, {"ok": False, "error": str(exc)})
+            self.reply(400, {"ok": False, "error": str(exc), "timings": {
+                "receive_decode": {"status": "error", "elapsed_s": time.perf_counter()-received}}})
             return
         try:
             logging.info("Inference started frame=%r image=%sx%s receive_decode_s=%.3f", frame_id,
                          image.shape[1], image.shape[0], time.perf_counter() - received)
             started = time.perf_counter()
-            detections = self.server.detector.detect(image, self.server.reference_image, self.server.reference_box)
+            timings['receive_decode'] = dict(status='ok', elapsed_s=started-received)
+            try:
+                detections = self.server.detector.detect(image, self.server.reference_image, self.server.reference_box)
+            except Exception:
+                timings['inference'] = dict(status='error', elapsed_s=time.perf_counter()-started)
+                raise
             inferred = time.perf_counter()
+            timings['inference'] = dict(status='ok', elapsed_s=inferred-started)
             logging.info("Inference finished frame=%r detections=%s inference_s=%.3f",
                          frame_id, len(detections), inferred - started)
-            encoded = [{**item, "mask": encode_mask(item["mask"])} for item in detections]
+            try:
+                encoded = [{**item, "mask": encode_mask(item["mask"])} for item in detections]
+            except Exception:
+                timings['mask_encode'] = dict(status='error', elapsed_s=time.perf_counter()-inferred)
+                raise
+            timings['mask_encode'] = dict(status='ok', elapsed_s=time.perf_counter()-inferred)
             logging.info("Masks encoded frame=%r encode_s=%.3f", frame_id, time.perf_counter() - inferred)
             result = {"ok": True, "image_size": [image.shape[1], image.shape[0]],
-                      "detections": encoded, "elapsed_s": time.perf_counter() - started}
+                      "detections": encoded, "elapsed_s": time.perf_counter() - started, "timings": timings}
             if frame_id is not None:
                 result["frame_id"] = frame_id
         except Exception as exc:
             logging.exception("Detection failed frame=%r elapsed_s=%.3f", frame_id, time.perf_counter() - received)
-            self.reply(500, {"ok": False, "error": str(exc)})
+            self.reply(500, {"ok": False, "error": str(exc), "timings": timings})
             return
         try:
             sending = time.perf_counter()

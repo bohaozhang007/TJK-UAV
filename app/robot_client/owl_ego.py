@@ -13,6 +13,7 @@ import uuid
 import numpy as np
 from PIL import Image
 
+from app.timing import measure
 from .base import ControlLost, MissionError, Observation
 from app.robot.mapping import GridMap
 
@@ -46,7 +47,7 @@ class OwlEgoClient:
         self.landing = False
         self.navigation_id = None
 
-    def rpc(self, method, path, data=None, timeout=1.):
+    def rpc(self, method, path, data=None, timeout=1., timings=None):
         data = dict(data or {})
         if method == 'POST' and self.session:
             data.setdefault('session_id', self.session)
@@ -57,12 +58,17 @@ class OwlEgoClient:
             path += '?' + urllib.parse.urlencode(data)
         request = urllib.request.Request(self.url + path, body, {'Content-Type': 'application/json'}, method=method)
         try:
-            with self.http.open(request, timeout=timeout) as response:
-                result = json.load(response)
+            with measure(timings, 'http_round_trip'):
+                with self.http.open(request, timeout=timeout) as response:
+                    result = json.load(response)
         except urllib.error.HTTPError as exc:
             with exc:
                 result = json.load(exc)
+            if timings is not None:
+                timings['server'] = result.get('timings', {})
             raise HttpError(exc.code, result) from exc
+        if timings is not None:
+            timings['server'] = result.get('timings', {})
         if result.get('ok') is not True:
             raise MissionError(str(result))
         return result
@@ -189,15 +195,17 @@ class OwlEgoClient:
         self.health()
         return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_jpeg_base64'], k, t, data['timestamp_s'])
 
-    def grid(self):
-        self.wait_stopped()
-        data = self.rpc('POST', '/v22/map', {'localization_epoch': self.epoch}, timeout=3.)
+    def grid(self, timings=None):
+        with measure(timings, 'wait_stopped'):
+            self.wait_stopped()
+        data = self.rpc('POST', '/v22/map', {'localization_epoch': self.epoch}, timeout=3., timings=timings)
         if data['localization_epoch'] != self.epoch:
             raise ControlLost('map localization epoch changed')
         self.health()
-        return GridMap(data['map'])
+        with measure(timings, 'map_decode'):
+            return GridMap(data['map'])
 
-    def locate_target(self, observation, mask):
+    def locate_target(self, observation, mask, timings=None):
         if observation.epoch != self.epoch:
             raise ControlLost('old exposure epoch')
         current = self.pose()
@@ -205,16 +213,21 @@ class OwlEgoClient:
         yaw = abs((current['yaw'] - observation.pose['yaw'] + 180) % 360 - 180)
         if delta > self.tolerances['position_tolerance_cm'] or yaw > self.tolerances['yaw_tolerance_deg']:
             raise MissionError('vehicle moved while awaiting detection')
-        return self.grid().locate(observation, mask, min_voxels=self.min_target_voxels,
-                                  depth_gap_m=self.target_depth_gap_m)
+        grid = self.grid(timings)
+        with measure(timings, 'mask_projection_and_localization'):
+            return grid.locate(observation, mask, min_voxels=self.min_target_voxels,
+                               depth_gap_m=self.target_depth_gap_m)
 
-    def point_is_free(self, pose):
-        return self.grid().free(pose)
+    def point_is_free(self, pose, timings=None):
+        grid = self.grid(timings)
+        with measure(timings, 'point_collision_check'):
+            return grid.free(pose)
 
-    def preview_path(self, goal, require_arrival=False):
-        self.wait_stopped()
+    def preview_path(self, goal, require_arrival=False, timings=None):
+        with measure(timings, 'wait_stopped'):
+            self.wait_stopped()
         result = self.rpc('POST', '/v22/preview', {'pose': goal, 'localization_epoch': self.epoch,
-                           'require_arrival': require_arrival}, timeout=PREVIEW_TIMEOUT_S + 2.)
+                           'require_arrival': require_arrival}, timeout=PREVIEW_TIMEOUT_S + 2., timings=timings)
         self.health()
         if result.get('localization_epoch') != self.epoch:
             raise ControlLost('preview localization epoch changed')

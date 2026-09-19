@@ -15,6 +15,7 @@ from mavros_msgs.srv import SetMode, CommandBool
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import PointCloud2, Image, Imu
+from app.timing import measure
 from app.robot.sensor_geometry import CameraPreflight
 from app.robot.config_loader import load_robot_config
 from std_msgs.msg import String, Empty, Int32
@@ -330,6 +331,7 @@ class Node:
                 rospy.logerr_throttle(1,str(e))
 
     def preview(self, req):
+        timings = {}
         acquired = False
         try:
             data = json.loads(req.json)
@@ -358,18 +360,20 @@ class Node:
                 self.preview_active = True
                 process = self.planner
             timeout = min(self.c['queries']['preview_timeout_s'], deadline-rospy.Time.now().to_sec())
-            trajectory = Polynomial(process.preview(goal, timeout))
-            n = min(20000, max(2, math.ceil(trajectory.duration/.02)+1))
-            points = [trajectory.sample(trajectory.start+t)[0].tolist()
-                      for t in np.linspace(0, trajectory.duration, n)]
-            _, velocity, _ = trajectory.sample(trajectory.start+trajectory.duration)
+            with measure(timings, 'planner_preview'):
+                trajectory = Polynomial(process.preview(goal, timeout, timings=timings))
+            with measure(timings, 'trajectory_sampling'):
+                n = min(20000, max(2, math.ceil(trajectory.duration/.02)+1))
+                points = [trajectory.sample(trajectory.start+t)[0].tolist()
+                          for t in np.linspace(0, trajectory.duration, n)]
+                _, velocity, _ = trajectory.sample(trajectory.start+trajectory.duration)
             with self.lock:
                 guard()
             return CommandResponse(json=json.dumps(dict(ok=True, points=points,
                 end_velocity=velocity.tolist(), planner_generation=process.identity,
-                localization_epoch=data['localization_epoch']), allow_nan=False))
+                localization_epoch=data['localization_epoch'], timings=timings), allow_nan=False))
         except Exception as exc:
-            return CommandResponse(json=json.dumps(dict(ok=False, error=str(exc))))
+            return CommandResponse(json=json.dumps(dict(ok=False, error=str(exc), timings=timings)))
         finally:
             if acquired:
                 with self.lock:

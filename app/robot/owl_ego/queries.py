@@ -3,6 +3,7 @@ import json
 import threading
 
 import numpy as np
+from app.timing import measure
 
 
 def validate_preview_path(points, grid):
@@ -76,28 +77,30 @@ class OwlQueries:
             raise RuntimeError('map changed generation or became stale during query')
         return result
 
-    def preview(self, session, epoch, goal, require_arrival):
+    def preview(self, session, epoch, goal, require_arrival, timings=None):
         import rospy
         from owl_nav_v22.srv import Command
         if not self.lock.acquire(blocking=False):
             raise RuntimeError('preview already running')
         try:
             snap = self.guard(session, epoch)
-            grid = self.map(session, epoch)
-            resolution = grid['resolution_m']
-            start = np.asarray(snap['pose'][:3], float)
-            xyz = np.asarray(goal[:3], float)
-            index = np.floor(xyz / resolution).astype(int)
-            if require_arrival and (np.any(index < grid['lower']) or np.any(index > grid['upper'])):
-                raise RuntimeError('goal outside current map bounds')
-            if not grid['ground_m'] < xyz[2] < grid['ceiling_m']:
-                raise RuntimeError('goal outside map height bounds')
-            if require_arrival and tuple(index) in {tuple(v) for v in grid['inflated']}:
-                raise RuntimeError('goal is in inflated occupancy')
-            if np.linalg.norm(start-xyz) < .01:
-                points = np.array([start, xyz])
-                validate_preview_path(points, grid)
-                return points.tolist()
+            with measure(timings, 'map_before'):
+                grid = self.map(session, epoch)
+            with measure(timings, 'goal_check'):
+                resolution = grid['resolution_m']
+                start = np.asarray(snap['pose'][:3], float)
+                xyz = np.asarray(goal[:3], float)
+                index = np.floor(xyz / resolution).astype(int)
+                if require_arrival and (np.any(index < grid['lower']) or np.any(index > grid['upper'])):
+                    raise RuntimeError('goal outside current map bounds')
+                if not grid['ground_m'] < xyz[2] < grid['ceiling_m']:
+                    raise RuntimeError('goal outside map height bounds')
+                if require_arrival and tuple(index) in {tuple(v) for v in grid['inflated']}:
+                    raise RuntimeError('goal is in inflated occupancy')
+                if np.linalg.norm(start-xyz) < .01:
+                    points = np.array([start, xyz])
+                    validate_preview_path(points, grid)
+                    return points.tolist()
             result = {}
             event = threading.Event()
             timeout = self.c['queries']['preview_timeout_s']
@@ -113,34 +116,40 @@ class OwlQueries:
                     result['error'] = exc
                 finally:
                     event.set()
-            threading.Thread(target=call, daemon=True).start()
-            if not event.wait(timeout+.5):
-                raise RuntimeError('EGO preview timed out')
-            if 'error' in result:
-                raise result['error']
-            data = result['value']
-            if not data.get('ok'):
-                raise RuntimeError(data.get('error', 'EGO preview failed'))
-            after = self.guard(session, epoch)
-            if (data['localization_epoch'] != epoch
-                    or data['planner_generation'] != snap.get('planner_generation')
-                    or data['planner_generation'] != after.get('planner_generation')):
-                raise RuntimeError('preview map process or localization epoch changed')
-            points = np.asarray(data['points'], float)
-            velocity = np.asarray(data['end_velocity'], float)
-            if (points.ndim != 2 or points.shape[1] != 3 or len(points) < 2
-                    or not np.isfinite(points).all() or velocity.shape != (3,) or not np.isfinite(velocity).all()):
-                raise RuntimeError('invalid EGO preview samples')
-            if np.linalg.norm(points[0]-start) > .15:
-                raise RuntimeError('preview start does not match current hold')
-            if require_arrival:
-                if np.linalg.norm(points[-1]-xyz) > .05 or np.linalg.norm(velocity) > .02:
-                    raise RuntimeError('EGO did not provide a complete path with zero terminal velocity')
+            with measure(timings, 'bridge_preview_round_trip'):
+                threading.Thread(target=call, daemon=True).start()
+                if not event.wait(timeout+.5):
+                    raise RuntimeError('EGO preview timed out')
+                if 'error' in result:
+                    raise result['error']
+                data = result['value']
+                if timings is not None:
+                    timings['bridge'] = data.get('timings', {})
+                if not data.get('ok'):
+                    raise RuntimeError(data.get('error', 'EGO preview failed'))
+            with measure(timings, 'trajectory_check'):
+                after = self.guard(session, epoch)
+                if (data['localization_epoch'] != epoch
+                        or data['planner_generation'] != snap.get('planner_generation')
+                        or data['planner_generation'] != after.get('planner_generation')):
+                    raise RuntimeError('preview map process or localization epoch changed')
+                points = np.asarray(data['points'], float)
+                velocity = np.asarray(data['end_velocity'], float)
+                if (points.ndim != 2 or points.shape[1] != 3 or len(points) < 2
+                        or not np.isfinite(points).all() or velocity.shape != (3,) or not np.isfinite(velocity).all()):
+                    raise RuntimeError('invalid EGO preview samples')
+                if np.linalg.norm(points[0]-start) > .15:
+                    raise RuntimeError('preview start does not match current hold')
+                if require_arrival:
+                    if np.linalg.norm(points[-1]-xyz) > .05 or np.linalg.norm(velocity) > .02:
+                        raise RuntimeError('EGO did not provide a complete path with zero terminal velocity')
             # Recheck the same persistent map after optimization and fresh cloud updates.
-            grid = self.map(session, epoch)
+            with measure(timings, 'map_after'):
+                grid = self.map(session, epoch)
             if self.guard(session, epoch).get('planner_generation') != data['planner_generation']:
                 raise RuntimeError('preview map process changed during validation')
-            validate_preview_path(points, grid)
+            with measure(timings, 'path_collision_check'):
+                validate_preview_path(points, grid)
             return points.tolist()
         finally:
             self.lock.release()

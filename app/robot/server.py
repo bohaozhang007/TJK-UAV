@@ -29,7 +29,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             status = getattr(exc, 'code', 400)
             result = dict(ok=False, error=str(exc), **{k: getattr(exc, k)
-                for k in ('error_code', 'retryable') if hasattr(exc, k)})
+                for k in ('error_code', 'retryable', 'timings') if hasattr(exc, k)})
         body = json.dumps(result, allow_nan=False).encode()
         try:
             self.send_response(status)

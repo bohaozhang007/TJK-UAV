@@ -8,6 +8,7 @@ import time
 import threading
 import tempfile
 import yaml
+from app.timing import measure
 
 
 class PlannerProcess:
@@ -154,9 +155,11 @@ class PlannerProcess:
             self.generation = generation
             self.milestones['goal_sent'] = time.monotonic()
 
-    def preview(self, goal, timeout):
-        self.select(None, None)
-        return self.command('preview', goal=goal, timeout=timeout).trajectory
+    def preview(self, goal, timeout, timings=None):
+        with measure(timings, 'planner_idle'):
+            self.select(None, None)
+        with measure(timings, 'ego_service'):
+            return self.command('preview', goal=goal, timeout=timeout).trajectory
 
     def close(self):
         with self.callback_lock:

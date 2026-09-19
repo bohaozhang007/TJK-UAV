@@ -6,6 +6,7 @@ import math
 import threading
 import time
 import uuid
+from app.timing import measure
 from ..config_loader import load_robot_config
 
 
@@ -197,15 +198,23 @@ class OwlEgoController:
         if path in ('/v22/map','/v22/preview'):
             self._owner(data)
             sid, epoch = data['session_id'], data.get('localization_epoch')
-            if path == '/v22/map':
-                return dict(ok=True,map=self.queries.map(sid,epoch),localization_epoch=epoch)
-            goal = enu_pose(data.get('pose'),self.config['control']['world_limit_m'])
-            arrival = data.get('require_arrival',False)
-            if type(arrival) is not bool:
-                raise ApiError('require_arrival must be boolean',400)
-            points = self.queries.preview(sid,epoch,goal,arrival)
-            return dict(ok=True,points_cm=[[p[0]*100,-p[1]*100,p[2]*100] for p in points],
-                        localization_epoch=epoch)
+            timings = {}
+            try:
+                if path == '/v22/map':
+                    with measure(timings, 'map_query'):
+                        grid = self.queries.map(sid,epoch)
+                    return dict(ok=True,map=grid,localization_epoch=epoch,timings=timings)
+                goal = enu_pose(data.get('pose'),self.config['control']['world_limit_m'])
+                arrival = data.get('require_arrival',False)
+                if type(arrival) is not bool:
+                    raise ApiError('require_arrival must be boolean',400)
+                points = self.queries.preview(sid,epoch,goal,arrival,timings=timings)
+                return dict(ok=True,points_cm=[[p[0]*100,-p[1]*100,p[2]*100] for p in points],
+                            localization_epoch=epoch,timings=timings)
+            except Exception as exc:
+                exc.timings = timings
+                raise
+
         return self._idempotent(path,data,lambda:self._mutate(path,data))
 
     def _operator_land(self,data,local_operator,op='operator_land'):

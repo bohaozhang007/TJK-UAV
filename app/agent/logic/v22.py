@@ -19,6 +19,7 @@ from PIL import Image
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from app.timing import measure
 from app.robot_client.base import ControlLost, MissionError, Robot
 from app.robot_client.factory import create_robot
 
@@ -109,11 +110,26 @@ class Detector:
         except (OSError, ValueError, HTTPException) as exc:
             raise MissionError(f'detector health check failed at {self.health_url}: {exc}') from exc
 
-    def detect(self, obs):
-        body = dict(image=obs.jpeg_base64, frame_id=obs.frame_id)
-        request = urllib.request.Request(self.url, json.dumps(body).encode(), {'Content-Type': 'application/json'})
-        with self.http.open(request, timeout=self.timeout) as response:
-            data = json.load(response)
+    def detect(self, obs, timings=None):
+        with measure(timings, 'request_encode'):
+            body = dict(image=obs.jpeg_base64, frame_id=obs.frame_id)
+            request = urllib.request.Request(self.url, json.dumps(body).encode(), {'Content-Type': 'application/json'})
+        with measure(timings, 'http_round_trip'):
+            try:
+                with self.http.open(request, timeout=self.timeout) as response:
+                    data = json.load(response)
+            except urllib.error.HTTPError as exc:
+                with exc:
+                    data = json.load(exc)
+                if timings is not None:
+                    timings['server'] = data.get('timings', {})
+                raise
+        if timings is not None:
+            timings['server'] = data.get('timings', {})
+        with measure(timings, 'validate_and_decode_masks'):
+            return self.decode(data, obs)
+
+    def decode(self, data, obs):
         if (data.get('ok') is not True or data.get('frame_id') != obs.frame_id
                 or data.get('image_size') != [obs.rgb.shape[1], obs.rgb.shape[0]]):
             raise MissionError('detector response does not match exposure')
@@ -148,6 +164,7 @@ class Mission:
         self.current_target = None
         self.origin = None
         self.attached = False
+        self.operation_id = 0
         self.events = (self.output/'events.jsonl').open('a', encoding='utf-8', buffering=1)
 
     def event(self, kind, **fields):
@@ -168,19 +185,40 @@ class Mission:
             self.robot.health()
             time.sleep(min(.1, max(0., deadline-time.monotonic())))
 
-    def retry_read(self, name, operation):
+    def retry_read(self, name, operation, **context):
         # Only observation/detection/preview operations; never replay navigation.
-        for attempt in range(READ_ATTEMPTS):
-            self.robot.health()
+        self.operation_id += 1
+        operation_id = self.operation_id
+        if self.current_target is not None:
+            context['target_id'] = self.current_target['id']
+        for attempt in range(1, READ_ATTEMPTS + 1):
+            timings = {}
+            started = time.monotonic()
+            fields = dict(operation=name, operation_id=operation_id, attempt=attempt, **context)
+            self.event('operation_started', **fields)
             try:
-                return operation()
-            except ControlLost:
-                raise
-            except Exception as exc:
-                self.event('read_retry', operation=name, attempt=attempt+1, error=str(exc))
-                if attempt + 1 == READ_ATTEMPTS:
+                with measure(timings, 'health'):
+                    self.robot.health()
+                with measure(timings, 'call'):
+                    result = operation(timings)
+            except BaseException as exc:
+                self.event('operation_finished', **fields, status='error',
+                           elapsed_s=time.monotonic()-started, timings=timings,
+                           error=str(exc) or type(exc).__name__)
+                if isinstance(exc, ControlLost) or not isinstance(exc, Exception) or 'call' not in timings:
+                    raise
+                self.event('read_retry', **fields, error=str(exc), will_retry=attempt < READ_ATTEMPTS)
+                if attempt == READ_ATTEMPTS:
                     raise MissionError(f'{name}: {exc}') from exc
-                self.guarded_wait(READ_RETRY_DELAY_S)
+                try:
+                    with measure(timings, 'retry_wait'):
+                        self.guarded_wait(READ_RETRY_DELAY_S)
+                finally:
+                    self.event('retry_wait', **fields, **timings['retry_wait'])
+            else:
+                self.event('operation_finished', **fields, status='ok',
+                           elapsed_s=time.monotonic()-started, timings=timings)
+                return result
 
     def attach(self):
         self.origin = self.robot.attach()
@@ -199,10 +237,10 @@ class Mission:
 
     def plan_stop(self, goal):
         self.transition(State.PATROL_PLAN)
-        path = self.retry_read('preview', lambda: self.robot.preview_path(goal))
+        path = self.retry_read('preview', lambda t: self.robot.preview_path(goal, timings=t), pose=goal)
         point, final = stopping_point(path, goal, self.c['patrol']['detection_stop_interval_m']*100,
                                       self.c['patrol']['waypoint_tolerance_cm'])
-        self.retry_read('stop preview', lambda: self.robot.preview_path(point, require_arrival=True))
+        self.retry_read('stop preview', lambda t: self.robot.preview_path(point, require_arrival=True, timings=t), pose=point)
         return point, final
 
     def fly_to(self, pose, state):
@@ -214,37 +252,41 @@ class Mission:
         self.robot.wait_stopped()
 
     def capture_observation(self):
-        return self.retry_read('observation', self.robot.observe)
+        return self.retry_read('observation', lambda t: self.robot.observe())
 
     def detect(self, observation):
         self.transition(State.DETECT)
-        def request():
+        def request(timings):
             outcome = queue.Queue(maxsize=1)
             def worker():
+                details = {}
                 try:
-                    outcome.put((True, self.detector.detect(observation)))
+                    result = self.detector.detect(observation, timings=details)
+                    outcome.put((True, result, details))
                 except Exception as exc:
-                    outcome.put((False, exc))
+                    outcome.put((False, exc, details))
             threading.Thread(target=worker, daemon=True).start()
             deadline = time.monotonic() + DETECTOR_TIMEOUT_S + 1.
             while time.monotonic() < deadline:
                 self.robot.health()
                 try:
-                    ok, result = outcome.get(timeout=.1)
+                    ok, result, details = outcome.get(timeout=.1)
+                    timings.update(details)
                 except queue.Empty:
                     continue
                 if not ok:
                     raise result
                 return result
             raise MissionError('detector request timed out')
-        return self.retry_read('detection', request)
+        return self.retry_read('detection', request, frame_id=observation.frame_id)
 
     def locate_new_targets(self, observation, detections):
         self.transition(State.LOCALIZE)
         new = []
         for detection in detections:
             position = self.retry_read('target localization',
-                lambda: self.robot.locate_target(observation, detection['mask']))
+                lambda t: self.robot.locate_target(observation, detection['mask'], timings=t),
+                frame_id=observation.frame_id)
             if any(np.linalg.norm(np.asarray(position)-record['position_cm']) < self.c['patrol']['dedup_distance_cm']
                    for record in self.targets):
                 self.event('duplicate', position_cm=position)
@@ -273,10 +315,10 @@ class Mission:
         self.transition(State.ORBIT_PLAN)
         reachable = []
         for point in self.orbit_points(target, exposure_pose):
-            if not self.retry_read('map point query', lambda: self.robot.point_is_free(point)):
+            if not self.retry_read('map point query', lambda t: self.robot.point_is_free(point, timings=t), pose=point):
                 continue
             try:
-                self.retry_read('orbit preview', lambda: self.robot.preview_path(point, require_arrival=True))
+                self.retry_read('orbit preview', lambda t: self.robot.preview_path(point, require_arrival=True, timings=t), pose=point)
             except ControlLost:
                 raise
             except MissionError as exc:
@@ -305,9 +347,9 @@ class Mission:
         points = self.reachable_orbit(target, target['exposure_pose'])
         for index, point in enumerate(points):
             # Recheck each segment from the actual current stop, not only from P.
-            if not self.retry_read('map point recheck', lambda: self.robot.point_is_free(point)):
+            if not self.retry_read('map point recheck', lambda t: self.robot.point_is_free(point, timings=t), pose=point):
                 raise MissionError('orbit point became occupied or left map coverage')
-            self.retry_read('orbit segment preview', lambda: self.robot.preview_path(point, require_arrival=True))
+            self.retry_read('orbit segment preview', lambda t: self.robot.preview_path(point, require_arrival=True, timings=t), pose=point)
             self.fly_to(point, State.ORBIT_MOVE)
             self.take_photo(target, index+1)
         self.fly_to(target['exposure_pose'], State.RETURN_CAPTURE)
