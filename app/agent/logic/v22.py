@@ -20,7 +20,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.timing import measure
-from app.robot_client.base import ControlLost, MissionError, Robot
+from app.robot_client.base import ControlLost, MissionError, Robot, TargetNotLocalizable
 from app.robot_client.factory import create_robot
 
 
@@ -209,6 +209,8 @@ class Mission:
                     raise
                 self.event('read_retry', **fields, error=str(exc), will_retry=attempt < READ_ATTEMPTS)
                 if attempt == READ_ATTEMPTS:
+                    if isinstance(exc, TargetNotLocalizable):
+                        raise
                     raise MissionError(f'{name}: {exc}') from exc
                 try:
                     with measure(timings, 'retry_wait'):
@@ -283,10 +285,16 @@ class Mission:
     def locate_new_targets(self, observation, detections):
         self.transition(State.LOCALIZE)
         new = []
-        for detection in detections:
-            position = self.retry_read('target localization',
-                lambda t: self.robot.locate_target(observation, detection['mask'], timings=t),
-                frame_id=observation.frame_id)
+        for index, detection in enumerate(detections, 1):
+            context = dict(frame_id=observation.frame_id, detection_index=index,
+                           confidence=detection['confidence'])
+            try:
+                position = self.retry_read('target localization',
+                    lambda t: self.robot.locate_target(observation, detection['mask'], timings=t),
+                    **context)
+            except TargetNotLocalizable as exc:
+                self.event('detection_skipped', **context, reason=str(exc))
+                continue
             if any(np.linalg.norm(np.asarray(position)-record['position_cm']) < self.c['patrol']['dedup_distance_cm']
                    for record in self.targets):
                 self.event('duplicate', position_cm=position)

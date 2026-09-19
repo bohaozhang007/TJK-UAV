@@ -11,6 +11,10 @@ class MissionError(RuntimeError):
     pass
 
 
+class TargetNotLocalizable(MissionError):
+    """This detection has insufficient geometric support."""
+
+
 @dataclass
 class Observation:
     frame_id: str

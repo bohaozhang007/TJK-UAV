@@ -2,6 +2,10 @@
 import numpy as np
 
 
+class TargetSurfaceUnavailable(ValueError):
+    pass
+
+
 class GridMap:
     def __init__(self, data):
         self.resolution = float(data['resolution_m'])
@@ -38,7 +42,8 @@ class GridMap:
         selected = mask[uv[:, 1], uv[:, 0]]
         world, camera, uv = world[selected], camera[selected], uv[selected]
         if len(world) < min_voxels:
-            raise ValueError('insufficient occupied target voxels in mask')
+            raise TargetSurfaceUnavailable(
+                f'insufficient occupied target voxels in mask: found={len(world)}, required={min_voxels}')
         # Nearest visible surface at each pixel, then separate foreground/background depths.
         order = np.argsort(camera[:, 2], kind='stable')
         _, first = np.unique(uv[order, 1] * w + uv[order, 0], return_index=True)
@@ -47,7 +52,7 @@ class GridMap:
         groups = np.split(np.arange(len(world)), np.flatnonzero(np.diff(camera[:, 2]) > depth_gap_m*100) + 1)
         groups = [group for group in groups if len(group) >= min_voxels]
         if not groups:
-            raise ValueError('no supported target surface in mask')
+            raise TargetSurfaceUnavailable('no supported target surface in mask')
         # Use the foremost supported depth group, not a wall behind the object.
         candidates = world[groups[0]]
         center = np.median(candidates, axis=0)

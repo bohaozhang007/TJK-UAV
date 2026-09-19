@@ -14,8 +14,8 @@ import numpy as np
 from PIL import Image
 
 from app.timing import measure
-from .base import ControlLost, MissionError, Observation
-from app.robot.mapping import GridMap
+from .base import ControlLost, MissionError, Observation, TargetNotLocalizable
+from app.robot.mapping import GridMap, TargetSurfaceUnavailable
 
 
 # Fixed local Robot deployment and control protocol timings.
@@ -232,8 +232,11 @@ class OwlEgoClient:
             raise MissionError('vehicle moved while awaiting detection')
         grid = self.grid(timings)
         with measure(timings, 'mask_projection_and_localization'):
-            return grid.locate(observation, mask, min_voxels=self.min_target_voxels,
-                               depth_gap_m=self.target_depth_gap_m)
+            try:
+                return grid.locate(observation, mask, min_voxels=self.min_target_voxels,
+                                   depth_gap_m=self.target_depth_gap_m)
+            except TargetSurfaceUnavailable as exc:
+                raise TargetNotLocalizable(str(exc)) from exc
 
     def point_is_free(self, pose, timings=None):
         grid = self.grid(timings)
