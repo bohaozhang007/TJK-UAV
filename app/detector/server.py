@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from PIL import Image
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from app.detector.image_log import ImageLog
 
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
@@ -112,17 +114,19 @@ class DetectorHandler(BaseHTTPRequestHandler):
         try:
             started = time.perf_counter()
             detections = self.server.detector.detect(image, self.server.reference_image, self.server.reference_box)
-            for item in detections:
-                item["mask"] = encode_mask(item["mask"])
+            encoded = [{**item, "mask": encode_mask(item["mask"])} for item in detections]
             result = {"ok": True, "image_size": [image.shape[1], image.shape[0]],
-                      "detections": detections, "elapsed_s": time.perf_counter() - started}
+                      "detections": encoded, "elapsed_s": time.perf_counter() - started}
             if frame_id is not None:
                 result["frame_id"] = frame_id
         except Exception as exc:
             logging.exception("Detection failed")
             self.reply(500, {"ok": False, "error": str(exc)})
             return
-        self.reply(200, result)
+        try:
+            self.reply(200, result)
+        finally:
+            self.server.image_log.submit(image, detections)
 
 
 def main():
@@ -143,11 +147,17 @@ def main():
     with HTTPServer((args.host, args.port), DetectorHandler) as server:
         server.reference_image, server.reference_box = reference, box
         server.detector = build_detector(args.det, args.model_root, args.checkpoint, args.device)
+        log_dir = (Path(__file__).resolve().parents[2] / "logs" / "detector"
+                   / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+        server.image_log = ImageLog(log_dir)
         print(f"Detector ready at http://{args.host}:{args.port}/detect (target={args.target})", flush=True)
+        print(f"Detection images: {log_dir}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
+        finally:
+            server.image_log.close()
 
 
 if __name__ == "__main__":
