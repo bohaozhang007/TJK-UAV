@@ -71,6 +71,6 @@ sensor_geometry:
 
 # Updated by the build script.
 planner:
-  executable: "/home/visbot/owl_ego_v22_ws/devel/lib/ego_planner/ego_planner_node"
-  sha256: ""
-  parameters: "/home/visbot/owl_ego_v22_ws/planner.yaml"
+  executable: /home/visbot/owl_ego_v22_ws/devel/lib/ego_planner/ego_planner_node
+  sha256: 7cabdb5ddeacc5070a94aabc10031e113e3069852f8dd57c42d496761759942d
+  parameters: /home/visbot/owl_ego_v22_ws/planner.yaml

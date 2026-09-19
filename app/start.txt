@@ -6,7 +6,7 @@ cd ~\Desktop\project\TJK-UAV
 uav: 
 t0 - bridge
 cd ~/TJK-UAV
-bash app/robot/owl_ego/build.sh # First use only.
+# First use only. bash app/robot/owl_ego/build.sh # First use only.
 bash app/run_owl_ego.sh bridge
 
 t1 - server
