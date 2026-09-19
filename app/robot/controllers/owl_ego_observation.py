@@ -1,6 +1,8 @@
 """Calibrated observation assembly, independent of ROS subscription lifetimes."""
 import base64
 import math
+import time
+from app.timing import measure
 import numpy as np
 from ..sensor_geometry import sensor_geometry
 
@@ -42,7 +44,7 @@ def interpolate_pose(history, stamp, max_sync):
     if a['frame'] != b['frame'] or a['body'] != b['body']:
         raise ValueError('odometry exposure frames mismatch')
     if sync > max_sync:
-        raise ObservationUnavailable('odometry/exposure synchronization failed')
+        raise ObservationUnavailable(f'odometry/exposure synchronization failed: sync_error_s={sync:.6f}, limit_s={max_sync:.6f}')
     f = 0 if b['stamp']==a['stamp'] else (stamp-a['stamp'])/(b['stamp']-a['stamp'])
     qa,qb = np.array(a['q']),np.array(b['q'])
     rotation(qa); rotation(qb)
@@ -149,68 +151,89 @@ def fixed_optical_rotation(hardware):
     return r
 
 
-def build_observation(hw):
-    import cv2
+def build_observation(hw, *, include_image=True, timings=None):
     from .owl_ego import public_pose
-    m,info,hist,epoch,edges = hw.camera_snapshot()
+    started = time.monotonic()
+    with measure(timings, 'camera_snapshot'):
+        m,info,hist,epoch,edges = hw.camera_snapshot()
     config = hw.c
     if m is None:
         raise ObservationUnavailable('RGB unavailable')
     stamp = m.header.stamp.to_sec()
     age = hw.now_s()-stamp
     if stamp <= 0 or not 0 <= age <= config['hardware']['rgb_max_age_s']:
-        raise ObservationUnavailable('stale RGB acquisition timestamp')
-    k,d,rectified,geometry = camera_intrinsics(config['hardware'],m,info)
-    world_body,sync,world,body = interpolate_pose(hist,stamp,config['hardware']['sync_max_s'])
-    mode = config['hardware'].get('extrinsics_mode','tf')
-    body_camera = np.eye(4)
-    if mode == 'body_coincident_fixed':
-        # User-authorized approximation: zero camera lever arm. Orientation is
-        # independent of that approximation and must be explicitly supplied.
-        body_camera[:3,:3] = fixed_optical_rotation(config['hardware'])
-    elif mode == 'sensor_geometry':
-        g = sensor_geometry(config)
-        if body != g['frames']['body'] or m.header.frame_id != g['frames']['camera_optical']:
-            raise ValueError('sensor geometry/image/odometry frame mismatch')
-        body_camera = np.asarray(g['body_from_camera_optical'])
-        geometry['profile_id'] = g['profile_id']
-        geometry['limitations'] = g.get('limitations', [])
-    elif mode == 'tf':
-        optical = config['hardware']['camera_optical_frame']
-        if not optical or m.header.frame_id != optical:
-            raise ValueError('camera optical frame must be explicitly calibrated and match RGB frame')
-        sync = max(sync,transform_sync_error(edges,body,optical,stamp,config['hardware']['sync_max_s']))
-        tf = hw.camera_transform(body,optical,m.header.stamp)
-        tr,qr = tf.transform.translation,tf.transform.rotation
-        body_camera[:3,:3] = rotation([qr.x,qr.y,qr.z,qr.w])
-        body_camera[:3,3] = [tr.x,tr.y,tr.z]
-        tf_stamp = tf.header.stamp.to_sec()
-        if tf_stamp:
-            sync = max(sync,abs(tf_stamp-stamp))
-        if sync > config['hardware']['sync_max_s'] or not np.isfinite(body_camera).all():
-            raise ValueError('invalid/stale camera TF')
-    else:
-        raise ValueError('unknown camera extrinsics_mode: '+str(mode))
-    bgr = hw.rgb_array(m)
-    if d is not None:
-        bgr = cv2.undistort(bgr,k,d,None,k)
-    # Keep rectified pixels and intrinsics at the camera's native resolution.
-    success,encoded = cv2.imencode('.png',bgr,[cv2.IMWRITE_PNG_COMPRESSION,1])
-    if not success:
-        raise ValueError('PNG encoding failed')
+        raise ObservationUnavailable(f'stale RGB acquisition timestamp: age_s={age:.6f}')
+    with measure(timings, 'geometry'):
+        k,d,rectified,geometry = camera_intrinsics(config['hardware'],m,info)
+        world_body,sync,world,body = interpolate_pose(hist,stamp,config['hardware']['sync_max_s'])
+        mode = config['hardware'].get('extrinsics_mode','tf')
+        body_camera = np.eye(4)
+        if mode == 'body_coincident_fixed':
+            # User-authorized approximation: zero camera lever arm. Orientation is
+            # independent of that approximation and must be explicitly supplied.
+            body_camera[:3,:3] = fixed_optical_rotation(config['hardware'])
+        elif mode == 'sensor_geometry':
+            g = sensor_geometry(config)
+            if body != g['frames']['body'] or m.header.frame_id != g['frames']['camera_optical']:
+                raise ValueError('sensor geometry/image/odometry frame mismatch')
+            body_camera = np.asarray(g['body_from_camera_optical'])
+            geometry['profile_id'] = g['profile_id']
+            geometry['limitations'] = g.get('limitations', [])
+        elif mode == 'tf':
+            optical = config['hardware']['camera_optical_frame']
+            if not optical or m.header.frame_id != optical:
+                raise ValueError('camera optical frame must be explicitly calibrated and match RGB frame')
+            sync = max(sync,transform_sync_error(edges,body,optical,stamp,config['hardware']['sync_max_s']))
+            tf = hw.camera_transform(body,optical,m.header.stamp)
+            tr,qr = tf.transform.translation,tf.transform.rotation
+            body_camera[:3,:3] = rotation([qr.x,qr.y,qr.z,qr.w])
+            body_camera[:3,3] = [tr.x,tr.y,tr.z]
+            tf_stamp = tf.header.stamp.to_sec()
+            if tf_stamp:
+                sync = max(sync,abs(tf_stamp-stamp))
+            if sync > config['hardware']['sync_max_s'] or not np.isfinite(body_camera).all():
+                raise ValueError('invalid/stale camera TF')
+        else:
+            raise ValueError('unknown camera extrinsics_mode: '+str(mode))
+    image_base64 = None
+    if include_image:
+        import cv2
+        with measure(timings, 'rgb_decode'):
+            bgr = hw.rgb_array(m)
+        with measure(timings, 'rectify'):
+            if d is not None:
+                bgr = cv2.undistort(bgr,k,d,None,k)
+        # Keep rectified pixels and intrinsics at the camera's native resolution.
+        with measure(timings, 'png_encode'):
+            success,encoded = cv2.imencode('.png',bgr,[cv2.IMWRITE_PNG_COMPRESSION,1])
+            if not success:
+                raise ValueError('PNG encoding failed')
+        with measure(timings, 'base64_encode'):
+            image_base64 = base64.b64encode(encoded).decode('ascii')
     transform = world_body@body_camera
     transform[:3,3] *= 100
     yaw = math.atan2(world_body[1,0],world_body[0,0])
     if epoch != hw.current_epoch():
         raise ObservationEpochChanged('localization changed during observation')
-    if not 0 <= hw.now_s()-stamp <= config['hardware']['rgb_max_age_s']:
-        raise ObservationUnavailable('RGB expired during observation assembly')
+    # Pair age with the processing interval already included in that age.
+    measured_at = time.monotonic()
+    age = hw.now_s()-stamp
+    assembly_elapsed = measured_at-started
+    if timings is not None:
+        timings['observation'] = dict(frame_id=epoch+':'+str(m.header.stamp.to_nsec()),
+            age_s=age, sync_error_s=sync, assembly_elapsed_s=assembly_elapsed,
+            max_age_s=config['hardware']['rgb_max_age_s'], max_sync_s=config['hardware']['sync_max_s'])
+    if not 0 <= age <= config['hardware']['rgb_max_age_s']:
+        raise ObservationUnavailable(f'RGB expired during observation assembly: age_s={age:.6f}, sync_error_s={sync:.6f}')
     geometry['extrinsics'] = mode
     geometry['camera_translation'] = ('body_coincident_assumption' if mode == 'body_coincident_fixed'
                                       else 'configured_sensor_geometry' if mode == 'sensor_geometry' else 'tf')
     quality = 'approximate' if not rectified or mode != 'tf' else 'calibrated'
-    return dict(ok=True,calibration_quality=quality,geometry_assumptions=geometry,frame_id=epoch+':'+str(m.header.stamp.to_nsec()),timestamp_s=stamp,
-                age_s=hw.now_s()-stamp,sync_error_s=sync,
+    result = dict(ok=True,calibration_quality=quality,geometry_assumptions=geometry,frame_id=epoch+':'+str(m.header.stamp.to_nsec()),timestamp_s=stamp,
+                age_s=age,assembly_elapsed_s=assembly_elapsed,sync_error_s=sync,
                 localization_epoch=epoch,world_frame=world,pose=public_pose([*world_body[:3,3],yaw]),
-                image_size=[m.width,m.height],rectified=rectified,rgb_image_base64=base64.b64encode(encoded).decode('ascii'),
+                image_size=[m.width,m.height],rectified=rectified,
                 intrinsics=k.tolist(),world_from_camera_optical_cm=transform.tolist())
+    if include_image:
+        result['rgb_image_base64'] = image_base64
+    return result

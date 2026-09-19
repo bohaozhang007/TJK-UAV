@@ -160,19 +160,17 @@ class OwlEgoClient:
             time.sleep(.1)
         raise MissionError('actual stop not confirmed')
 
-    def observe(self):
-        self.wait_stopped()
+    def observe(self, timings=None):
+        with measure(timings, 'wait_stopped'):
+            self.wait_stopped()
         sent = time.monotonic()
-        data = self.rpc('GET', '/v21/observation', timeout=1.)
+        data = self.rpc('GET', '/v21/observation', timeout=1., timings=timings)
         if data.get('localization_epoch') != self.epoch:
             self.error = 'observation localization epoch changed'
             raise ControlLost(self.error)
-        with Image.open(io.BytesIO(base64.b64decode(data['rgb_image_base64'], validate=True))) as im:
-            rgb = np.array(im.convert('RGB'))
-        age = float(data['age_s']) + time.monotonic() - sent
-        sync = float(data['sync_error_s'])
-        if not 0 <= age <= .5 or not 0 <= sync <= .05:
-            raise MissionError('observation is stale or unsynchronized')
+        with measure(timings, 'image_decode'):
+            with Image.open(io.BytesIO(base64.b64decode(data['rgb_image_base64'], validate=True))) as im:
+                rgb = np.array(im.convert('RGB'))
         quality = data.get('calibration_quality')
         if (data.get('rectified') is not True or quality not in ('calibrated', 'approximate')
                 or quality == 'approximate' and not ALLOW_APPROXIMATE_GEOMETRY):
@@ -192,7 +190,26 @@ class OwlEgoClient:
                 or not np.isclose(np.linalg.det(t[:3, :3]), 1, atol=1e-4)
                 or data['image_size'] != [rgb.shape[1], rgb.shape[0]]):
             raise MissionError('invalid observation geometry')
-        self.health()
+        with measure(timings, 'health_after'):
+            self.health()
+        with measure(timings, 'freshness_check'):
+            elapsed = time.monotonic() - sent
+            server_age = float(data['age_s'])
+            assembly = float(data['assembly_elapsed_s'])
+            sync = float(data['sync_error_s'])
+            if not all(math.isfinite(v) for v in (server_age, assembly, sync)) or not 0 <= assembly <= elapsed:
+                raise MissionError('invalid observation timing metadata')
+            # Request/response overhead remains a conservative age allowance.
+            age = server_age + elapsed - assembly
+            if timings is not None:
+                timings['observation'] = dict(frame_id=data['frame_id'], server_age_s=server_age,
+                    server_assembly_elapsed_s=assembly, client_elapsed_s=elapsed,
+                    age_upper_bound_s=age, sync_error_s=sync, max_age_s=.5, max_sync_s=.05)
+            if server_age < 0 or not 0 <= age <= .5:
+                raise MissionError(f'observation stale: age_upper_bound_s={age:.6f}, limit_s=0.500000, '
+                                   f'server_age_s={server_age:.6f}, assembly_s={assembly:.6f}, client_elapsed_s={elapsed:.6f}')
+            if not 0 <= sync <= .05:
+                raise MissionError(f'observation unsynchronized: sync_error_s={sync:.6f}, limit_s=0.050000')
         return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_image_base64'], k, t, data['timestamp_s'])
 
     def grid(self, timings=None):

@@ -252,7 +252,7 @@ class Mission:
         self.robot.wait_stopped()
 
     def capture_observation(self):
-        return self.retry_read('observation', lambda t: self.robot.observe())
+        return self.retry_read('observation', lambda t: self.robot.observe(timings=t))
 
     def detect(self, observation):
         self.transition(State.DETECT)
