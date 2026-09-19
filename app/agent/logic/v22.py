@@ -44,6 +44,8 @@ class State(enum.Enum):
     LANDING = 'landing'
     COMPLETE = 'complete'
     ERROR_HOLD = 'error_hold'
+    ERROR_LANDING = 'error_landing'
+    FAILED = 'failed'
     CONTROL_LOST = 'control_lost'
 
 
@@ -59,6 +61,7 @@ NEXT = {
     State.RETURN_CAPTURE: {State.ORBIT_PLAN, State.PATROL_PLAN, State.RETURN_HOME},
     State.RETURN_HOME: {State.LANDING},
     State.LANDING: {State.COMPLETE},
+    State.ERROR_LANDING: {State.FAILED},
 }
 
 
@@ -142,7 +145,7 @@ class Mission:
 
     def transition(self, state):
         if (state != self.state and state not in NEXT.get(self.state, set())
-                and state not in (State.ERROR_HOLD, State.CONTROL_LOST)):
+                and state not in (State.ERROR_HOLD, State.ERROR_LANDING, State.CONTROL_LOST)):
             raise RuntimeError(f'invalid state transition {self.state.value} -> {state.value}')
         self.state = state
         self.event('state')
@@ -321,12 +324,32 @@ class Mission:
         self.robot.land()
         self.transition(State.COMPLETE)
 
-    def error_hold(self, error):
-        self.transition(State.ERROR_HOLD)
+    def handle_error(self, error):
         for target in self.targets:
             if target['status'] == 'pending':
                 target['status'] = 'failed'  # Never automatically revisit failed targets.
-        self.event('error', error=str(error), targets=self.targets)
+        action = self.c['safety']['error_action']
+        self.event('error', error=str(error) or type(error).__name__, action=action, targets=self.targets)
+        if action == 'land':
+            self.error_land()
+        else:
+            self.error_hold()
+
+    def error_land(self):
+        self.transition(State.ERROR_LANDING)
+        try:
+            self.robot.land()
+        except ControlLost:
+            raise
+        except Exception as exc:
+            # Acceptance may be uncertain; never replay or cancel this landing.
+            self.event('landing_unconfirmed', error=str(exc))
+            raise
+        self.transition(State.FAILED)
+        self.event('error_landing_confirmed')
+
+    def error_hold(self):
+        self.transition(State.ERROR_HOLD)
         try:
             self.robot.stop()
             self.event('hold_confirmed', message='Use console stop/land or pilot takeover; no automatic landing.')
@@ -352,19 +375,16 @@ class Mission:
         except ControlLost as exc:
             self.transition(State.CONTROL_LOST)
             self.event('control_lost', error=str(exc))
-        except KeyboardInterrupt:
-            if self.attached:
-                self.robot.stop()
-        except Exception as exc:
+        except (Exception, KeyboardInterrupt) as exc:
             if not self.attached or self.state == State.LANDING:
                 raise
             try:
-                self.error_hold(exc)
+                self.handle_error(exc)
             except ControlLost as lost:
                 self.transition(State.CONTROL_LOST)
                 self.event('control_lost', error=str(lost))
             except KeyboardInterrupt:
-                self.event('hold_monitor_stopped')
+                self.event('error_monitor_stopped')
         finally:
             if self.state != State.COMPLETE:
                 for target in self.targets:
@@ -378,6 +398,8 @@ class Mission:
 
 
 def validate_config(config):
+    if config['safety']['error_action'] not in ('hold', 'land'):
+        raise ValueError('safety.error_action must be hold or land')
     positive = {
         'localization': ('target_depth_gap_m',), 'safety': ('safe_z_cm',),
         'patrol': ('detection_stop_interval_m','dedup_distance_cm','waypoint_tolerance_cm'),
