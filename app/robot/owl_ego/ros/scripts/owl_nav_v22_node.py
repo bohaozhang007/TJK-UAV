@@ -340,26 +340,38 @@ class Node:
             if (not isinstance(goal, list) or len(goal) != 4 or not np.isfinite(goal).all()
                     or not math.isfinite(deadline)):
                 raise Rejected('invalid preview request')
+            budget = min(self.c['queries']['preview_timeout_s'], deadline-rospy.Time.now().to_sec())
+            if budget <= 0:
+                raise Rejected('preview request deadline expired')
+            wall_deadline = time.monotonic() + budget
             def guard():
                 c = self.core
                 now = time.monotonic()
                 c.owner(data['session_id'], now)
                 h = c.status(now)
-                if (self.stop.is_set() or rospy.Time.now().to_sec() >= deadline
+                if (self.stop.is_set() or rospy.Time.now().to_sec() >= deadline or now >= wall_deadline
                         or data['localization_epoch'] != c.epoch or c.active is not None
                         or not self.authorized(now)
                         or not all(h[k] for k in ('initialized', 'airborne', 'stopped', 'control_ready', 'hold_ready', 'odom_ok'))):
                     raise Rejected('preview requires current owner, epoch and stopped hold')
                 if self.planner_error or self.planner is None or self.planner_epoch != c.epoch:
                     raise Rejected(self.planner_error or 'EGO map process is not ready')
-            acquired = self.planner_lock.acquire(blocking=False)
-            if not acquired:
-                raise Rejected('planner is busy')
+            with measure(timings, 'planner_lock_wait'):
+                while not acquired:
+                    remaining = min(wall_deadline-time.monotonic(), deadline-rospy.Time.now().to_sec())
+                    if remaining <= 0:
+                        raise Rejected('preview planner lock wait timed out')
+                    with self.lock:
+                        guard()
+                    # Never hold the control-state lock while waiting for the planner.
+                    acquired = self.planner_lock.acquire(timeout=min(.05, remaining))
             with self.lock:
                 guard()
                 self.preview_active = True
                 process = self.planner
-            timeout = min(self.c['queries']['preview_timeout_s'], deadline-rospy.Time.now().to_sec())
+            timeout = min(wall_deadline-time.monotonic(), deadline-rospy.Time.now().to_sec())
+            if timeout <= 0:
+                raise Rejected('preview request deadline expired before planning')
             with measure(timings, 'planner_preview'):
                 trajectory = Polynomial(process.preview(goal, timeout, timings=timings))
             with measure(timings, 'trajectory_sampling'):

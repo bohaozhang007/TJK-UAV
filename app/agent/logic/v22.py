@@ -242,7 +242,6 @@ class Mission:
         path = self.retry_read('preview', lambda t: self.robot.preview_path(goal, timings=t), pose=goal)
         point, final = stopping_point(path, goal, self.c['patrol']['detection_stop_interval_m']*100,
                                       self.c['patrol']['waypoint_tolerance_cm'])
-        self.retry_read('stop preview', lambda t: self.robot.preview_path(point, require_arrival=True, timings=t), pose=point)
         return point, final
 
     def fly_to(self, pose, state):

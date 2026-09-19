@@ -5,29 +5,29 @@ mission:
 
   # Origin/heading: initial hover. Y right; yaw clockwise; z=0 keeps hover height.
   waypoints:
-    # - name: waypoint_1
-    #   x_cm: 500.0
-    #   y_cm: 0.0
-    #   z_cm: 0.0
-    #   yaw_deg: 0.0
-
-    # - name: waypoint_2
-    #   x_cm: 350.0
-    #   y_cm: 0.0
-    #   z_cm: 0.0
-    #   yaw_deg: 90.0
-
-    # - name: waypoint_3
-    #   x_cm: 350.0
-    #   y_cm: 700.0
-    #   z_cm: 0.0
-    #   yaw_deg: 90.0
-
-    - name: waypoint_3
-      x_cm: 200.0
+    - name: waypoint_1
+      x_cm: 500.0
       y_cm: 0.0
       z_cm: 0.0
       yaw_deg: 0.0
+
+    - name: waypoint_2
+      x_cm: 350.0
+      y_cm: 0.0
+      z_cm: 0.0
+      yaw_deg: 90.0
+
+    - name: waypoint_3
+      x_cm: 350.0
+      y_cm: 700.0
+      z_cm: 0.0
+      yaw_deg: 90.0
+
+    # - name: waypoint_3
+    #   x_cm: 200.0
+    #   y_cm: 0.0
+    #   z_cm: 0.0
+    #   yaw_deg: 0.0
 
 safety:
   error_action: land # hold or land
