@@ -15,6 +15,7 @@ import yaml
 
 from ..hardware.i7 import I7Hardware
 from ..hardware.k40t import K40TClient
+from .i7_framing import autofocus_box
 
 
 def _load_i7_nav_config(config_path: Optional[str | Path] = None) -> dict:
@@ -211,6 +212,7 @@ class I7Controller:
             ),
         )
         self._operation_lock = threading.RLock()
+        self._camera_operation_lock = threading.RLock()
         self._image_lock = threading.RLock()
         self._image_dir = Path(image_dir or "captures").expanduser().resolve()
         self._image_dir.mkdir(parents=True, exist_ok=True)
@@ -307,19 +309,33 @@ class I7Controller:
             monitor.join()
 
     def zoom(self, ratio: float) -> Dict[str, Any]:
-        return self._camera_control.set_zoom(ratio)
+        with self._camera_operation_lock:
+            return self._camera_control.set_zoom(ratio)
 
     def get_zoom(self) -> Dict[str, Any]:
-        return self._camera_control.get_zoom()
+        with self._camera_operation_lock:
+            return self._camera_control.get_zoom()
 
     def gimbal_yaw(self, delta_deg: float) -> Dict[str, Any]:
-        return self._camera_control.gimbal_yaw(delta_deg)
+        with self._camera_operation_lock:
+            return self._camera_control.gimbal_yaw(delta_deg)
 
     def gimbal_pitch(self, delta_deg: float) -> Dict[str, Any]:
-        return self._camera_control.gimbal_pitch(delta_deg)
+        with self._camera_operation_lock:
+            return self._camera_control.gimbal_pitch(delta_deg)
 
     def get_gimbal(self) -> Dict[str, Any]:
-        return self._camera_control.get_gimbal()
+        with self._camera_operation_lock:
+            return self._camera_control.get_gimbal()
+
+    def autofocus(self, img: np.ndarray, box, **options) -> Dict[str, Any]:
+        """Center a current BGR image's xyxy box and frame it at 40% occupancy.
+
+        Uses live frames to track a textured, approximately stationary target.
+        This adjusts gimbal/zoom only; it does not issue lens-focus commands.
+        """
+        with self._camera_operation_lock:
+            return autofocus_box(self, img, box, self._hardware.get_bgr_after, **options)
 
     def get_rgb_meta(self, save: bool = True) -> Dict[str, Any]:
         frame = self._get_native_bgr()

@@ -441,6 +441,19 @@ class I7Hardware:
                 raise RuntimeError(f"missing or stale I7 RTSP frame{detail}")
             return np.asarray(self._rgb["frame_bgr"]).copy()
 
+    def get_bgr_after(self, after_monotonic: float, timeout_s: float = 3.0) -> np.ndarray:
+        """Wait for a frame received after a camera action/settling deadline."""
+        deadline = time.monotonic() + timeout_s
+        with self._condition:
+            while True:
+                if self._rgb and self._rgb["received_monotonic"] > after_monotonic:
+                    if self._fresh(self._rgb, time.monotonic(), self.rgb_max_age_s):
+                        return np.asarray(self._rgb["frame_bgr"]).copy()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self._camera_stop.is_set():
+                    raise RuntimeError(f"No fresh camera frame after adjustment: {self._camera_error}")
+                self._condition.wait(timeout=remaining)
+
     def health(self) -> Dict[str, Any]:
         with self._lock:
             return self._health_locked()

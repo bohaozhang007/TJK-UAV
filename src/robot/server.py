@@ -446,7 +446,7 @@ def run_console(
         "init | takeoff | k | get_rgb_meta | get_depth_meta | get_pose | "
         "move_rel_xyz X Y Z | move_rel_xyz_yaw X Y Z YAW | "
         "rotate YAW (aircraft) | gimbal_yaw DELTA_DEG | gimbal_pitch DELTA_DEG | get_gimbal | "
-        "zoom RATIO | get_zoom | health | abort | land | force_land | close | quit"
+        "zoom RATIO | get_zoom | autofocus X1 Y1 X2 Y2 | health | abort | land | force_land | close | quit"
     )
     while True:
         try:
@@ -504,6 +504,18 @@ def run_console(
                 finally:
                     if controller.health().get("initialized"):
                         keepalive.start_keepalive()
+            elif cmd == "autofocus":
+                import cv2
+
+                method = getattr(controller, "autofocus", None)
+                if method is None:
+                    raise NotImplementedError("autofocus is unsupported by this controller")
+                if len(parts) != 5:
+                    raise ValueError("usage: autofocus X1 Y1 X2 Y2 (pixels in the current native image)")
+                box = [float(value) for value in parts[1:]]
+                frame = cv2.imdecode(np.frombuffer(controller.get_rgb_byte(), np.uint8), cv2.IMREAD_COLOR)
+                print("[I7] 正在跟踪目标并调整云台/倍率，目标占比约 40%。", flush=True)
+                print(method(frame, box))
             elif cmd in {"gimbal_yaw", "gimbal_pitch", "get_gimbal"}:
                 method = getattr(controller, cmd, None)
                 if method is None:
