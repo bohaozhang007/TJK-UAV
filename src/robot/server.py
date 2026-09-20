@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -419,18 +420,33 @@ def run_http_server(
     return server
 
 
+def _enable_console_line_editing() -> None:
+    if not sys.stdin.isatty():
+        return
+    try:
+        # Importing readline enables editing/history for Python's input().
+        import readline
+    except ImportError:
+        print("Console line editing unavailable: Python readline is not installed.", flush=True)
+        return
+    readline.parse_and_bind("set editing-mode emacs")
+    readline.set_auto_history(True)
+
+
 def run_console(
     controller: RobotController,
     keepalive: Keepalive,
     keyboard_op: KeyboardOp | None = None,
 ):
+    _enable_console_line_editing()
     if keyboard_op is None:
         keyboard_op = KeyboardOp(controller)
     print(
         "Headless console ready. Commands: "
         "init | takeoff | k | get_rgb_meta | get_depth_meta | get_pose | "
         "move_rel_xyz X Y Z | move_rel_xyz_yaw X Y Z YAW | "
-        "rotate YAW | health | abort | land | force_land | close | quit"
+        "rotate YAW (aircraft) | gimbal_yaw DELTA_DEG | gimbal_pitch DELTA_DEG | get_gimbal | "
+        "zoom RATIO | get_zoom | health | abort | land | force_land | close | quit"
     )
     while True:
         try:
@@ -488,6 +504,30 @@ def run_console(
                 finally:
                     if controller.health().get("initialized"):
                         keepalive.start_keepalive()
+            elif cmd in {"gimbal_yaw", "gimbal_pitch", "get_gimbal"}:
+                method = getattr(controller, cmd, None)
+                if method is None:
+                    raise NotImplementedError(f"{cmd} is unsupported by this controller")
+                if cmd == "get_gimbal":
+                    if len(parts) != 1:
+                        raise ValueError("usage: get_gimbal")
+                    print(method())
+                else:
+                    if len(parts) != 2:
+                        raise ValueError(f"usage: {cmd} DELTA_DEG (yaw: +right/-left; pitch: +up/-down)")
+                    print(method(float(parts[1])))
+            elif cmd in {"zoom", "get_zoom"}:
+                method = getattr(controller, cmd, None)
+                if method is None:
+                    raise NotImplementedError(f"{cmd} is unsupported by this controller")
+                if cmd == "zoom":
+                    if len(parts) != 2:
+                        raise ValueError("usage: zoom RATIO (absolute multiplier, e.g. zoom 2 or zoom 1.5)")
+                    print(method(float(parts[1])))
+                else:
+                    if len(parts) != 1:
+                        raise ValueError("usage: get_zoom")
+                    print(method())
             elif cmd == "get_rgb_meta":
                 print(controller.get_rgb_meta(save=True))
             elif cmd == "get_depth_meta":

@@ -14,6 +14,7 @@ import numpy as np
 import yaml
 
 from ..hardware.i7 import I7Hardware
+from ..hardware.k40t import K40TClient
 
 
 def _load_i7_nav_config(config_path: Optional[str | Path] = None) -> dict:
@@ -85,6 +86,12 @@ class I7Controller:
         controller_config = _required_section(config, "robot_controller")
         topics_config = _required_section(config, "topics")
         services_config = _required_section(config, "services")
+        camera_control = _required_section(config, "camera_control")
+        self._camera_control = K40TClient(
+            _required_string(camera_control, "host"),
+            _required_number(camera_control, "port", integer=True),
+            _required_number(camera_control, "timeout_s"),
+        )
         self._jpeg_quality = _required_number(
             controller_config, "jpeg_quality", integer=True
         )
@@ -298,6 +305,21 @@ class I7Controller:
         finally:
             finished.set()
             monitor.join()
+
+    def zoom(self, ratio: float) -> Dict[str, Any]:
+        return self._camera_control.set_zoom(ratio)
+
+    def get_zoom(self) -> Dict[str, Any]:
+        return self._camera_control.get_zoom()
+
+    def gimbal_yaw(self, delta_deg: float) -> Dict[str, Any]:
+        return self._camera_control.gimbal_yaw(delta_deg)
+
+    def gimbal_pitch(self, delta_deg: float) -> Dict[str, Any]:
+        return self._camera_control.gimbal_pitch(delta_deg)
+
+    def get_gimbal(self) -> Dict[str, Any]:
+        return self._camera_control.get_gimbal()
 
     def get_rgb_meta(self, save: bool = True) -> Dict[str, Any]:
         frame = self._get_native_bgr()

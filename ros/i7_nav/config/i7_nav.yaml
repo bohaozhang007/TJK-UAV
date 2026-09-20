@@ -61,6 +61,11 @@ robot_controller:
   default_motion_timeout_s: 15.0
   max_motion_timeout_s: 120.0
 
+camera_control:
+  host: 192.168.144.64
+  port: 1030
+  timeout_s: 10.0
+
 # ROS topic wiring; normally unchanged after deployment.
 topics:
   odom_topic: /laserMapping/odometry
