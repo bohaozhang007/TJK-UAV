@@ -41,6 +41,13 @@ class Sam2Tracker:
         self.state = None
         self.frame_index = 0
 
+    def warmup(self):
+        image = np.random.default_rng().integers(0, 256, (960, 1280, 3), dtype=np.uint8)
+        with self.torch.inference_mode(), self._precision():
+            self.predictor.forward_image(self._image(image).unsqueeze(0))
+            if self.device.type == "cuda":
+                self.torch.cuda.synchronize(self.device)
+
     def _image(self, image):
         size = self.predictor.image_size
         pixels = np.array(Image.fromarray(image).resize((size, size)))

@@ -136,8 +136,12 @@ def main():
             logging.info("Local IP (192.168.*.*): %s", ", ".join(addresses) or "not found")
         except OSError:
             logging.info("Local IP unavailable")
-        logging.info("Tracker ready at http://%s:%s", args.host, args.port)
         try:
+            logging.info("Warmup started image=1280x960 (image encoder only)")
+            started = time.perf_counter()
+            server.tracker.warmup()
+            logging.info("Warmup finished warmup_s=%.3f", time.perf_counter() - started)
+            logging.info("Tracker ready at http://%s:%s", args.host, args.port)
             server.serve_forever()
         except KeyboardInterrupt:
             pass
