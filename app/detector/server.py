@@ -42,7 +42,7 @@ def local_detector_ips():
     try:
         addresses = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
         return ", ".join(sorted({entry[4][0] for entry in addresses
-                                 if entry[4][0].startswith("192.168.2.")})) or "not found"
+                                 if entry[4][0].startswith("192.168.")})) or "not found"
     except OSError:
         return "unavailable"
 
@@ -214,7 +214,7 @@ def main():
         server.image_log = ImageLog(log_dir)
         listener = start_logging(log_dir)
         try:
-            logging.info("Local IP (192.168.2.*): %s", local_detector_ips())
+            logging.info("Local IP (192.168.*.*): %s", local_detector_ips())
             logging.info("Detection images and server.log: %s", log_dir)
             logging.info("Loading detector=%s target=%s device=%s", args.det, args.target, args.device)
             started = time.perf_counter()

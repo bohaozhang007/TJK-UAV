@@ -3,6 +3,10 @@ t0 - Detector
 cd ~\Desktop\project\TJK-UAV
 .\app\run_detector.bat --det sam3 --target moli3
 
+t1 - Tracker
+cd ~\Desktop\project\TJK-UAV
+.\app\run_tracker.bat
+
 uav: 
 t0 - bridge
 cd ~/TJK-UAV
