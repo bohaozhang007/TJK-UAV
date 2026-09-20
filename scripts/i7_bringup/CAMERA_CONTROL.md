@@ -24,9 +24,11 @@ No aircraft motion commands are issued.
 Defaults:
 
 - `target_ratio=0.4`: `max(box_width/image_width, box_height/image_height)`.
-- `center_tolerance=0.04`: center error relative to each image dimension.
-- `size_tolerance=0.05`: acceptable occupancy is 0.35–0.45.
+- `center_tolerance=0.06`: center error up to 6% of each image dimension.
+- `size_tolerance=0.08`: acceptable occupancy is 0.32–0.48, allowing tracking-box jitter.
 - `max_steps=30`, `timeout_s=180`, `settle_s=0.5`.
+- `hold_s=1.0`: after successful framing, hold for one second, then restore
+  the yaw, pitch and zoom measured before this call's tracker initialization.
 - `tracker_url=http://192.168.31.66:8791`, `tracker_timeout_s=30`.
 
 The tracker API is the one in `app/tracker/server.py`:
@@ -36,7 +38,12 @@ The tracker API is the one in `app/tracker/server.py`:
    `POST /track` with `{image: base64_png}`. No box or reinitialization is sent.
 3. Use the returned `box` to calculate center error and occupancy. Stop on
    `found=false`, invalid results or request failures. There is no ORB fallback.
-4. Finish after two consecutive tracked frames satisfy both tolerances.
+4. After two consecutive tracked frames satisfy both tolerances, hold for
+   `hold_s`, restore the initial zoom and angles, and verify their feedback.
+   Pose verification tolerance is 0.5 degrees; zoom tolerance is 0.05x.
+   `timeout_s` limits tracking/framing; the hold and bounded camera restoration
+   requests happen afterwards. A restoration failure returns `ok=false` even
+   when framing succeeded.
 
 Control parameters live in `ros/i7_nav/config/i7_nav.yaml` under `autofocus`.
 Following v21, convert pixel error using reference dimensions (640x360):
@@ -63,22 +70,60 @@ occlusion may prevent convergence within the configured limits.
 
 The returned dictionary includes `ok`, `message`, the latest `box` in input
 image coordinates, `box_confirmed`, `center_error`, `occupancy`, `zoom` and
-`track_count`, `tracker_url`, and `actions`. A failed camera command is not retried. If `box_confirmed` is false,
+`track_count`, `tracker_url`, and `actions`. `initial_camera` records this call's
+starting pose/zoom. `focus_reached` and `focus` retain the framing result before
+returning; `restoration` contains the restore target, final readings and errors.
+The top-level `zoom` is the final measured zoom after restoration. The box,
+occupancy and center error describe the focused view and `box_confirmed` is
+false after restoration because that box no longer describes the current view.
+A failed camera movement command is not resent. On confirmation timeout, the
+client performs one bounded read-only verification phase on a fresh UDP socket
+(up to another `camera_control.timeout_s`). It retains the original absolute
+target: both gimbal axes must be within 0.5 degrees for three consecutive
+samples, or zoom must equal the requested value and have stopped. A successful
+verification allows framing to continue even if the movement ACK was lost;
+camera command results include `verified_after_timeout` and
+`command_acknowledged`. Failed verification stops framing and reports the
+last measured status and target, when available. Explicit rejection or camera
+faults stop immediately. If `box_confirmed` is false,
 the box predates the last unconfirmed adjustment and must not be treated as a
 current detection. Out-of-range targets, tracking loss and exhausted limits
-stop further adjustment; no automatic return-to-start movement is attempted.
+stop further adjustment. Restoration runs only after successful framing;
+failed/interrupted framing does not automatically move back.
 
 In the console, after `init`:
 
 ```text
 autofocus X1 Y1 X2 Y2
+autofocus /path/to/image.png X1 Y1 X2 Y2
+autofocus "/path/with spaces/image.png" X1 Y1 X2 Y2
 ```
 
-The console captures the current frame, so these coordinates must refer to its
-native resolution and a target still at that position. Use the Python function
-when passing a specific detection image and its box. Ctrl-C during automatic
+With four arguments, the console captures the current native BGR frame directly,
+without JPEG encoding. With five arguments, the first is an image file path
+(relative paths and `~` are supported); that image and the four box coordinates
+are sent to tracker init. Coordinates refer to the selected image's native pixels.
+Neither mode resizes the image; tracker transport uses lossless PNG. A JPEG input
+file already contains its original compression loss. Subsequent tracking uses
+live camera frames, whose resolution must match the initialization image.
+The Python function still accepts `controller.autofocus(img, box)` with a BGR array.
+Ctrl-C during automatic
 framing stops further camera commands and returns a failure result. An already
 sent absolute gimbal movement may still complete.
 
 Restart the console after updating code. Flight or OFFBOARD is not required
 for camera adjustment.
+
+I7 camera UDP diagnostics are written automatically to `logs/k40t_udp.log`
+under the repository (JSON lines, 10 MiB per file, three rotated backups).
+Each request has a request ID, wall timestamp, elapsed time, PID, peer, command
+and target. Events record the local UDP endpoint, transmitted/received packet
+hex and sequence numbers, ACK acceptance/rejection, ignored-packet reasons,
+measured pose errors, zoom status, timeout and final outcome. Read-only
+verification requests have `verification: true`. These logs observe packets
+delivered to the client socket; they cannot prove whether packets were sent
+to a closed/other port or dropped before reaching it.
+
+```bash
+tail -f /home/jkhk/TJK-UAV/logs/k40t_udp.log
+```

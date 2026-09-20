@@ -10,14 +10,52 @@ import numpy as np
 from ..hardware.tracker_client import TrackerClient, validate_image_box
 
 
+def restore_camera(controller, initial):
+    """Restore each component and report actual final feedback, including failures."""
+    errors = []
+    actions = []
+    try:
+        current_zoom = float(controller.get_zoom()['zoom'])
+        if abs(current_zoom - initial['zoom']) > .05:
+            actions.append(dict(command='zoom', value=initial['zoom']))
+            controller.zoom(initial['zoom'])
+    except Exception as exc:
+        errors.append(f'zoom: {exc}')
+    for axis, method in (('yaw_deg', controller.gimbal_yaw), ('pitch_deg', controller.gimbal_pitch)):
+        try:
+            current = controller.get_gimbal()
+            delta = round(initial[axis] - current[axis], 2)
+            if abs(delta) > .5:
+                actions.append(dict(command='gimbal_' + axis[:-4], value=delta))
+                method(delta)
+        except Exception as exc:
+            errors.append(f'{axis}: {exc}')
+    final = {}
+    try:
+        pose = controller.get_gimbal()
+        final.update(yaw_deg=pose['yaw_deg'], pitch_deg=pose['pitch_deg'])
+        for axis in ('yaw_deg', 'pitch_deg'):
+            if not math.isfinite(final[axis]) or abs(final[axis] - initial[axis]) > .5:
+                errors.append(f'{axis} restore verification failed: {final[axis]} vs {initial[axis]}')
+    except Exception as exc:
+        errors.append(f'pose verification: {exc}')
+    try:
+        final['zoom'] = float(controller.get_zoom()['zoom'])
+        if not math.isfinite(final['zoom']) or abs(final['zoom'] - initial['zoom']) > .05:
+            errors.append(f'zoom restore verification failed: {final["zoom"]} vs {initial["zoom"]}')
+    except Exception as exc:
+        errors.append(f'zoom verification: {exc}')
+    return dict(ok=not errors, target=dict(initial), final=final, actions=actions, errors=errors)
+
+
 def autofocus_box(controller, img, box, capture, *,
                   tracker_url='http://192.168.31.66:8791', tracker_timeout_s=30.0,
                   reference_width_px=640, reference_height_px=360,
                   reference_zoom=1.0, yaw_deg_per_pixel=.1, pitch_deg_per_pixel=.1,
                   max_yaw_step_deg=3.0, max_pitch_step_deg=3.0, damping=.7,
                   zoom_step_up=1.25, zoom_step_down=.8,
-                  target_ratio=.4, center_tolerance=.04, size_tolerance=.05,
-                  max_steps=30, timeout_s=180.0, settle_s=.5, tracker=None):
+                  target_ratio=.4, center_tolerance=.06, size_tolerance=.08,
+                  max_steps=30, timeout_s=180.0, settle_s=.5, hold_s=1.0, tracker=None):
     """Init with the supplied full-size BGR image/xyxy box, then track each frame.
 
     Gains are degrees/pixel at the reference resolution and zoom, following
@@ -30,6 +68,7 @@ def autofocus_box(controller, img, box, capture, *,
         ('center_tolerance', center_tolerance, .005, .1),
         ('size_tolerance', size_tolerance, .005, .1),
         ('timeout_s', timeout_s, 1, 600), ('settle_s', settle_s, .1, 5),
+        ('hold_s', hold_s, 0, 10),
         ('tracker_timeout_s', tracker_timeout_s, .1, 180),
         ('reference_width_px', reference_width_px, 1, 10000),
         ('reference_height_px', reference_height_px, 1, 10000),
@@ -55,12 +94,17 @@ def autofocus_box(controller, img, box, capture, *,
     zoom = None
     box_confirmed = False
     track_count = 0
+    initial_camera = None
+    focus = None
+    restoration = None
 
     def result(ok, message):
         return dict(ok=ok, message=message, box=bounds.tolist(), box_confirmed=box_confirmed,
                     image_width=w, image_height=h, occupancy=ratio,
                     target_ratio=target_ratio, center_error=center, zoom=zoom,
-                    tracker_url=tracker_url, track_count=track_count, actions=history)
+                    tracker_url=tracker_url, track_count=track_count, actions=history,
+                    initial_camera=initial_camera, focus_reached=focus is not None,
+                    focus=focus, hold_s=hold_s, restoration=restoration)
 
     def budget():
         remaining = deadline - time.monotonic()
@@ -69,6 +113,13 @@ def autofocus_box(controller, img, box, capture, *,
         return remaining
 
     try:
+        # Snapshot before tracker initialization and before any camera movement.
+        pose = controller.get_gimbal()
+        zoom = float(controller.get_zoom()['zoom'])
+        initial_camera = dict(yaw_deg=float(pose['yaw_deg']), pitch_deg=float(pose['pitch_deg']), zoom=zoom)
+        for key, low, high in (('yaw_deg', -180, 180), ('pitch_deg', -90, 30), ('zoom', 1, 160)):
+            if not math.isfinite(initial_camera[key]) or not low <= initial_camera[key] <= high:
+                raise RuntimeError(f'Invalid initial camera {key}: {initial_camera[key]}')
         tracker = tracker if tracker is not None else TrackerClient(tracker_url, tracker_timeout_s)
         bounds = validate_image_box(img, tracker.init(img, bounds, timeout_s=min(tracker_timeout_s, budget())))
         zoom = float(controller.get_zoom()['zoom'])
@@ -91,7 +142,15 @@ def autofocus_box(controller, img, box, capture, *,
             sized = abs(ratio - target_ratio) <= size_tolerance
             stable = stable + 1 if centered and sized else 0
             if stable >= 2:
-                return result(True, 'Target centered and framed')
+                focus = dict(box=bounds.tolist(), center_error=list(center), occupancy=ratio, zoom=zoom)
+                print(f'[I7] 目标已对准，停留 {hold_s:g} 秒后恢复原云台角度和倍率。', flush=True)
+                time.sleep(hold_s)
+                box_confirmed = False  # The focused box will no longer describe the restored view.
+                restoration = restore_camera(controller, initial_camera)
+                zoom = restoration['final'].get('zoom')
+                if not restoration['ok']:
+                    return result(False, 'Target framed, but camera restoration failed: ' + '; '.join(restoration['errors']))
+                return result(True, 'Target framed; hold completed and original camera pose/zoom restored')
             if centered and sized:
                 continue
             if len(history) >= max_steps:
@@ -130,6 +189,6 @@ def autofocus_box(controller, img, box, capture, *,
                 zoom = float(controller.zoom(desired)['zoom'])
                 entry['confirmed'] = True
     except KeyboardInterrupt:
-        return result(False, 'Automatic framing interrupted; no further camera commands will be sent')
+        return result(False, 'Automatic framing interrupted; no further camera commands will be sent; camera restoration may be incomplete')
     except Exception as exc:
         return result(False, str(exc))

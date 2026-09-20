@@ -93,6 +93,7 @@ class I7Controller:
             _required_string(camera_control, "host"),
             _required_number(camera_control, "port", integer=True),
             _required_number(camera_control, "timeout_s"),
+            log_path=Path(__file__).resolve().parents[3] / "logs" / "k40t_udp.log",
         )
         self._jpeg_quality = _required_number(
             controller_config, "jpeg_quality", integer=True
@@ -354,6 +355,10 @@ class I7Controller:
                 raise RuntimeError(f"failed to save I7 RGB frame: {path}")
             result["saved_to"] = str(path)
         return result
+
+    def get_rgb_bgr(self) -> np.ndarray:
+        """Return a native-resolution BGR frame without JPEG encoding."""
+        return self._get_native_bgr()
 
     def get_rgb_byte(self) -> bytes:
         frame = self._get_native_bgr()

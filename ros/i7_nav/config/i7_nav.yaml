@@ -83,11 +83,14 @@ autofocus:
   zoom_step_up: 1.25
   zoom_step_down: 0.8
   target_ratio: 0.4
-  center_tolerance: 0.04
-  size_tolerance: 0.05
+  # Allow tracking-box jitter: center +/-6%, occupancy 32%-48%.
+  center_tolerance: 0.06
+  size_tolerance: 0.08
   max_steps: 30
   timeout_s: 180.0
   settle_s: 0.5
+  # After successful framing, hold then restore this call's initial pose/zoom.
+  hold_s: 1.0
 
 # ROS topic wiring; normally unchanged after deployment.
 topics:
