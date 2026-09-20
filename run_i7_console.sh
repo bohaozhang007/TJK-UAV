@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROS_SETUP="/opt/ros/noetic/setup.bash"
-PLANNER_SETUP="/home/jkhk/planner/devel/setup.bash"
+PLANNER_SETUP="/home/jkhk/jkhk_robot/release/planner/setup.bash"
 
 for setup_file in "${ROS_SETUP}" "${PLANNER_SETUP}"; do
   if [[ ! -f "${setup_file}" ]]; then
@@ -24,7 +24,7 @@ source_setup "${ROS_SETUP}"
 source_setup "${PLANNER_SETUP}"
 unset -f source_setup
 
-export ROS_PACKAGE_PATH="${SCRIPT_DIR}/ros:/home/jkhk/planner/release:${ROS_PACKAGE_PATH:-}"
+export ROS_PACKAGE_PATH="${SCRIPT_DIR}/ros:/home/jkhk/jkhk_robot/release/planner/share:${ROS_PACKAGE_PATH:-}"
 export PYTHONPATH="${SCRIPT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 SERVER_ARGS=()

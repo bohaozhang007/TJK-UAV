@@ -2,6 +2,9 @@
   <!-- Planner motion tuning; most likely to change during flight tests. -->
   <arg name="max_vel" default="0.5"/>
   <arg name="max_acc" default="1.0"/>
+  <!-- Match the installed planner's normal (back_track=false) mode. -->
+  <arg name="planning_horizon" default="10.0"/>
+  <arg name="polyTraj_piece_length" default="2.5"/>
 
   <!-- Local planning-map dimensions. -->
   <arg name="map_size_x" default="5.0"/>
@@ -9,8 +12,8 @@
   <arg name="map_size_z" default="5.0"/>
 
   <!-- Deployment topic wiring; normally unchanged. -->
-  <arg name="odom_topic" default="/Odometry"/>
-  <arg name="cloud_topic" default="/cloud_registered"/>
+  <arg name="odom_topic" default="/laserMapping/odometry"/>
+  <arg name="cloud_topic" default="/laserMapping/cloud_registered"/>
 
   <!-- flight_type=1 accepts interactive goals; no waypoint YAML is loaded. -->
   <include file="$(find ego_planner)/launch/include/run_in_sim.xml">
@@ -21,7 +24,8 @@
     <arg name="init_y" value="0.0"/>
     <arg name="init_z" value="1.0"/>
     <arg name="max_vel" value="$(arg max_vel)"/>
-    <arg name="max_acc" value="$(arg max_acc)"/>
+    <arg name="planning_horizon" value="$(arg planning_horizon)"/>
+    <arg name="polyTraj_piece_length" value="$(arg polyTraj_piece_length)"/>
     <arg name="map_size_x" value="$(arg map_size_x)"/>
     <arg name="map_size_y" value="$(arg map_size_y)"/>
     <arg name="map_size_z" value="$(arg map_size_z)"/>
@@ -29,6 +33,11 @@
     <arg name="cloud_topic" value="$(arg cloud_topic)"/>
     <arg name="flight_type" value="1"/>
   </include>
+
+  <!-- The installed run_in_sim.xml hardcodes acceleration; override both
+       consumers after the include to preserve this launch's tuning. -->
+  <param name="drone_0_ego_planner_node/manager/max_acc" value="$(arg max_acc)" type="double"/>
+  <param name="drone_0_ego_planner_node/optimization/max_acc" value="$(arg max_acc)" type="double"/>
 
   <node pkg="i7_nav" type="i7_nav_node.py" name="i7_nav" output="screen">
     <rosparam command="load" file="$(find i7_nav)/config/i7_nav.yaml"/>

@@ -459,7 +459,8 @@ def run_console(
                 keepalive.start_keepalive() # 激活心跳
                 print(res)
             elif cmd == "takeoff":
-                print(controller.takeoff())
+                console_takeoff = getattr(controller, "console_takeoff", controller.takeoff)
+                print(console_takeoff())
             elif cmd == "k":
                 health = controller.health()
                 if health.get("velocity_control_supported") is False:

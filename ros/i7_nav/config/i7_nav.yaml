@@ -63,12 +63,12 @@ robot_controller:
 
 # ROS topic wiring; normally unchanged after deployment.
 topics:
-  odom_topic: /Odometry
+  odom_topic: /laserMapping/odometry
   state_topic: /mavros/state
   extended_state_topic: /mavros/extended_state
   battery_topic: /mavros/battery
   goal_topic: /cxr_goal
-  planner_goal_topic: /move_base_simple/goal
+  planner_goal_topic: /ego_goal
   position_cmd_topic: /position_cmd
   setpoint_topic: /mavros/setpoint_raw/local
   planner_heartbeat_topic: /drone_0_traj_server/heartbeat

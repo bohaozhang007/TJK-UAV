@@ -9,6 +9,7 @@ MAVROS_FCU_URL="${I7_MAVROS_FCU_URL:-$(read_i7_bringup_config mavros_fcu_url)}"
 MAVROS_GCS_URL="${I7_MAVROS_GCS_URL:-$(read_i7_bringup_config mavros_gcs_url)}"
 
 # PX4 serial link plus the YAML-configured MAVLink UDP copy for QGC.
-exec roslaunch mavros px4.launch \
+exec python3 "${SCRIPT_DIR}/reuse_ros_component.py" --nodes /mavros -- \
+  roslaunch mavros px4.launch \
   fcu_url:="${MAVROS_FCU_URL}" \
   gcs_url:="${MAVROS_GCS_URL}"

@@ -66,7 +66,7 @@ cleanup() {
   trap - HUP INT TERM EXIT
 
   if ((${#PIDS[@]} > 0)); then
-    echo "Stopping all I7 hardware components..."
+    echo "Stopping components and monitors started by this script (reused services stay running)..."
     signal_all INT
     if ! wait_for_shutdown "${INTERRUPT_SHUTDOWN_TIMEOUT_S}"; then
       signal_all TERM
@@ -78,7 +78,7 @@ cleanup() {
       wait "${pid}" 2>/dev/null || true
     done
   fi
-  echo "All I7 hardware components stopped."
+  echo "I7 bringup stopped; reused services were left running."
   exit "${exit_status}"
 }
 
@@ -109,7 +109,7 @@ for component in "${COMPONENTS[@]}"; do
   fi
 done
 
-echo "All I7 hardware components are running. Press Ctrl-C to stop all six."
+echo "All I7 hardware components are running. Ctrl-C stops this script's components; reused services stay running."
 set +e
 wait -n "${PIDS[@]}"
 child_status=$?

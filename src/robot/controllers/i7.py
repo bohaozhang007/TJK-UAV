@@ -259,6 +259,46 @@ class I7Controller:
                 "health": self.health(),
             }
 
+    def console_takeoff(self) -> Dict[str, Any]:
+        """Show live navigation progress while the local console waits."""
+        print(
+            "[I7] 正在请求起飞，请保持 POSITION，等待 OFFBOARD 切换提示。",
+            flush=True,
+        )
+        finished = threading.Event()
+
+        def show_progress() -> None:
+            last_state = None
+            while not finished.wait(0.2):
+                try:
+                    health = self.health()
+                except Exception:
+                    continue
+                if finished.is_set() or not health.get("nav_ok"):
+                    continue
+                state = health.get("nav_state")
+                if state == last_state:
+                    continue
+                last_state = state
+                if state == "WAIT_OFFBOARD":
+                    print(
+                        "[I7] WAIT_OFFBOARD：正在等待遥控器切到 OFFBOARD。"
+                        "切换后程序会自动请求解锁并起飞；空中恢复时会保持当前位置。",
+                        flush=True,
+                    )
+                elif state == "TAKEOFF":
+                    print("[I7] TAKEOFF：已进入起飞阶段，等待到达目标高度并悬停。", flush=True)
+                elif state == "MANUAL_TAKEOVER":
+                    print("[I7] 已触发人工接管，程序控制已停止。", flush=True)
+
+        monitor = threading.Thread(target=show_progress, daemon=True)
+        monitor.start()
+        try:
+            return self.takeoff()
+        finally:
+            finished.set()
+            monitor.join()
+
     def get_rgb_meta(self, save: bool = True) -> Dict[str, Any]:
         frame = self._get_native_bgr()
         result: Dict[str, Any] = {
