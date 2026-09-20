@@ -29,7 +29,7 @@ from owl_nav_v22.cloud import validate as validate_cloud
 
 class Node:
     def __init__(self):
-        self.c = load_robot_config('owl_ego', rospy.get_param('~config'))
+        self.c = load_robot_config(rospy.get_param('~robot', 'owl_ego'), rospy.get_param('~config'))
         self.lock = threading.RLock()
         self.camera_preflight = CameraPreflight(self.c)
         self.core = FlightCore(self.c['control'])
@@ -65,10 +65,11 @@ class Node:
         self.stream_since = None
         self.last_output_at = -math.inf
         self.last_control_sample = None
+        namespace = self.c['namespace']
         topics = self.c['topics']
         self.status_pub = rospy.Publisher(topics['bridge_status'],String,queue_size=1)
-        self.odom_pub = rospy.Publisher('/owl_ego_v22/planner_odom',Odometry,queue_size=5)
-        self.cloud_pub = rospy.Publisher('/owl_ego_v22/validated_cloud',PointCloud2,queue_size=1)
+        self.odom_pub = rospy.Publisher(namespace+'/planner_odom',Odometry,queue_size=5)
+        self.cloud_pub = rospy.Publisher(namespace+'/validated_cloud',PointCloud2,queue_size=1)
         self.subs = [rospy.Subscriber(topics['odom'],Odometry,self.odom,queue_size=5),
             rospy.Subscriber(topics['rgb'],Image,self.camera_image,queue_size=1,buff_size=8*1024*1024),
             rospy.Subscriber(topics['state'],State,self.state,queue_size=5),
@@ -82,7 +83,7 @@ class Node:
             self.subs += [rospy.Subscriber('/mavros/local_position/pose',PoseStamped,lambda m:self.reference('map',m),queue_size=5),
                           rospy.Subscriber('/mavros/vision_pose/pose',PoseStamped,lambda m:self.reference('lio',m),queue_size=5)]
         self.service = rospy.Service(topics['command'],Command,self.command)
-        self.preview_service = rospy.Service('/owl_ego_v22/preview',Command,self.preview)
+        self.preview_service = rospy.Service(namespace+'/preview',Command,self.preview)
         # Wall-clock loops remain live when simulated ROS time pauses.
         self.workers = []
         for target in (self.control_loop,self.planner_loop,self.audit_loop,self.fcu_loop):

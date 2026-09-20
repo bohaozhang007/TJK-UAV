@@ -1,6 +1,7 @@
 """Fixed OWL interfaces and runtime defaults; field tuning lives in config/owl_ego.yaml."""
 
 DEFAULTS = {
+    "namespace": "/owl_ego_v22",
     "queries": {
         "preview_timeout_s": 12
     },

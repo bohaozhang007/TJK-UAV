@@ -42,6 +42,7 @@ class State(enum.Enum):
     ORBIT_PLAN = 'orbit_plan'
     ORBIT_MOVE = 'orbit_move'
     PHOTO = 'photo'
+    AUTOFOCUS = 'autofocus'
     RETURN_CAPTURE = 'return_capture'
     RETURN_HOME = 'return_home'
     LANDING = 'landing'
@@ -57,7 +58,8 @@ NEXT = {
     State.PATROL_PLAN: {State.PATROL_MOVE, State.RETURN_HOME},
     State.PATROL_MOVE: {State.DETECT},
     State.DETECT: {State.LOCALIZE},
-    State.LOCALIZE: {State.ORBIT_PLAN, State.PATROL_PLAN, State.RETURN_HOME},
+    State.LOCALIZE: {State.AUTOFOCUS, State.ORBIT_PLAN, State.PATROL_PLAN, State.RETURN_HOME},
+    State.AUTOFOCUS: {State.AUTOFOCUS, State.PATROL_PLAN, State.RETURN_HOME},
     State.ORBIT_PLAN: {State.ORBIT_MOVE, State.RETURN_CAPTURE},
     State.ORBIT_MOVE: {State.PHOTO, State.ORBIT_PLAN, State.RETURN_CAPTURE},
     State.PHOTO: {State.ORBIT_MOVE, State.ORBIT_PLAN, State.RETURN_CAPTURE},
@@ -150,7 +152,12 @@ class Detector:
             decoded = np.repeat(np.arange(len(counts)) % 2 == 1, counts).reshape(mask['size'])
             if not decoded.any():
                 raise MissionError('empty detector mask')
-            results.append(dict(confidence=score, mask=decoded))
+            box = np.asarray(item.get('box'), dtype=float)
+            h, w = obs.rgb.shape[:2]
+            if (box.shape != (4,) or not np.isfinite(box).all()
+                    or not 0 <= box[0] < box[2] <= w or not 0 <= box[1] < box[3] <= h):
+                raise MissionError('invalid detector box')
+            results.append(dict(confidence=score, mask=decoded, box=box.tolist()))
         return sorted(results, key=lambda d: d['confidence'], reverse=True)
 
 
@@ -310,7 +317,7 @@ class Mission:
             record = dict(id=len(self.targets)+1, position_cm=position, status='pending',
                           confidence=detection['confidence'], exposure_pose=dict(observation.pose))
             self.targets.append(record)
-            new.append(record)
+            new.append((record, detection['box']))
             self.event('new_target', target=record)
         return new
 
@@ -401,6 +408,19 @@ class Mission:
         self.event('target_completed', target=target, photo_count=photos)
         self.current_target = None
 
+    def photograph_target(self, target, observation, box):
+        self.current_target = target
+        self.transition(State.AUTOFOCUS)
+        timings = {}
+        self.event('autofocus_started', target_id=target['id'], frame_id=observation.frame_id)
+        result = self.robot.autofocus_photo(observation, box, timings=timings)
+        path = self.output / f'target_{target["id"]:03d}_01.jpg'
+        Image.fromarray(result['rgb']).save(path, quality=95)
+        target['status'] = 'completed' if result['focused'] else 'failed'
+        self.event('autofocus_finished', target=target, focused=result['focused'],
+                   fallback_photo=not result['focused'], file=path.name, timings=timings)
+        self.current_target = None
+
     def patrol(self):
         for waypoint in self.c['mission']['waypoints']:
             goal = self.mission_waypoint(waypoint)
@@ -411,8 +431,11 @@ class Mission:
                 detections = self.detect(observation)
                 targets = self.locate_new_targets(observation, detections)
                 # All identities/positions were computed while still at this exposure P.
-                for target in targets:
-                    self.visit_target(target)
+                for target, box in targets:
+                    if self.c['photography']['autofocus']:
+                        self.photograph_target(target, observation, box)
+                    else:
+                        self.visit_target(target)
                 if final:
                     break
             else:
@@ -500,6 +523,8 @@ class Mission:
 
 
 def validate_config(config):
+    if type(config.get('photography', {}).get('autofocus')) is not bool:
+        raise ValueError('photography.autofocus must be boolean')
     if config['patrol'].get('dedup_mode', '3d') not in ('3d', 'separate'):
         raise ValueError('patrol.dedup_mode must be 3d or separate')
     if config['safety']['error_action'] not in ('hold', 'land'):
@@ -552,7 +577,8 @@ def main():
         parser.exit(1, f'Error: {exc}; mission not started.\n')
     print(f'Detector health OK ({time.monotonic()-started:.3f}s)', flush=True)
     try:
-        robot = create_robot(config['localization'])
+        robot = create_robot(config['localization'], autofocus=config['photography']['autofocus'],
+                             tracker_host=args.detector_host)
     except (ValueError,KeyError,TypeError) as exc:
         parser.error(str(exc))
     Mission(robot, detector, config, args.output).run()

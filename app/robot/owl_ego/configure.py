@@ -9,6 +9,7 @@ import yaml
 p=argparse.ArgumentParser()
 p.add_argument('--workspace',required=True)
 p.add_argument('--upstream',required=True)
+p.add_argument('--config', type=Path)
 a=p.parse_args()
 root=Path(__file__).resolve().parents[3]
 ws=Path(a.workspace).resolve()
@@ -27,7 +28,7 @@ params.update({'fsm/realworld_experiment':True,'fsm/fail_safe':False,
                'optimization/record_opt':False})
 # Depth topics are private and unused; fx/fy above are never observation calibration.
 (ws/'planner.yaml').write_text(yaml.safe_dump(params,sort_keys=True))
-config_path=root/'app/robot/config/owl_ego.yaml'
+config_path=a.config or root/'app/robot/config/owl_ego.yaml'
 config_text=config_path.read_text(encoding='utf-8')
 c=yaml.safe_load(config_text)
 binary=ws/'devel/lib/ego_planner/ego_planner_node'

@@ -33,7 +33,8 @@ class PlannerProcess:
         self.last_diagnostics = None
         self.failed = None
         self.planning_timeout = config['control']['planning_timeout_s']
-        self.ns = '/owl_ego_v22/planners/g_'+identity
+        namespace = config['namespace']
+        self.ns = namespace+'/planners/g_'+identity
         self.birth = time.monotonic()
         self.milestones = {'process_setup_started': self.birth}
         self.handles = []
@@ -53,14 +54,14 @@ class PlannerProcess:
         self.odom_pub = rospy.Publisher(self.ns+'/odom',Odometry,queue_size=5)
         self.data_sub = rospy.Subscriber(self.ns+'/fsm_initialized',DataDisp,self.initialized,queue_size=1)
         self.handles = [self.odom_pub,self.data_sub,
-            rospy.Subscriber('/owl_ego_v22/planner_odom',Odometry,self.odometry,queue_size=5),
+            rospy.Subscriber(namespace+'/planner_odom',Odometry,self.odometry,queue_size=5),
             rospy.Subscriber(self.ns+'/map_observed',PointCloud2,self.map_received,queue_size=1),
             rospy.Subscriber(self.ns+'/trajectory',PlannerTrajectory,lambda m:on_trajectory(identity,m),queue_size=2),
             rospy.Subscriber(self.ns+'/heartbeat',String,lambda m:on_heartbeat(identity,m.data),queue_size=2)]
         remaps = {'~odom_world':self.ns+'/odom','~grid_map/odom':self.ns+'/odom',
                   '~planning/data_display':self.ns+'/fsm_initialized',
                   '~grid_map/occupancy_inflate':self.ns+'/map_observed',
-                  '~grid_map/cloud':'/owl_ego_v22/validated_cloud','/goal':self.ns+'/goal',
+                  '~grid_map/cloud':namespace+'/validated_cloud','/goal':self.ns+'/goal',
                   '~planning/trajectory':self.ns+'/trajectory','~planning/heartbeat':self.ns+'/heartbeat',
                   '~planning/broadcast_traj_send':self.ns+'/broadcast_out',
                   '~planning/broadcast_traj_recv':self.ns+'/broadcast_in',

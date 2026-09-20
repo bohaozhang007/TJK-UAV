@@ -1,8 +1,7 @@
-"""Robot HTTP entry point. Currently the only implementation is OWL EGO v22."""
+"""Robot HTTP entry point. OWL and i7 v22 adapters."""
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
 
@@ -45,15 +44,18 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--robot', choices=['owl_ego'], default='owl_ego')
-    parser.add_argument('--config', default=str(Path(__file__).parent / 'config/owl_ego.yaml'))
+    parser.add_argument('--robot', choices=['owl_ego', 'i7'], default='owl_ego')
+    parser.add_argument('--config', default=None)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
-    from .controllers.owl_ego import OwlEgoController
+    if args.robot == 'i7':
+        from .controllers.i7 import I7Controller as Controller
+    else:
+        from .controllers.owl_ego import OwlEgoController as Controller
     ThreadingHTTPServer.request_queue_size = 64
     with ThreadingHTTPServer((args.host, args.port), Handler) as server:
-        server.controller = OwlEgoController(config_path=args.config)
+        server.controller = Controller(config_path=args.config)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

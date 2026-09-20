@@ -102,6 +102,8 @@ class OwlEgoClient:
 
     def attach(self):
         caps = self.rpc('GET', '/v21/capabilities')
+        if getattr(self, 'autofocus_enabled', False) and caps.get('autofocus') is not True:
+            raise MissionError('Robot does not support autofocus; set photography.autofocus=false')
         for key in ('async_navigation', 'cancel_and_hold', 'synchronized_observation', 'control_lease',
                     'sensor_geometry', 'map_query', 'preview_only', 'stop_at_goal'):
             if caps.get(key) is not True:
@@ -211,6 +213,9 @@ class OwlEgoClient:
             if not 0 <= sync <= .05:
                 raise MissionError(f'observation unsynchronized: sync_error_s={sync:.6f}, limit_s=0.050000')
         return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_image_base64'], k, t, data['timestamp_s'])
+
+    def autofocus_photo(self, observation, box, timings=None):
+        raise MissionError('Robot does not support camera autofocus')
 
     def grid(self, timings=None):
         with measure(timings, 'wait_stopped'):

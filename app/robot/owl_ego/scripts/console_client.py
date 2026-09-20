@@ -43,6 +43,8 @@ class Runner:
                                          phase=self.phase, event=event, **data), allow_nan=False)+'\n')
 
     def rpc(self, method, path, data=None, timeout=2):
+        if path == '/init':
+            timeout = max(timeout, 15.)
         begin = time.monotonic()
         if method=='POST' and path!='/v21/heartbeat':
             self.record('http_request',method=method,path=path,request=data)

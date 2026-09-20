@@ -122,7 +122,7 @@ class OwlEgoController:
                 return dict(ok=True, bridge_id=snap.get('bridge_id'), tasks=[
                     {k:t[k] for k in keys if k in t} for t in snap.get('tasks',{}).values()])
             if path == '/v21/capabilities':
-                return dict(ok=True,backend='owl_ego',protocol_version=1,async_navigation=True,
+                return dict(ok=True,backend=self.backend,protocol_version=1,async_navigation=True,
                             cancel_and_hold=True,synchronized_observation=True,
                             control_lease=True,relative_xyz_yaw=True,software_takeoff=True,operator_override=True,operator_stop=True,
                             sensor_geometry=True,map_query=True,preview_only=True,stop_at_goal=True)
@@ -341,7 +341,7 @@ class OwlEgoController:
         c = self.config['control']
         return dict(position_tolerance_cm=c['position_tolerance_m']*100,
                     yaw_tolerance_deg=math.degrees(c['yaw_tolerance_rad']),
-                    position_error_metric='euclidean_3d',source='owl_ego')
+                    position_error_metric='euclidean_3d',source=self.backend)
 
     def close(self):
         if self.session:

@@ -1,0 +1,74 @@
+camera:
+  baseline_yaw_deg: 0.0
+  baseline_pitch_deg: 0.0
+  baseline_zoom: 1.0
+  # Stationary wait before detection; not a measured RTSP latency bound.
+  observation_settle_s: 2.0
+
+control:
+  takeoff_height_m: 1.0
+  takeoff_speed_m_s: 0.3
+  yaw_rate_rad_s: 0.0872664626
+  position_tolerance_m: 0.15
+  yaw_tolerance_rad: 0.0872664626
+  stop_speed_m_s: 0.1
+  stop_yaw_rate_rad_s: 0.0872664626
+  stable_duration_s: 0.5
+  max_speed_m_s: 2.0
+  max_acceleration_m_s2: 3.0
+  max_tracking_error_m: 0.5
+  world_limit_m: 30.0
+  reset_jump_m: 0.5
+  reset_yaw_rad: 0.7853981634
+  # Enable after on-vehicle frame, sensor and takeover verification.
+  flight_enabled: false
+  failsafe_validated: false
+  sensors_validated: false
+
+autofocus:
+  target_ratio: 0.4
+  center_tolerance: 0.06
+  size_tolerance: 0.08
+  max_steps: 30
+  timeout_s: 180.0
+  max_yaw_step_deg: 3.0
+  max_pitch_step_deg: 3.0
+  damping: 0.7
+  settle_s: 0.5
+  hold_s: 1.0
+
+hardware:
+  # Native distorted image; rectified with this K before detection.
+  calibration:
+    image_size: [1920, 1080]
+    K:
+      - [1433.3386721086126, 0.0, 966.4100053309966]
+      - [0.0, 1432.379720548207, 543.7079242703776]
+      - [0.0, 0.0, 1.0]
+    D: [0.320820451508697, -1.1215328398666138, -0.0015530919329934884, 0.0019483802784074555, 1.12981787381212]
+    distortion_model: plumb_bob
+
+sensor_geometry:
+  profile_id: i7_9poses_20260920
+  quality: approximate
+  source: /home/jkhk/gimbal_calibration/selected_calibration_9poses_20260920/extrinsics_camera_from_lidar.yaml
+  source_status: candidate_not_validated_for_use
+  source_validated: false
+  limitations:
+    - "User-selected final calibration; source precision validation remains pending."
+    - "Fixed capture-time gimbal pose and zoom only; encoder was not recorded."
+    - "Fit RMS 6.609 px; held-out RMS 9.383 px measure fitted-model agreement."
+  # Metres; T_target_from_source. No identity fallback.
+  imu_from_lidar: null
+  camera_optical_from_lidar:
+    - [0.0295840454090614, 0.9994870719107196, -0.012262843902247078, 0.038314426953610474]
+    - [-0.05494190896772572, -0.010623673698675506, -0.9984330344074791, -0.08760418001481952]
+    - [-0.9980511865111011, 0.030211432281180506, 0.05459943647422488, -0.22331085067686668]
+    - [0.0, 0.0, 0.0, 1.0]
+  body_from_imu: null
+
+# Updated by the independent i7 build.
+planner:
+  executable: null
+  sha256: null
+  parameters: null

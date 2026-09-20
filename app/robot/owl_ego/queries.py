@@ -50,7 +50,7 @@ class OwlQueries:
         generation = snap.get('planner_generation')
         if not generation:
             raise RuntimeError('EGO map process is not ready')
-        service = '/owl_ego_v22/planners/g_' + generation + '/ego/grid_map/query'
+        service = self.c['namespace']+'/planners/g_' + generation + '/ego/grid_map/query'
         outcome = {}
         event = threading.Event()
         def call():
@@ -108,7 +108,7 @@ class OwlQueries:
                            deadline=rospy.Time.now().to_sec()+timeout)
             def call():
                 try:
-                    service = '/owl_ego_v22/preview'
+                    service = self.c['namespace']+'/preview'
                     rospy.wait_for_service(service, timeout=.5)
                     response = rospy.ServiceProxy(service, Command)(json.dumps(payload, allow_nan=False))
                     result['value'] = json.loads(response.json)

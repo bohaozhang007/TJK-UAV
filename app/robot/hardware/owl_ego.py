@@ -27,6 +27,7 @@ class OwlEgoHardware:
     def start(self):
         import rospy
         import tf2_ros
+        import cv2  # Initialize OpenCV before the Noetic Boost.Python extension.
         from cv_bridge import CvBridge
         from nav_msgs.msg import Odometry
         from sensor_msgs.msg import Image, CameraInfo
@@ -35,7 +36,7 @@ class OwlEgoHardware:
         from tf2_msgs.msg import TFMessage
         self.ros = rospy
         if not rospy.core.is_initialized():
-            rospy.init_node('owl_ego_v22_robot',disable_signals=True)
+            rospy.init_node(self.c['namespace'].strip('/')+'_robot',disable_signals=True)
         self.cv = CvBridge()
         self.tf = tf2_ros.Buffer(cache_time=rospy.Duration(15))
         self.listener = tf2_ros.TransformListener(self.tf)

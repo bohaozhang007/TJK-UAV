@@ -8,7 +8,7 @@ from typing import Any, Mapping
 import yaml
 
 
-_DEFAULT_CONFIG_PATHS = {"owl_ego": Path(__file__).resolve().parent / "config/owl_ego.yaml"}
+_DEFAULT_CONFIG_PATHS = {name: Path(__file__).resolve().parent / f"config/{name}.yaml" for name in ("owl_ego", "i7")}
 
 
 def load_robot_config(
@@ -29,6 +29,9 @@ def load_robot_config(
         raise RuntimeError(f"Failed to load Robot config: {path}") from exc
     if not isinstance(config, dict):
         raise ValueError(f"Robot config must be a mapping: {path}")
+    if name == 'i7':
+        from .i7.defaults import DEFAULTS
+        return _merge(DEFAULTS, config)
     if name == 'owl_ego':
         from .owl_ego.defaults import DEFAULTS
         return _merge(DEFAULTS, config)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Session-owning HTTP console for owl_ego. Startup never submits flight commands."""
+"""Session-owning HTTP console for v22 Robots. Startup never submits flight commands."""
 import argparse
 import json
 from pathlib import Path
@@ -38,7 +38,7 @@ class Console:
     def initialize(self):
         r=self.r
         c=r.rpc('GET','/v21/capabilities')
-        if c.get('backend')!='owl_ego' or c.get('software_takeoff') is not True:
+        if c.get('backend') not in ('owl_ego', 'i7') or c.get('software_takeoff') is not True:
             raise Failure('Robot 缺少 software_takeoff 能力，请更新并重启 bridge/server')
         r.abort=threading.Event()
         h=r.health(flight=False)
@@ -295,7 +295,7 @@ def main():
             except ImportError:
                 print('当前Python缺少readline，方向键编辑和历史命令不可用。',flush=True)
             while True:
-                try:line=input('owl_ego> ')
+                try:line=input('robot> ')
                 except (EOFError,KeyboardInterrupt):break
                 try:
                     if not console.command(line):break
