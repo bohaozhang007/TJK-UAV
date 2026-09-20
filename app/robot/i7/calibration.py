@@ -5,12 +5,13 @@ from app.robot.sensor_geometry import sensor_geometry
 from app.robot.controllers.owl_ego_observation import camera_intrinsics
 
 
-def validate(config):
+def validate(config, *, require_geometry=True):
     try:
-        for key in ('imu_from_lidar', 'camera_optical_from_lidar', 'body_from_imu'):
-            if config.get('sensor_geometry', {}).get(key) is None:
-                raise ValueError('sensor_geometry.' + key + ' is not measured')
-        sensor_geometry(config)
+        if require_geometry:
+            for key in ('imu_from_lidar', 'camera_optical_from_lidar', 'body_from_imu'):
+                if config.get('sensor_geometry', {}).get(key) is None:
+                    raise ValueError('sensor_geometry.' + key + ' is not measured')
+            sensor_geometry(config)
         c = config['hardware']['calibration']
         size = c['image_size']
         if not isinstance(size, list) or len(size) != 2 or any(type(v) is not int or v <= 0 for v in size):

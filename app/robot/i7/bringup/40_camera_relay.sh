@@ -10,8 +10,7 @@ if [[ ! -x "${MEDIAMTX_BIN}" ]]; then
   exit 1
 fi
 
-# Source and local relay endpoint come from the I7 YAML. The Robot controller
-# applies the configured output resize before serving frames.
+# Keep the native camera resolution for the configured calibration.
 export MTX_HLS=no
 export MTX_RTMP=no
 export MTX_SRT=no

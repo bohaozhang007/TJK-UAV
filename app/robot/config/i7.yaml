@@ -58,17 +58,28 @@ sensor_geometry:
     - "User-selected final calibration; source precision validation remains pending."
     - "Fixed capture-time gimbal pose and zoom only; encoder was not recorded."
     - "Fit RMS 6.609 px; held-out RMS 9.383 px measure fitted-model agreement."
-  # Metres; T_target_from_source. No identity fallback.
-  imu_from_lidar: null
+    - "Body uses the vendor virtual Livox IMU origin, not the PX4 IMU origin."
+  # MID-360 factory geometry; T_IMU_from_raw_LiDAR, metres.
+  # https://github.com/hku-mars/FAST_LIO/blob/main/config/mid360.yaml
+  imu_from_lidar:
+    - [1.0, 0.0, 0.0, -0.011]
+    - [0.0, 1.0, 0.0, -0.02329]
+    - [0.0, 0.0, 1.0, 0.04412]
+    - [0.0, 0.0, 0.0, 1.0]
   camera_optical_from_lidar:
     - [0.0295840454090614, 0.9994870719107196, -0.012262843902247078, 0.038314426953610474]
     - [-0.05494190896772572, -0.010623673698675506, -0.9984330344074791, -0.08760418001481952]
     - [-0.9980511865111011, 0.030211432281180506, 0.05459943647422488, -0.22331085067686668]
     - [0.0, 0.0, 0.0, 1.0]
-  body_from_imu: null
+  # Vendor rotation2virtualbody; same Livox IMU origin, yaw rotated by 180 deg.
+  body_from_imu:
+    - [-1.0, 0.0, 0.0, 0.0]
+    - [0.0, -1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
 
 # Updated by the independent i7 build.
 planner:
-  executable: null
-  sha256: null
-  parameters: null
+  executable: /home/jkhk/i7_ego_v22_ws/devel/lib/ego_planner/ego_planner_node
+  sha256: 844ff5275a00966b550097e0acac48cf446f7e0c53597630c0eedb30bf0da3d6
+  parameters: /home/jkhk/i7_ego_v22_ws/planner.yaml

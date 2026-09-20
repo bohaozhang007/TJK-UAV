@@ -30,13 +30,27 @@ cd ~/TJK-UAV
 bash app/run_agent_v22.sh --detector-host  192.168.2.194
 
 uav: i7 v22
+# Ground preparation; build uses a pinned archive, without Git operations.
+# Stop the old Faster-LIO launcher before t0; do not run both LIO profiles.
+# The v22 profile uses fixed MID-360 geometry and preserves the old files.
+t-build - first use or after planner source changes
+cd ~/TJK-UAV
+bash app/robot/i7/build.sh
+bash app/run_i7.sh check
+
 t0 - hardware (MAVROS, LiDAR, FAST-LIO2, RTSP relay; no old planner/nav)
 cd ~/TJK-UAV
 bash app/run_i7.sh hardware
 
-t1 - timestamped sensors
+t1 - sensors (RTSP receipt timestamps; stationary detection)
 cd ~/TJK-UAV
 bash app/run_i7.sh sensors
+
+t-check - ground checks after t0 and t1
+cd ~/TJK-UAV
+bash app/run_i7.sh check --live
+# Resolve every reported error before starting bridge/server.
+# flight_ready=false is expected until on-vehicle flight checks are completed.
 
 t2 - bridge and independent EGO
 cd ~/TJK-UAV
@@ -49,6 +63,12 @@ bash app/run_i7.sh server
 t4 - Console (keep open after takeoff)
 cd ~/TJK-UAV
 bash app/run_i7.sh console
+health
+pose
+
+# Flight stage only, after on-vehicle verification.
+# init/takeoff require flight_enabled, sensors_validated and failsafe_validated.
+# Keep these false until the corresponding on-vehicle checks are complete.
 init
 takeoff
 wait

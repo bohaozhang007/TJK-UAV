@@ -4,7 +4,7 @@ from app.robot.owl_ego.defaults import DEFAULTS as EGO_DEFAULTS
 
 DEFAULTS = deepcopy(EGO_DEFAULTS)
 DEFAULTS['namespace'] = '/i7_ego_v22'
-DEFAULTS['control'].update(mavros_frame_profile='standard_enu', world_frame='camera_init')
+DEFAULTS['control'].update(mavros_frame_profile='standard_enu', world_frame='world')
 DEFAULTS['hardware'].update(camera_optical_frame='i7_camera_optical')
 DEFAULTS['topics'].update(odom='/i7_v22/odometry', rgb='/i7_v22/image_raw',
                          camera_info='/i7_v22/camera_info', cloud='/laserMapping/cloud_registered',
@@ -16,7 +16,7 @@ DEFAULTS['sensor_geometry']['frames'].update(camera_optical='i7_camera_optical',
 DEFAULTS['camera'] = dict(host='192.168.144.64', port=1030, timeout_s=3.,
     rtsp_url='rtsp://127.0.0.1:8554/k40t', baseline_yaw_deg=0., baseline_pitch_deg=0.,
     baseline_zoom=1., settle_s=.5, observation_settle_s=2.)
-DEFAULTS['source'] = dict(odom='/laserMapping/odometry', world_frame='camera_init',
+DEFAULTS['source'] = dict(odom='/laserMapping/odometry', world_frame='world',
                          body_frame='body')
 DEFAULTS['autofocus'] = dict(tracker_timeout_s=20., reference_width_px=640,
     reference_height_px=360, reference_zoom=1., yaw_deg_per_pixel=.1, pitch_deg_per_pixel=.1,

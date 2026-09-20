@@ -14,16 +14,23 @@ for path in "$WS" "$UPSTREAM"; do
   [[ "$path" != / && "$path" != "$ROOT" && "$path" != /home/visbot/owl_ego_ws && "$path" != /home/visbot/owl_ego_upstream && "$path" != /home/visbot/owl_ego_v22_ws && "$path" != /home/visbot/owl_ego_v22_upstream && "$path" != /home/jkhk/jkhk_robot/release/planner ]] || { echo 'v22 needs independent directories'; exit 1; }
 done
 [[ "$WS" != "$UPSTREAM" ]] || { echo 'Workspace and upstream must differ'; exit 1; }
-if [[ ! -d "$UPSTREAM/.git" ]]; then
-  git clone https://github.com/ZJU-FAST-Lab/EGO-Planner-v2.git "$UPSTREAM"
-  git -C "$UPSTREAM" checkout --detach "$COMMIT"
+ARCHIVE_SHA256=e5b1da27b0f74f1a68b096926ee9667fb9edf676238a7b6a20b0cba021d5221b
+if [[ ! -e "$UPSTREAM" ]]; then
+  ARCHIVE="$(mktemp --suffix=.tar.gz)"
+  trap 'rm -f -- "$ARCHIVE"' EXIT
+  if [[ -n "${I7_EGO_V22_ARCHIVE:-}" ]]; then
+    cp -- "$I7_EGO_V22_ARCHIVE" "$ARCHIVE"
+  else
+    curl -fL --connect-timeout 15 --max-time 180 \
+      "https://codeload.github.com/ZJU-FAST-Lab/EGO-Planner-v2/tar.gz/$COMMIT" -o "$ARCHIVE"
+  fi
+  [[ "$(sha256sum "$ARCHIVE" | cut -d ' ' -f1)" == "$ARCHIVE_SHA256" ]] || { echo 'EGO archive checksum mismatch'; exit 1; }
+  mkdir -p "$UPSTREAM"
+  tar -xzf "$ARCHIVE" --strip-components=1 -C "$UPSTREAM"
+  echo "$COMMIT $ARCHIVE_SHA256" > "$UPSTREAM/.tjk-v22-source"
 fi
-[[ "$(git -C "$UPSTREAM" rev-parse HEAD)" == "$COMMIT" ]] || { echo 'Wrong EGO commit'; exit 1; }
-if [[ ! -f "$UPSTREAM/.git/tjk-v22-map-patch" ]]; then
-  [[ -z "$(git -C "$UPSTREAM" status --porcelain)" ]] || { echo 'Initial v22 checkout must be clean'; exit 1; }
-fi
+[[ "$(cat "$UPSTREAM/.tjk-v22-source")" == "$COMMIT $ARCHIVE_SHA256" ]] || { echo 'Wrong independent EGO source'; exit 1; }
 python3 "$ROOT/app/robot/owl_ego/patch_ego.py" "$UPSTREAM"
-touch "$UPSTREAM/.git/tjk-v22-map-patch"
 mkdir -p "$WS/src"
 link_package() {
   local target="$1" name="$2"

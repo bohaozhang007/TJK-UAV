@@ -29,7 +29,13 @@ from owl_nav_v22.cloud import validate as validate_cloud
 
 class Node:
     def __init__(self):
-        self.c = load_robot_config(rospy.get_param('~robot', 'owl_ego'), rospy.get_param('~config'))
+        robot = rospy.get_param('~robot', 'owl_ego')
+        self.c = load_robot_config(robot, rospy.get_param('~config'))
+        self.check_mapping = lambda: None
+        if robot == 'i7':
+            from app.robot.i7.mapping import require_running
+            self.check_mapping = lambda: require_running(self.c, rospy)
+            self.check_mapping()
         self.lock = threading.RLock()
         self.camera_preflight = CameraPreflight(self.c)
         self.core = FlightCore(self.c['control'])
@@ -500,6 +506,7 @@ class Node:
                 all_nodes = {n for t,nodes in pubs for n in nodes}
                 bad.extend(n for n in all_nodes if n.rsplit('/',1)[-1] in ('captain','mavros_controller'))
                 frame_config_ok = (not self.frames.vendor or all(abs(float(rospy.get_param('/mavros/'+key,0.)))<1e-9 for key in ('x','y','z','R','P','Y')))
+                self.check_mapping()
                 with self.lock:
                     self.frame_config_ok = frame_config_ok
                     self.conflicts,self.conflict_at = sorted(set(bad)),time.monotonic()

@@ -10,7 +10,6 @@ import numpy as np
 
 from app.robot.config_loader import load_robot_config
 from app.robot.i7.calibration import validate
-from app.robot.sensor_geometry import transform
 
 
 class Sensors:
@@ -21,7 +20,6 @@ class Sensors:
         from sensor_msgs.msg import Image
         self.ros, self.c, self.cv = rospy, config, CvBridge()
         self.previous = None
-        self.imu_from_body = np.linalg.inv(transform(config['sensor_geometry']['body_from_imu']))
         self.odom_pub = rospy.Publisher(config['topics']['odom'], Odometry, queue_size=5)
         self.rgb_pub = rospy.Publisher(config['topics']['rgb'], Image, queue_size=1)
         self.sub = rospy.Subscriber(config['source']['odom'], Odometry, self.odometry, queue_size=5)
@@ -35,7 +33,7 @@ class Sensors:
         try:
             if (message.header.frame_id != self.c['source']['world_frame']
                     or message.child_frame_id != self.c['source']['body_frame']):
-                raise ValueError('FAST-LIO2 frames differ from configured IMU reference')
+                raise ValueError('FAST-LIO2 frames differ from configured virtual body reference')
             p, q = message.pose.pose.position, message.pose.pose.orientation
             quaternion = np.array([q.x, q.y, q.z, q.w])
             if not np.isfinite([p.x, p.y, p.z, *quaternion]).all() or abs(np.linalg.norm(quaternion)-1) > .02:
@@ -43,9 +41,9 @@ class Sensors:
             stamp = message.header.stamp.to_sec()
             if not 0 <= self.ros.Time.now().to_sec()-stamp <= self.c['control']['odom_timeout_s']:
                 raise ValueError('stale FAST-LIO2 pose')
-            world_imu = quaternion_matrix(quaternion)
-            world_imu[:3, 3] = [p.x, p.y, p.z]
-            world_body = world_imu @ self.imu_from_body
+            # Vendor odometry already uses the rotated Livox IMU body frame.
+            world_body = quaternion_matrix(quaternion)
+            world_body[:3, 3] = [p.x, p.y, p.z]
             previous, self.previous = self.previous, (stamp, world_body)
             if previous is None:
                 return
@@ -101,7 +99,7 @@ def main():
     parser.add_argument('--config')
     args = parser.parse_args()
     config = load_robot_config('i7', args.config)
-    validate(config)
+    validate(config, require_geometry=False)
     import rospy
     rospy.init_node('i7_v22_sensors')
     Sensors(config)

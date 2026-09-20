@@ -41,6 +41,8 @@ class I7Controller(OwlEgoController):
         super().__init__(hardware=hardware or I7Hardware(config), config=config)
 
     def require_baseline(self):
+        from app.robot.i7.mapping import require_running
+        require_running(self.config, self.hw.ros)
         pose, zoom = self.camera.get_gimbal(), self.camera.get_zoom()
         if (any(not math.isfinite(pose[k]) or abs(pose[k]-self.baseline[k]) > .5 for k in ('yaw_deg', 'pitch_deg'))
                 or not math.isfinite(float(zoom['zoom'])) or abs(zoom['zoom']-self.baseline['zoom']) > .05
