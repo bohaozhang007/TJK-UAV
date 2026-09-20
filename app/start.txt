@@ -29,18 +29,7 @@ t3 - Agent
 cd ~/TJK-UAV
 bash app/run_agent_v22.sh --detector-host  192.168.2.194
 
-uav: i7 v22 (use instead of the OWL terminals above)
-# Complete baseline geometry in app/robot/config/i7.yaml.
-# Detection uses stationary receipt-time poses, not measured RTSP exposure times.
-# observation_settle_s allows the stream to catch up after stopping; tune on site.
-# Flight stays disabled until control.flight_enabled/failsafe_validated/sensors_validated are verified and enabled.
-# Verify FAST-LIO2 source frames in app/robot/i7/defaults.py against the deployment.
-# The old i7_nav/OWL bridge must be stopped before starting this bridge.
-# First use: bash app/robot/i7/build.sh (independent EGO source/workspace).
-# photography.autofocus defaults to true; false restores fixed-camera orbit photos.
-# OWL requires photography.autofocus: false.
-# Tracker and Detector run on the same Windows host, ports 8791 and 8790.
-
+uav: i7 v22
 t0 - hardware (MAVROS, LiDAR, FAST-LIO2, RTSP relay; no old planner/nav)
 cd ~/TJK-UAV
 bash app/run_i7.sh hardware
