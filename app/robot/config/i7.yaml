@@ -21,9 +21,9 @@ control:
   reset_jump_m: 0.5
   reset_yaw_rad: 0.7853981634
   # Enable after on-vehicle frame, sensor and takeover verification.
-  flight_enabled: false
-  failsafe_validated: false
-  sensors_validated: false
+  flight_enabled: true
+  failsafe_validated: true
+  sensors_validated: true
 
 autofocus:
   target_ratio: 0.4
