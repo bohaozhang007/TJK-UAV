@@ -70,13 +70,14 @@ class Runner:
     def post(self, path, **data):
         return self.rpc('POST', path, dict(session_id=self.sid, request_id=str(uuid.uuid4()), **data))
 
-    def health(self, flight=True, require_localization=True):
+    def health(self, flight=True, require_localization=True, allow_manual=False):
         h = self.rpc('GET', '/health')['health']
         if self.hb_error:
             raise Failure('Heartbeat failed: '+self.hb_error)
         if require_localization and self.epoch and h.get('localization_epoch') != self.epoch:
             raise Failure('Localization epoch changed')
-        if (require_localization and not h.get('odom_ok')) or h.get('manual_takeover') or h.get('conflicting_publishers'):
+        if ((require_localization and not h.get('odom_ok')) or (h.get('manual_takeover') and not allow_manual)
+                or h.get('conflicting_publishers')):
             raise Failure('Localization/control unavailable: '+str(h))
         if flight:
             if h.get('error'):

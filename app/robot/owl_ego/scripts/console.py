@@ -20,10 +20,10 @@ class ConsoleRunner(Runner):
             raise Failure('Console operation cancelled')
         return super().rpc(method,path,data,timeout)
 
-    def health(self,flight=True,require_localization=True):
+    def health(self,flight=True,require_localization=True,allow_manual=False):
         if self.abort.is_set():
             raise Failure('Console operation cancelled')
-        return super().health(flight,require_localization=require_localization)
+        return super().health(flight,require_localization=require_localization,allow_manual=allow_manual)
 
 
 class Console:
@@ -34,25 +34,39 @@ class Console:
         self.operator_token=None
         self.operator_land_request=None
         self.operator_stop_request=None
+        self.manual_offboard_takeoff=False
 
     def initialize(self):
         r=self.r
         c=r.rpc('GET','/v21/capabilities')
         if c.get('backend') not in ('owl_ego', 'i7') or c.get('software_takeoff') is not True:
             raise Failure('Robot 缺少 software_takeoff 能力，请更新并重启 bridge/server')
+        self.manual_offboard_takeoff=c.get('manual_offboard_takeoff') is True
+        if c.get('backend') == 'i7' and not self.manual_offboard_takeoff:
+            raise Failure('请更新并重启 i7 bridge/server，当前未启用遥控器 OFFBOARD 起飞流程')
         r.abort=threading.Event()
-        h=r.health(flight=False)
+        h=r.health(flight=False,allow_manual=self.manual_offboard_takeoff)
+        if self.manual_offboard_takeoff:
+            if not h.get('airborne') and h.get('mode') != 'POSCTL':
+                raise Failure('请先用遥控器切到 POSITION，再输入 init；不要提前切 OFFBOARD。')
+            if h.get('manual_takeover') and (h.get('airborne') or h.get('armed') is not False
+                    or h.get('landed_state')!=1 or not h.get('landed_state_fresh') or not h.get('stopped')):
+                raise Failure('接管锁定只能在落地、未解锁、停稳且处于 POSITION 时，通过 init 恢复。')
         deadline=time.monotonic()+3
         while (not h.get('stopped') and not h.get('active_task_id') and not h.get('airborne')
                and h.get('landed_state')==1 and h.get('landed_state_fresh') and time.monotonic()<deadline):
             time.sleep(.1)
-            h=r.health(flight=False)
+            h=r.health(flight=False,allow_manual=self.manual_offboard_takeoff)
         if not h.get('stopped') or h.get('active_task_id'):
             raise Failure('需要静止且无活动任务')
         if r.sid:
             if r.delegated or h.get('control_owner') == 'agent' and self.operator_token:
                 raise Failure('Agent正在控制；本窗口可直接stop悬停或land降落抢占，无需重复init。')
-            if h.get('initialized'):
+            if h.get('manual_takeover') and self.manual_offboard_takeoff:
+                r.post('/init')
+                print('地面接管锁定已通过本次 init 清除。保持 POSITION，输入 takeoff 后等待 WAIT_OFFBOARD 提示。',flush=True)
+                return
+            if h.get('initialized') and not h.get('manual_takeover'):
                 print('已经初始化，当前会话继续保持。',flush=True)
                 return
             if h.get('airborne') or h.get('landing') or h.get('landed_state')!=1 or not h.get('landed_state_fresh'):
@@ -77,9 +91,36 @@ class Console:
         except Exception:
             r.cleanup();r.sid=None
             raise
-        print('初始化完成，心跳持续。输入 takeoff 请求 OFFBOARD、解锁和起飞。',flush=True)
+        print('初始化完成，心跳持续。'+('保持 POSITION，输入 takeoff 后等待提示，再用遥控器切 OFFBOARD。'
+              if self.manual_offboard_takeoff else '输入 takeoff 请求 OFFBOARD、解锁和起飞。'),flush=True)
         if self.operator_token:
             print('起飞停稳后Agent可直接接入；保持本窗口，stop悬停、land降落均可抢占Agent运动。',flush=True)
+
+    def takeoff(self):
+        finished=threading.Event()
+        def monitor():
+            previous=None
+            while not finished.wait(.2):
+                try:
+                    phase=self.r.rpc('GET','/health')['health'].get('takeoff_phase')
+                    if phase != previous:
+                        previous=phase
+                        if phase == 'WAIT_OFFBOARD':
+                            print('\nWAIT_OFFBOARD：请用遥控器切到 OFFBOARD，程序随后解锁并起飞。',flush=True)
+                        elif phase == 'TAKEOFF':
+                            print('\nTAKEOFF：正在上升，等待到达目标高度并停稳。',flush=True)
+                except Exception:
+                    pass
+        worker=None
+        if self.manual_offboard_takeoff:
+            print('正在准备起飞，请保持 POSITION，等待 WAIT_OFFBOARD 提示。',flush=True)
+            worker=threading.Thread(target=monitor,daemon=True)
+            worker.start()
+        try:
+            return self.r.blocking('/takeoff',65,flight=False,auto_arm=True)
+        finally:
+            finished.set()
+            if worker is not None:worker.join(timeout=2.5)
 
     def launch(self,name,operation):
         if self.worker and self.worker.is_alive():
@@ -228,7 +269,7 @@ class Console:
             if self.worker and self.worker.is_alive():raise Failure('任务运行中')
             self.initialize()
         elif cmd=='takeoff':
-            self.launch(cmd,lambda:self.r.blocking('/takeoff',65,flight=False,auto_arm=True))
+            self.launch(cmd,self.takeoff)
         elif cmd.split()[0] in ('move_rel_xyz_yaw','move_relative_xyz_yaw','move_rel_xyz','move_relative_xyz'):
             parts=cmd.split()
             count=4 if parts[0].endswith('_yaw') else 3

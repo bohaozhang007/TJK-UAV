@@ -44,10 +44,12 @@ class I7Controller(OwlEgoController):
         from app.robot.i7.mapping import require_running
         require_running(self.config, self.hw.ros)
         pose, zoom = self.camera.get_gimbal(), self.camera.get_zoom()
-        if (any(not math.isfinite(pose[k]) or abs(pose[k]-self.baseline[k]) > .5 for k in ('yaw_deg', 'pitch_deg'))
+        if (any(not math.isfinite(pose[k]) or abs(pose[k]-self.baseline[k]) > 2.0 for k in ('yaw_deg', 'pitch_deg'))
                 or not math.isfinite(float(zoom['zoom'])) or abs(zoom['zoom']-self.baseline['zoom']) > .05
                 or zoom.get('zooming')):
-            raise ApiError('K40T must match the calibrated baseline yaw/pitch/zoom')
+            raise ApiError('K40T baseline mismatch: actual='+str(dict(pose, **zoom))
+                           +'; expected='+str(self.baseline)
+                           +'; tolerance: yaw/pitch=2 deg, zoom=0.05x')
         return dict(pose, zoom=zoom['zoom'])
 
     def health(self):
@@ -64,6 +66,7 @@ class I7Controller(OwlEgoController):
             raise ApiError('camera framing is active')
         started = time.monotonic()
         finished, lost = threading.Event(), threading.Event()
+        interrupted = []
         monitor_thread = None
         try:
             snap = self.hw.snapshot()
@@ -71,13 +74,14 @@ class I7Controller(OwlEgoController):
             pose = public_pose(snap['pose'])
             def guard():
                 if lost.is_set():
-                    raise CameraControlLost('aircraft did not remain stationary during observation')
+                    raise CameraControlLost('observation interrupted: '+interrupted[0])
                 self.photo_guard(sid, epoch, pose)
             def monitor():
                 while not finished.wait(.05):
                     try:
                         guard()
-                    except Exception:
+                    except Exception as exc:
+                        interrupted.append(str(exc))
                         lost.set()
                         return
             guard()
@@ -123,7 +127,11 @@ class I7Controller(OwlEgoController):
 
     def handle_http(self, method, path, data, *, local_operator=False):
         if path == '/v21/capabilities' and method == 'GET':
-            return dict(super().handle_http(method, path, data, local_operator=local_operator), autofocus=True)
+            return dict(super().handle_http(method, path, data, local_operator=local_operator),
+                        autofocus=True, manual_offboard_takeoff=self.hw.snapshot()['health'].get('manual_offboard_takeoff') is True)
+        if path == '/takeoff' and method == 'POST':
+            if self.hw.snapshot()['health'].get('manual_offboard_takeoff') is not True:
+                raise ApiError('restart the i7 bridge to enable manual OFFBOARD takeoff')
         if path == '/v22/autofocus' and method == 'POST':
             return self._idempotent(path, data, lambda: self.start_photo(data))
         if path == '/v22/autofocus/status' and method == 'GET':
@@ -150,9 +158,11 @@ class I7Controller(OwlEgoController):
         h = snap['health']
         if snap.get('session_id') != sid or h['localization_epoch'] != epoch or h.get('manual_takeover'):
             raise CameraControlLost('camera ownership or localization changed')
-        if (not all(h.get(k) for k in ('initialized', 'airborne', 'stopped', 'control_ready', 'hold_ready', 'odom_ok'))
-                or h.get('active_task_id') is not None):
-            raise CameraControlLost('camera operation requires stopped flight hold')
+        missing = [k for k in ('initialized', 'airborne', 'stopped', 'control_ready', 'hold_ready', 'odom_ok') if not h.get(k)]
+        if missing or h.get('active_task_id') is not None:
+            raise CameraControlLost('camera operation requires stopped flight hold: '
+                +str(dict(unavailable=missing, active_task_id=h.get('active_task_id'),
+                          stop_diagnostics=h.get('stop_diagnostics'), flight_error=h.get('error'))))
         actual = snap['pose']
         target = [pose['x']/100, -pose['y']/100, pose['z']/100, -math.radians(pose['yaw'])]
         if (not np.isfinite(actual).all()

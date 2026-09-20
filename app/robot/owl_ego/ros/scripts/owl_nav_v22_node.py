@@ -30,6 +30,7 @@ from owl_nav_v22.cloud import validate as validate_cloud
 class Node:
     def __init__(self):
         robot = rospy.get_param('~robot', 'owl_ego')
+        self.manual_offboard_takeoff = robot == 'i7'
         self.c = load_robot_config(robot, rospy.get_param('~config'))
         self.check_mapping = lambda: None
         if robot == 'i7':
@@ -38,7 +39,7 @@ class Node:
             self.check_mapping()
         self.lock = threading.RLock()
         self.camera_preflight = CameraPreflight(self.c)
-        self.core = FlightCore(self.c['control'])
+        self.core = FlightCore(self.c['control'], manual_offboard_takeoff=self.manual_offboard_takeoff)
         self.frames = Frames(self.c['control'].get('mavros_frame_profile','standard_enu'))
         with open(self.c['planner']['parameters']) as f:
             planner_params=yaml.safe_load(f)
@@ -222,6 +223,10 @@ class Node:
                     raise Rejected('command deadline expired')
                 now = time.monotonic()
                 op = data.pop('op')
+                if op == 'takeoff' and self.manual_offboard_takeoff:
+                    if self.core.mode == 'OFFBOARD':
+                        raise Rejected('select POSITION first, request takeoff, then select OFFBOARD on RC')
+                    data['auto_arm'] = True
                 if self.preview_active and op in ('navigate', 'relative', 'takeoff', 'init'):
                     raise Rejected('path preview is still running')
                 if op in ('init', 'takeoff'):
@@ -232,7 +237,8 @@ class Node:
                 data['flight_authorized'] = self.authorized(now)
                 if op == 'takeoff' and (self.fcu_busy or self.fcu_uncertain):
                     raise Rejected('FCU operation busy or previous outcome uncertain')
-                if op == 'takeoff' and data.get('auto_arm') and not self.core.airborne and self.core.armed:
+                if (op == 'takeoff' and data.get('auto_arm') and not self.manual_offboard_takeoff
+                        and not self.core.airborne and self.core.armed):
                     raise Rejected('software takeoff requires disarmed ground state')
                 if op == 'takeoff' and (self.pending_fcu or self.landed != ExtendedState.LANDED_STATE_ON_GROUND) and not self.core.airborne:
                     raise Rejected('not confirmed on ground or FCU service busy')
@@ -244,6 +250,7 @@ class Node:
                 was_landing = self.core.landing
                 result = self.core.command(op,data,now)
                 if op == 'takeoff' and data.get('auto_arm') and self.core.active == data['task_id']:
+                    self.core.tasks[data['task_id']]['takeoff_phase'] = 'PREPARING'
                     self.pending_fcu = ('takeoff',data['task_id'],now)
                 if op == 'land' and self.core.landing:
                     self.pending_fcu = ('land',data['task_id'],now)
@@ -265,6 +272,8 @@ class Node:
         h['mavros_frame_profile'] = self.frames.profile
         h['frame_alignment_ok'] = self.frame_config_ok and (not self.frames.vendor or self.alignment.ready(now))
         h['frame_alignment_error'] = self.alignment.error if self.frames.vendor else None
+        h['takeoff_phase'] = c.tasks.get(c.active, {}).get('takeoff_phase')
+        h['manual_offboard_takeoff'] = self.manual_offboard_takeoff
         self.status_sequence += 1
         data = dict(health=h,session_id=c.session,bridge_id=self.bridge_id,sequence=self.status_sequence,
                     planner_generation=self.planner_generation if self.planner_epoch == c.epoch else None,
@@ -305,6 +314,10 @@ class Node:
                         # Adapt vendor world to map before MAVROS performs ENU->NED.
                         m.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
                         m.type_mask = PositionTarget.IGNORE_YAW_RATE
+                        task = c.tasks.get(c.active, {})
+                        if self.manual_offboard_takeoff and not task.get('planner_required'):
+                            m.type_mask |= (PositionTarget.IGNORE_VX | PositionTarget.IGNORE_VY | PositionTarget.IGNORE_VZ
+                                            | PositionTarget.IGNORE_AFX | PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ)
                         m.position.x,m.position.y,m.position.z = p
                         m.velocity.x,m.velocity.y,m.velocity.z = v
                         m.acceleration_or_force.x,m.acceleration_or_force.y,m.acceleration_or_force.z = a
@@ -572,10 +585,20 @@ class Node:
                 if state['mode']!='OFFBOARD' or self.landed != ExtendedState.LANDED_STATE_ON_GROUND:
                     raise RuntimeError('not confirmed OFFBOARD/on ground before arm')
             self.bounded_fcu('/mavros/cmd/arming',CommandBool,value=True)
-        prepare(guard,mode_request,arm_request,warm)
+        if self.manual_offboard_takeoff:
+            from app.robot.i7.takeoff import prepare_manual
+            def phase(value):
+                with self.lock:
+                    guard()
+                    self.core.tasks[tid]['takeoff_phase'] = value
+            prepare_manual(guard, arm_request, warm, phase,
+                           timeout=self.c['controller']['takeoff_timeout_s']-10.)
+        else:
+            prepare(guard,mode_request,arm_request,warm)
         with self.lock:
             guard()
             self.core.tasks[tid]['auto_start_pending'] = False
+            self.core.tasks[tid]['takeoff_phase'] = 'TAKEOFF'
 
     def fcu_loop(self):
         while not self.stop.wait(.05):

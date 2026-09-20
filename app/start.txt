@@ -30,9 +30,6 @@ cd ~/TJK-UAV
 bash app/run_agent_v22.sh --detector-host  192.168.2.194
 
 uav: i7 v22
-# Ground preparation; build uses a pinned archive, without Git operations.
-# Stop the old Faster-LIO launcher before t0; do not run both LIO profiles.
-# The v22 profile uses fixed MID-360 geometry and preserves the old files.
 t-build - first use or after planner source changes
 cd ~/TJK-UAV
 bash app/robot/i7/build.sh
@@ -50,7 +47,7 @@ t-check - ground checks after t0 and t1
 cd ~/TJK-UAV
 bash app/run_i7.sh check --live
 # Resolve every reported error before starting bridge/server.
-# flight_ready=false is expected until on-vehicle flight checks are completed.
+# Check flight_gates and the live sensor results.
 
 t2 - bridge and independent EGO
 cd ~/TJK-UAV
@@ -68,9 +65,12 @@ pose
 
 # Flight stage only, after on-vehicle verification.
 # init/takeoff require flight_enabled, sensors_validated and failsafe_validated.
-# Keep these false until the corresponding on-vehicle checks are complete.
+# Select POSITION on RC before init, not after it.
+# A latched takeover requires explicit init on disarmed, stopped POSITION ground state.
 init
 takeoff
+# Wait for WAIT_OFFBOARD, then select OFFBOARD on RC.
+# The program then requests arming and climbs to the configured height.
 wait
 
 t5 - Agent

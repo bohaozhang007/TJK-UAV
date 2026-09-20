@@ -55,7 +55,8 @@ def validate_terminal_stop(trajectory, goal):
 
 
 class FlightCore:
-    def __init__(self, config):
+    def __init__(self, config, *, manual_offboard_takeoff=False):
+        self.manual_offboard_takeoff = manual_offboard_takeoff
         config = dict(config)
         for key,value in config.items():
             if key in ('flight_enabled','failsafe_validated','sensors_validated'):
@@ -132,7 +133,7 @@ class FlightCore:
         return True
 
     def status(self, now):
-        return dict(initialized=self.initialized, airborne=self.airborne,
+        return dict(initialized=self.initialized, airborne=self.airborne, armed=self.armed, mode=self.mode,
                     control_ready=self.initialized and self.enabled and self.fresh(now)
                     and not self.manual and not self.landing and self.mode == 'OFFBOARD'
                     and self.session is not None and self.armed and self.airborne,
@@ -435,8 +436,16 @@ class FlightCore:
         if op == 'init':
             if self.active or self.landing:
                 raise Rejected('cannot initialize during active flight task')
-            if not self.fresh(now) or self.manual or not data.get('flight_authorized'):
+            if not self.fresh(now) or not data.get('flight_authorized'):
                 raise Rejected('preflight not ready or manual takeover latched')
+            if self.manual_offboard_takeoff and not self.airborne and self.mode != 'POSCTL':
+                raise Rejected('select POSITION on RC before init')
+            if self.manual:
+                if (not self.manual_offboard_takeoff or not self.operator_token
+                        or self.session != self.operator_session or not self.ground_confirmed(now)
+                        or self.airborne or not self.stopped or self.mode != 'POSCTL'):
+                    raise Rejected('manual takeover requires local operator init on disarmed, stopped POSITION ground state')
+                self.manual = False
             if self.operator_token and self.session != self.operator_session:
                 if not self.initialized:
                     raise Rejected('operator initialization required')
@@ -600,7 +609,9 @@ class FlightCore:
                     if self.pose[2]>=progress['z']+.03:
                         progress.update(z=float(self.pose[2]),at=now)
                     lead=min(self.c.get('takeoff_max_lead_m',.2),self.c.get('max_tracking_error_m',.5)/2)
-                    target[2] = min(t['goal'][2],target[2]+self.c['takeoff_speed_m_s']*dt,float(self.pose[2])+lead)
+                    target[2] = min(t['goal'][2],target[2]+self.c['takeoff_speed_m_s']*dt)
+                    if not self.manual_offboard_takeoff:
+                        target[2] = min(target[2],float(self.pose[2])+lead)
                     t['takeoff_reference']=dict(z_m=float(target[2]),measured_z_m=float(self.pose[2]),lead_m=float(target[2]-self.pose[2]))
                     if (t['goal'][2]-self.pose[2]>self.c['position_tolerance_m']
                             and now-progress['at']>self.c.get('takeoff_progress_timeout_s',10.)):
@@ -615,9 +626,17 @@ class FlightCore:
                 t['status'] = 'executing'
         if self.last_error and not self.active:
             target, vel, acc = self.hold, np.zeros(3), np.zeros(3)
+        tracking_limit = self.c.get('max_tracking_error_m',.5)
+        tracking_error = target[:3]-self.pose[:3]
+        tracking_exceeded = np.linalg.norm(tracking_error) > tracking_limit
+        vertical_limit = tracking_limit
+        if self.manual_offboard_takeoff and self.active and self.tasks[self.active]['kind'] == 'takeoff':
+            vertical_limit = self.c['takeoff_height_m']+self.c['position_tolerance_m']
+            tracking_exceeded = (np.linalg.norm(tracking_error[:2]) > tracking_limit
+                                 or abs(tracking_error[2]) > vertical_limit)
         if (not np.isfinite(target).all() or not np.isfinite(vel).all() or not np.isfinite(acc).all()
                 or np.max(np.abs(target[:3])) > self.c['world_limit_m']
-                or np.linalg.norm(target[:3]-self.pose[:3]) > self.c.get('max_tracking_error_m',.5)
+                or tracking_exceeded
                 or np.linalg.norm(vel) > self.c['max_speed_m_s']
                 or np.linalg.norm(acc) > self.c['max_acceleration_m_s2']):
             if self.active:
@@ -625,6 +644,7 @@ class FlightCore:
                 self.tasks[self.active]['execution_error']=dict(reference=[safe(v) for v in target],measured=self.pose.tolist(),
                     tracking_error_m=safe(np.linalg.norm(target[:3]-self.pose[:3])),
                     tracking_limit_m=self.c.get('max_tracking_error_m',.5),
+                    vertical_tracking_limit_m=vertical_limit,
                     velocity_m_s=safe(np.linalg.norm(vel)),acceleration_m_s2=safe(np.linalg.norm(acc)))
             self.fail('trajectory exceeds execution/tracking limits')
             target,vel,acc = self.hold,np.zeros(3),np.zeros(3)

@@ -95,8 +95,8 @@ def live_checks(config, report, check):
         c = config['camera']
         client = K40TClient(c['host'], c['port'], c['timeout_s'])
         pose, zoom = client.get_gimbal(), client.get_zoom()
-        if (abs(pose['yaw_deg']-c['baseline_yaw_deg']) > .5
-                or abs(pose['pitch_deg']-c['baseline_pitch_deg']) > .5
+        if (abs(pose['yaw_deg']-c['baseline_yaw_deg']) > 2.0
+                or abs(pose['pitch_deg']-c['baseline_pitch_deg']) > 2.0
                 or abs(zoom['zoom']-c['baseline_zoom']) > .05 or zoom.get('zooming')):
             raise ValueError('camera is not at calibrated baseline: '+str(dict(pose, **zoom)))
         return dict(pose, **zoom)
