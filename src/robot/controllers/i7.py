@@ -88,6 +88,7 @@ class I7Controller:
         topics_config = _required_section(config, "topics")
         services_config = _required_section(config, "services")
         camera_control = _required_section(config, "camera_control")
+        self._autofocus_config = dict(_required_section(config, "autofocus"))
         self._camera_control = K40TClient(
             _required_string(camera_control, "host"),
             _required_number(camera_control, "port", integer=True),
@@ -331,11 +332,13 @@ class I7Controller:
     def autofocus(self, img: np.ndarray, box, **options) -> Dict[str, Any]:
         """Center a current BGR image's xyxy box and frame it at 40% occupancy.
 
-        Uses live frames to track a textured, approximately stationary target.
+        Initializes the configured tracker with img/box, then tracks live frames.
         This adjusts gimbal/zoom only; it does not issue lens-focus commands.
         """
         with self._camera_operation_lock:
-            return autofocus_box(self, img, box, self._hardware.get_bgr_after, **options)
+            settings = dict(self._autofocus_config)
+            settings.update(options)
+            return autofocus_box(self, img, box, self._hardware.get_bgr_after, **settings)
 
     def get_rgb_meta(self, save: bool = True) -> Dict[str, Any]:
         frame = self._get_native_bgr()

@@ -66,6 +66,29 @@ camera_control:
   port: 1030
   timeout_s: 10.0
 
+# Remote SAM2 tracker; native-size images are sent without resizing.
+autofocus:
+  tracker_url: http://192.168.31.66:8791
+  tracker_timeout_s: 30.0
+  # v21-style reference-resolution gains; starting tuning values, not intrinsics.
+  # Pitch uses degrees, not v21's vertical cm/pixel.
+  reference_width_px: 640
+  reference_height_px: 360
+  reference_zoom: 1.0
+  yaw_deg_per_pixel: 0.1
+  pitch_deg_per_pixel: 0.1
+  max_yaw_step_deg: 3.0
+  max_pitch_step_deg: 3.0
+  damping: 0.7
+  zoom_step_up: 1.25
+  zoom_step_down: 0.8
+  target_ratio: 0.4
+  center_tolerance: 0.04
+  size_tolerance: 0.05
+  max_steps: 30
+  timeout_s: 180.0
+  settle_s: 0.5
+
 # ROS topic wiring; normally unchanged after deployment.
 topics:
   odom_topic: /laserMapping/odometry
