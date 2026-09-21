@@ -212,9 +212,34 @@ class I7Controller(OwlEgoController):
                 source='registered_cloud_single_frame', position_unit='m', encoding='float32_le_xyz'))
 
     def photo_guard(self, sid, epoch, pose):
+        snap = None
+        try:
+            if self.camera_shutdown.is_set():
+                raise CameraControlLost('camera server shutting down')
+            snap = self.hw.snapshot()
+            self.check_photo_state(snap, sid, epoch, pose)
+        except Exception as exc:
+            detail = dict(time_s=time.time(), exception_type=type(exc).__name__, message=str(exc),
+                          expected_epoch=epoch, exposure_pose=copy.deepcopy(pose),
+                          server_shutting_down=self.camera_shutdown.is_set())
+            if snap is not None:
+                detail.update(health=copy.deepcopy(snap['health']),
+                              owner_matches=snap.get('session_id') == sid,
+                              position_tolerance_cm=self.config['control']['position_tolerance_m']*100,
+                              yaw_tolerance_deg=math.degrees(self.config['control']['yaw_tolerance_rad']))
+                actual = np.asarray(snap['pose'], float)
+                detail['actual_pose_world_m_rad'] = [float(v) if math.isfinite(v) else None for v in actual]
+                if np.isfinite(actual).all():
+                    detail['actual_pose'] = public_pose(actual)
+                    target = np.array([pose['x']/100, -pose['y']/100, pose['z']/100])
+                    detail['position_error_cm'] = float(np.linalg.norm(actual[:3]-target)*100)
+                    detail['yaw_error_deg'] = abs((detail['actual_pose']['yaw']-pose['yaw']+180)%360-180)
+            exc.flight_diagnostics = detail
+            raise
+
+    def check_photo_state(self, snap, sid, epoch, pose):
         if self.camera_shutdown.is_set():
             raise CameraControlLost('camera server shutting down')
-        snap = self.hw.snapshot()
         h = snap['health']
         if snap.get('session_id') != sid or h['localization_epoch'] != epoch or h.get('manual_takeover'):
             raise CameraControlLost('camera ownership or localization changed')
@@ -268,15 +293,20 @@ class I7Controller(OwlEgoController):
         sid, epoch = job['session_id'], observation['localization_epoch']
         lost = threading.Event()
         finished = threading.Event()
+        interruption = []
         def guard():
             if lost.is_set():
-                raise CameraControlLost('camera operation interrupted by flight state change')
+                original = interruption[0]
+                error = CameraControlLost('camera operation interrupted: '+type(original).__name__+': '+str(original))
+                error.flight_diagnostics = getattr(original, 'flight_diagnostics', None)
+                raise error from original
             self.photo_guard(sid, epoch, observation['pose'])
         def monitor():
             while not finished.wait(.1):
                 try:
                     guard()
-                except Exception:
+                except Exception as exc:
+                    interruption.append(exc)
                     lost.set()
                     return
         controller = self
@@ -332,7 +362,10 @@ class I7Controller(OwlEgoController):
             result = dict(status='completed', focused=focused, details=details,
                           restoration=restoration, **photo)
         except Exception as exc:
-            result = dict(status='failed', error=str(exc))
+            original = interruption[0] if interruption else exc
+            result = dict(status='failed', error=str(exc), error_type=type(original).__name__,
+                          original_error=str(original),
+                          flight_diagnostics=getattr(original, 'flight_diagnostics', None))
             # CameraControlLost forbids further camera commands, including restoration.
             if not isinstance(exc, CameraControlLost) and not lost.is_set():
                 try:

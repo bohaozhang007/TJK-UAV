@@ -75,6 +75,8 @@ class I7Client(OwlEgoClient):
             self.health()
             state = self.rpc('GET', '/v22/autofocus/status', dict(task_id=task, session_id=self.session), timeout=3.)
             if state['status'] == 'failed':
+                if timings is not None:
+                    timings['camera'] = {k:v for k,v in state.items() if k not in ('session_id','image_base64')}
                 raise MissionError('camera task failed: '+state['error'])
             if state['status'] == 'completed':
                 self.health()

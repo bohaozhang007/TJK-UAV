@@ -426,7 +426,12 @@ class Mission:
         self.transition(State.AUTOFOCUS)
         timings = {}
         self.event('autofocus_started', target_id=target['id'], frame_id=observation.frame_id)
-        result = self.robot.autofocus_photo(observation, box, timings=timings)
+        try:
+            result = self.robot.autofocus_photo(observation, box, timings=timings)
+        except Exception as exc:
+            self.event('autofocus_failed', target_id=target['id'], frame_id=observation.frame_id,
+                       error=str(exc), timings=timings)
+            raise
         path = self.output / f'target_{target["id"]:03d}_01.jpg'
         if not self.artifacts.submit('photo', path, save_photo, result['rgb']):
             raise MissionError('photo storage queue full')
