@@ -35,47 +35,18 @@ cd ~/TJK-UAV
 bash app/robot/i7/build.sh
 bash app/run_i7.sh check
 
-t0 - hardware (MAVROS, LiDAR, FAST-LIO2, RTSP relay; no old planner/nav)
-# Reuses compatible services. Replaces the known vendor LIO only on disarmed
-# POSITION ground state with fresh MAVROS feedback and the v22 bridge stopped.
-# Replacement resets localization; start sensors/bridge/server afterwards.
+t0 - services (hardware, sensors, live checks, bridge, Robot server)
 cd ~/TJK-UAV
-bash app/run_i7.sh hardware
+bash app/run_i7.sh stack
+# Wait for "Live checks passed; services launched" before opening console.
 
-t1 - sensors (RTSP receipt timestamps; stationary detection)
-cd ~/TJK-UAV
-bash app/run_i7.sh sensors
-
-t-check - ground checks after t0 and t1
-cd ~/TJK-UAV
-bash app/run_i7.sh check --live
-# Resolve every reported error before starting bridge/server.
-# Check flight_gates and the live sensor results.
-
-t2 - bridge and independent EGO
-cd ~/TJK-UAV
-bash app/run_i7.sh bridge
-
-t3 - Robot server
-cd ~/TJK-UAV
-bash app/run_i7.sh server
-
-t4 - Console (keep open after takeoff)
+t1 - Console (keep open after takeoff)
 cd ~/TJK-UAV
 bash app/run_i7.sh console
-health
-pose
-
-# Flight stage only, after on-vehicle verification.
-# init/takeoff require flight_enabled, sensors_validated and failsafe_validated.
-# Select POSITION on RC before init, not after it.
-# A latched takeover requires explicit init on disarmed, stopped POSITION ground state.
 init
 takeoff
-# Wait for WAIT_OFFBOARD, then select OFFBOARD on RC.
-# The program then requests arming and climbs to the configured height.
 wait
 
-t5 - Agent
+t2 - Agent
 cd ~/TJK-UAV
 bash app/run_agent_v22.sh --detector-host 192.168.31.66

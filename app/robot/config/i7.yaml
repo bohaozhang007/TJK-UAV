@@ -12,6 +12,7 @@ control:
   position_tolerance_m: 0.15
   yaw_tolerance_rad: 0.0872664626
   stop_speed_m_s: 0.1
+  stop_position_span_m: 0.06
   stop_yaw_rate_rad_s: 0.0872664626
   stable_duration_s: 0.5
   max_speed_m_s: 2.0

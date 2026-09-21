@@ -10,6 +10,7 @@ export I7_V22_CONFIG="$CONFIG"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 cd "$ROOT"
 case "$MODE" in
+  stack) exec bash app/robot/i7/bringup/run_i7_hardware.sh --stack "$@" ;;
   hardware) exec bash app/robot/i7/bringup/run_i7_hardware.sh "$@" ;;
   console) exec python3 app/robot/owl_ego/scripts/console.py --output "logs/i7_v22_console/$(date +%Y%m%d-%H%M%S)-$$" "$@" ;;
   check)
@@ -25,5 +26,5 @@ source "$WS/devel/setup.bash"
 case "$MODE" in
   bridge) exec roslaunch owl_nav_v22 owl_ego.launch robot:=i7 bridge_name:=i7_ego_v22_bridge config:="$CONFIG" "$@" ;;
   server) exec python3 -m app.robot.server --robot i7 --config "$CONFIG" "$@" ;;
-  *) echo 'Usage: bash app/run_i7.sh [check|hardware|sensors|bridge|server|console]'; exit 2 ;;
+  *) echo 'Usage: bash app/run_i7.sh [stack|check|hardware|sensors|bridge|server|console]'; exit 2 ;;
 esac

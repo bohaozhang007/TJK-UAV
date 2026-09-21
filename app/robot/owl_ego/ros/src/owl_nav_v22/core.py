@@ -58,6 +58,7 @@ class FlightCore:
     def __init__(self, config, *, manual_offboard_takeoff=False):
         self.manual_offboard_takeoff = manual_offboard_takeoff
         config = dict(config)
+        config.setdefault('stop_position_span_m', config['stop_speed_m_s']*config['stable_duration_s'])
         for key,value in config.items():
             if key in ('flight_enabled','failsafe_validated','sensors_validated'):
                 if type(value) is not bool:
@@ -152,7 +153,7 @@ class FlightCore:
                     stop_diagnostics=dict(
                         method='pose_window',
                         position_span_m=self.position_span,
-                        position_limit_m=self.c['stop_speed_m_s']*self.c['stable_duration_s'],
+                        position_limit_m=self.c['stop_position_span_m'],
                         yaw_span_deg=math.degrees(self.heading_span),
                         yaw_span_limit_deg=math.degrees(self.c['stop_yaw_rate_rad_s']*self.c['stable_duration_s']),
                         speed_m_s=self.speed if math.isfinite(self.speed) else None,
@@ -289,7 +290,7 @@ class FlightCore:
         span=stamp-self.pose_window[0][0]
         self.position_span=float(np.linalg.norm(np.ptp(samples[:,:3],axis=0)))
         self.heading_span=float(np.ptp(np.unwrap(samples[:,3])))
-        quiet=(self.position_span<=self.c['stop_speed_m_s']*duration
+        quiet=(self.position_span<=self.c['stop_position_span_m']
                and self.heading_span<=self.c['stop_yaw_rate_rad_s']*duration)
         self.stop_samples=len(samples) if quiet else 0
         self.stop_since=now-span if quiet else None

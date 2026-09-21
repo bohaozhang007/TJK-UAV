@@ -24,6 +24,10 @@ class CameraControlLost(RuntimeError):
     pass
 
 
+class CameraNotStopped(CameraControlLost):
+    pass
+
+
 class I7Controller(OwlEgoController):
     backend = 'i7'
 
@@ -65,23 +69,46 @@ class I7Controller(OwlEgoController):
         if not self.camera_lock.acquire(blocking=False):
             raise ApiError('camera framing is active')
         started = time.monotonic()
-        finished, lost = threading.Event(), threading.Event()
-        interrupted = []
-        monitor_thread = None
+        deadline = started+10.
+        restarts = 0
         try:
             snap = self.hw.snapshot()
             sid, epoch = snap.get('session_id'), snap['health']['localization_epoch']
             pose = public_pose(snap['pose'])
+            while True:
+                try:
+                    result = self._stationary_observation(sid, epoch, pose, deadline,
+                                                          include_image=include_image)
+                except CameraNotStopped as exc:
+                    if time.monotonic() >= deadline:
+                        raise ObservationUnavailable('stationary observation timed out after 10 s: '+str(exc)) from exc
+                    restarts += 1
+                    time.sleep(.05)
+                    continue
+                result['assembly_elapsed_s'] = time.monotonic()-started
+                result['capture_timing']['stationary_restarts'] = restarts
+                return result
+        finally:
+            self.camera_lock.release()
+
+    def _stationary_observation(self, sid, epoch, pose, deadline, *, include_image):
+        started = time.monotonic()
+        finished, lost = threading.Event(), threading.Event()
+        interrupted = []
+        monitor_thread = None
+        try:
             def guard():
                 if lost.is_set():
-                    raise CameraControlLost('observation interrupted: '+interrupted[0])
+                    raise interrupted[0]
                 self.photo_guard(sid, epoch, pose)
+                if time.monotonic() >= deadline:
+                    raise ObservationUnavailable('stationary observation timed out after 10 s')
             def monitor():
                 while not finished.wait(.05):
                     try:
                         guard()
                     except Exception as exc:
-                        interrupted.append(str(exc))
+                        interrupted.append(exc)
                         lost.set()
                         return
             guard()
@@ -123,7 +150,6 @@ class I7Controller(OwlEgoController):
             finished.set()
             if monitor_thread is not None:
                 monitor_thread.join(timeout=.2)
-            self.camera_lock.release()
 
     def handle_http(self, method, path, data, *, local_operator=False):
         if path == '/v21/capabilities' and method == 'GET':
@@ -159,7 +185,7 @@ class I7Controller(OwlEgoController):
         if snap.get('session_id') != sid or h['localization_epoch'] != epoch or h.get('manual_takeover'):
             raise CameraControlLost('camera ownership or localization changed')
         missing = [k for k in ('initialized', 'airborne', 'stopped', 'control_ready', 'hold_ready', 'odom_ok') if not h.get(k)]
-        if missing or h.get('active_task_id') is not None:
+        if any(k != 'stopped' for k in missing) or h.get('active_task_id') is not None or h.get('error'):
             raise CameraControlLost('camera operation requires stopped flight hold: '
                 +str(dict(unavailable=missing, active_task_id=h.get('active_task_id'),
                           stop_diagnostics=h.get('stop_diagnostics'), flight_error=h.get('error'))))
@@ -169,6 +195,8 @@ class I7Controller(OwlEgoController):
                 or np.linalg.norm(np.asarray(actual[:3])-target[:3]) > self.config['control']['position_tolerance_m']
                 or abs((actual[3]-target[3]+math.pi)%(2*math.pi)-math.pi) > self.config['control']['yaw_tolerance_rad']):
             raise CameraControlLost('aircraft moved from the detection exposure')
+        if 'stopped' in missing:
+            raise CameraNotStopped('waiting for stopped flight hold: '+str(h.get('stop_diagnostics')))
 
     def start_photo(self, data):
         import ipaddress

@@ -4,7 +4,9 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from xmlrpc.client import ServerProxy
@@ -26,14 +28,46 @@ def require_ground():
     from mavros_msgs.msg import State, ExtendedState
     if not rospy.core.is_initialized():
         rospy.init_node('i7_lio_start_check', anonymous=True, disable_signals=True)
-    state = rospy.wait_for_message('/mavros/state', State, timeout=3.)
-    landed = rospy.wait_for_message('/mavros/extended_state', ExtendedState, timeout=3.)
-    now = rospy.Time.now().to_sec()
-    if (not state.connected or state.armed or state.mode != 'POSCTL'
-            or landed.landed_state != ExtendedState.LANDED_STATE_ON_GROUND
-            or any(not 0 <= now-msg.header.stamp.to_sec() <= .5 for msg in (state, landed))):
-        raise RuntimeError('LIO replacement requires fresh MAVROS feedback: connected, '
-                           'disarmed, on ground and POSITION mode')
+    changed = threading.Condition()
+    samples = {}
+    subscribers = []
+    def receive(message, key):
+        with changed:
+            samples[key] = (message, time.monotonic())
+            changed.notify_all()
+    try:
+        for topic, cls, key in (('/mavros/state', State, 'state'),
+                                ('/mavros/extended_state', ExtendedState, 'landed')):
+            subscribers.append(rospy.Subscriber(topic, cls, receive, callback_args=key, queue_size=1))
+        deadline = time.monotonic()+3.
+        with changed:
+            while not rospy.is_shutdown():
+                now, wall = rospy.Time.now().to_sec(), time.monotonic()
+                details = {'missing': sorted({'state', 'landed'}-samples.keys())}
+                fresh = not details['missing']
+                for key, (msg, received) in samples.items():
+                    age, receipt_age = now-msg.header.stamp.to_sec(), wall-received
+                    details[key+'_age_s'] = round(age, 3)
+                    details[key+'_receipt_age_s'] = round(receipt_age, 3)
+                    fresh = fresh and msg.header.stamp.to_sec() > 0 and 0 <= age <= .5 and 0 <= receipt_age <= .5
+                if 'state' in samples:
+                    state = samples['state'][0]
+                    details.update(connected=state.connected, armed=state.armed, mode=state.mode)
+                if 'landed' in samples:
+                    details['landed_state'] = samples['landed'][0].landed_state
+                if (fresh and details['connected'] and not details['armed']
+                        and details['mode'] == 'POSCTL'
+                        and details['landed_state'] == ExtendedState.LANDED_STATE_ON_GROUND):
+                    return
+                remaining = deadline-wall
+                if remaining <= 0:
+                    raise RuntimeError('LIO replacement requires fresh MAVROS feedback: connected, '
+                                       'disarmed, on ground and POSITION mode; actual='+str(details))
+                changed.wait(min(.05, remaining))
+        raise RuntimeError('ROS shut down during LIO ground check')
+    finally:
+        for subscriber in subscribers:
+            subscriber.unregister()
 
 
 def legacy_launcher(master, nodes):
@@ -138,4 +172,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (RuntimeError, ValueError, rospy.ROSException) as exc:
+        print('I7 LIO startup failed: '+str(exc), file=sys.stderr, flush=True)
+        sys.exit(1)

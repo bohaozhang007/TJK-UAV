@@ -12,6 +12,8 @@ from .base import MissionError
 
 class I7Client(OwlEgoClient):
     def rpc(self, method, path, data=None, timeout=1., timings=None):
+        if path == '/v21/observation':
+            timeout = max(timeout, 25.)
         if path in ('/v21/observation', '/init', '/v21/navigation'):
             timeout = max(timeout, 15.)
         result = super().rpc(method, path, data, timeout, timings)
