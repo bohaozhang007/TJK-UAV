@@ -50,5 +50,10 @@ orbit:
   top: 2 # Nearest reachable candidates to visit.
 
 localization:
+  source: da3 # da3 or grid
+
+  min_depth_pixels: 16
+  max_relative_depth_mad: 0.3
+
   min_target_voxels: 2
   target_depth_gap_m: 0.3 # Depth gap between surface groups.

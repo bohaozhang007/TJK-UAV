@@ -23,6 +23,7 @@ from app.timing import measure
 from app.robot_client.base import ControlLost, MissionError, Robot, TargetNotLocalizable, NavigationPlanningFailed
 from app.robot_client.factory import create_robot
 from app.robot_client.artifact_writer import ArtifactWriter, save_photo
+from app.robot_client.depth import DepthClient, DEPTH_TIMEOUT_S
 
 
 # Fixed service settings and bounded retry/loop limits.
@@ -163,8 +164,9 @@ class Detector:
 
 
 class Mission:
-    def __init__(self, robot: Robot, detector, config, output):
+    def __init__(self, robot: Robot, detector, config, output, depth_client=None):
         self.robot, self.detector, self.c = robot, detector, config
+        self.depth_client = depth_client
         self.output = Path(output)
         self.output.mkdir(parents=True, exist_ok=True)
         self.state = State.WAIT_OPERATOR
@@ -278,42 +280,54 @@ class Mission:
     def detect(self, observation):
         self.transition(State.DETECT)
         def request(timings):
-            outcome = queue.Queue(maxsize=1)
-            def worker():
-                details = {}
-                try:
-                    result = self.detector.detect(observation, timings=details)
-                    outcome.put((True, result, details))
-                except Exception as exc:
-                    outcome.put((False, exc, details))
-            threading.Thread(target=worker, daemon=True).start()
-            deadline = time.monotonic() + DETECTOR_TIMEOUT_S + 1.
-            while time.monotonic() < deadline:
-                self.robot.health()
-                try:
-                    ok, result, details = outcome.get(timeout=.1)
-                    timings.update(details)
-                except queue.Empty:
-                    continue
-                if not ok:
-                    raise result
-                return result
-            raise MissionError('detector request timed out')
+            return self.wait_perception(lambda t: self.detector.detect(observation, timings=t),
+                                        DETECTOR_TIMEOUT_S, timings)
         return self.retry_read('detection', request, frame_id=observation.frame_id,
                                detection_point_id=self.detection_point_id)
+
+    def wait_perception(self, operation, timeout, timings):
+        outcome = queue.Queue(maxsize=1)
+        def worker():
+            details = {}
+            try:
+                outcome.put((True, operation(details), details))
+            except Exception as exc:
+                outcome.put((False, exc, details))
+        threading.Thread(target=worker, daemon=True).start()
+        deadline = time.monotonic()+timeout+1.
+        while time.monotonic() < deadline:
+            self.robot.health()
+            try:
+                ok, result, details = outcome.get(timeout=.1)
+            except queue.Empty:
+                continue
+            timings.update(details)
+            if not ok:
+                raise result
+            return result
+        raise MissionError('perception request timed out')
 
     def locate_new_targets(self, observation, detections):
         self.transition(State.LOCALIZE)
         new = []
+        depth = None
+        source = self.c['localization']['source']
+        if detections and source == 'da3':
+            if self.depth_client is None:
+                raise MissionError('DA3 localization requires a depth client')
+            depth = self.retry_read('depth estimation',
+                lambda t: self.wait_perception(lambda details: self.depth_client.estimate(observation, details),
+                                               DEPTH_TIMEOUT_S, t),
+                frame_id=observation.frame_id, detection_point_id=self.detection_point_id)
         for index, detection in enumerate(detections, 1):
             attempts = [0]
             def locate(timings):
                 attempts[0] += 1
                 prefix = self.output / f'localize_{self.detection_point_id:03d}_{index:02d}_{attempts[0]:02d}'
                 return self.robot.locate_target(observation, detection['mask'], timings=timings,
-                                               diagnostic_prefix=prefix)
+                                               diagnostic_prefix=prefix, depth=depth)
             context = dict(frame_id=observation.frame_id, detection_point_id=self.detection_point_id,
-                           detection_index=index,
+                           detection_index=index, localization_source=source,
                            confidence=detection['confidence'])
             try:
                 position = self.retry_read('target localization',
@@ -326,7 +340,8 @@ class Mission:
                 self.event('duplicate', position_cm=position)
                 continue
             record = dict(id=len(self.targets)+1, position_cm=position, status='pending',
-                          confidence=detection['confidence'], exposure_pose=dict(observation.pose))
+                          confidence=detection['confidence'], exposure_pose=dict(observation.pose),
+                          localization_source=source)
             self.targets.append(record)
             new.append((record, detection['box']))
             self.event('new_target', target=record)
@@ -549,6 +564,14 @@ class Mission:
 
 
 def validate_config(config):
+    if config['localization'].get('source') not in ('da3', 'grid'):
+        raise ValueError('localization.source must be da3 or grid')
+    minimum = config['localization']['min_depth_pixels']
+    spread = config['localization']['max_relative_depth_mad']
+    if type(minimum) is not int or not 1 <= minimum <= 1000000:
+        raise ValueError('invalid localization.min_depth_pixels')
+    if type(spread) not in (int,float) or not math.isfinite(spread) or not 0 < spread <= 1:
+        raise ValueError('invalid localization.max_relative_depth_mad')
     if type(config.get('photography', {}).get('autofocus')) is not bool:
         raise ValueError('photography.autofocus must be boolean')
     if config['patrol'].get('dedup_mode', '3d') not in ('3d', 'separate'):
@@ -607,7 +630,8 @@ def main():
                              tracker_host=args.detector_host)
     except (ValueError,KeyError,TypeError) as exc:
         parser.error(str(exc))
-    Mission(robot, detector, config, args.output).run()
+    depth_client = DepthClient(args.detector_host) if config['localization']['source'] == 'da3' else None
+    Mission(robot, detector, config, args.output, depth_client=depth_client).run()
 
 
 if __name__ == '__main__':

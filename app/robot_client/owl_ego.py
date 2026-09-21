@@ -38,9 +38,12 @@ class HttpError(MissionError):
 class OwlEgoClient:
     observation_max_age_s = .5
     observation_sync_max_s = .05
-    def __init__(self, *, min_target_voxels, target_depth_gap_m):
+    def __init__(self, *, min_target_voxels, target_depth_gap_m,
+                 min_depth_pixels=16, max_relative_depth_mad=.3):
         self.min_target_voxels = min_target_voxels
         self.target_depth_gap_m = target_depth_gap_m
+        self.min_depth_pixels = min_depth_pixels
+        self.max_relative_depth_mad = max_relative_depth_mad
         self.url = ROBOT_URL
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.session = self.epoch = None
@@ -240,14 +243,42 @@ class OwlEgoClient:
         with measure(timings, 'map_decode'):
             return GridMap(data['map'])
 
-    def locate_target(self, observation, mask, timings=None, diagnostic_prefix=None):
+    def locate_target(self, observation, mask, timings=None, diagnostic_prefix=None, depth=None):
         if observation.epoch != self.epoch:
             raise ControlLost('old exposure epoch')
+        if depth is not None:
+            with measure(timings, 'wait_stopped'):
+                self.wait_stopped()
         current = self.pose()
         delta = np.linalg.norm([current[k] - observation.pose[k] for k in ('x', 'y', 'z')])
         yaw = abs((current['yaw'] - observation.pose['yaw'] + 180) % 360 - 180)
         if delta > self.tolerances['position_tolerance_cm'] or yaw > self.tolerances['yaw_tolerance_deg']:
             raise MissionError('vehicle moved while awaiting detection')
+        if depth is not None:
+            from .depth import save_depth_report
+            summary = dict(source='da3', frame_id=observation.frame_id, localization_epoch=observation.epoch)
+            try:
+                with measure(timings, 'depth_localization'):
+                    point, summary = depth.locate(observation, mask, self.min_depth_pixels,
+                                                  self.max_relative_depth_mad)
+                return point
+            except TargetNotLocalizable as exc:
+                summary['error'] = str(exc)
+                raise
+            finally:
+                summary.update(exposure_pose=observation.pose, intrinsics=observation.intrinsics.tolist(),
+                    distortion_coefficients=observation.distortion.tolist() if observation.distortion is not None else None,
+                    world_from_camera_optical_cm=observation.world_from_camera_cm.tolist(),
+                    image_geometry='raw' if observation.distortion is not None else 'rectified')
+                if diagnostic_prefix is not None:
+                    try:
+                        queued = self.artifacts.submit('depth_localization', Path(diagnostic_prefix),
+                                                       save_depth_report, summary)
+                        summary['write_status'] = 'queued' if queued else 'queue_full'
+                    except Exception as exc:
+                        summary['write_error'] = str(exc)
+                if timings is not None:
+                    timings['localization_diagnostics'] = summary
         grid = self.grid(timings)
         diagnostics = {} if diagnostic_prefix is not None else None
         with measure(timings, 'mask_projection_and_localization'):

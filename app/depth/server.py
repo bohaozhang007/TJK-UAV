@@ -1,5 +1,5 @@
 """POST /estimate {image: base64 PNG/JPEG, intrinsics: 3x3 K, output: depth|xyz}.
-Input must be rectified, with K in input-image pixels. Returns float32 .npy in metres;
+K is in input-image pixels. Images pass unchanged to the model. Returns float32 .npy in metres;
 depth is camera Z, xyz axes are right/down/forward. Invalid values are NaN.
 """
 import argparse
@@ -98,7 +98,12 @@ class DepthHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             if self.headers.get("Transfer-Encoding") or not 0 < length <= 32 * 1024 * 1024:
                 raise ValueError("provide Content-Length between 1 and 32 MiB")
-            image, k, output = decode_request(json.loads(self.rfile.read(length)))
+            data = json.loads(self.rfile.read(length))
+            image, k, output = decode_request(data)
+            frame_id = data.get('frame_id', '')
+            if (not isinstance(frame_id, str) or len(frame_id) > 256
+                    or any(ord(c) < 32 or ord(c) > 126 for c in frame_id)):
+                raise ValueError('invalid frame_id')
         except (ValueError, OSError) as exc:
             self.reply(400, {"ok": False, "error": str(exc)})
             return
@@ -115,8 +120,9 @@ class DepthHandler(BaseHTTPRequestHandler):
         self.send_body(200, buffer.getvalue(), "application/x-npy", {
             "X-Output": output, "X-Unit": "m", "X-Depth-Type": "camera-z",
             "X-Coordinate-Frame": "camera-optical-right-down-forward", "X-Elapsed-S": f"{elapsed:.3f}",
+            "X-Frame-Id": frame_id,
         })
-        logging.info("Depth response output=%s shape=%s elapsed_s=%.3f", output, array.shape, elapsed)
+        logging.info("Depth response frame_id=%s output=%s shape=%s elapsed_s=%.3f", frame_id, output, array.shape, elapsed)
 
 
 def main():

@@ -4,11 +4,12 @@ from .owl_ego import OwlEgoClient
 
 
 def create_robot(localization, *, autofocus=False, tracker_host=None) -> Robot:
-    probe = OwlEgoClient(**localization)
+    settings = {k:v for k,v in localization.items() if k != 'source'}
+    probe = OwlEgoClient(**settings)
     backend = probe.rpc('GET', '/v21/capabilities').get('backend')
     if backend == 'i7':
         from .i7 import I7Client
-        robot = I7Client(**localization)
+        robot = I7Client(**settings)
     elif backend == 'owl_ego':
         robot = probe
     else:
