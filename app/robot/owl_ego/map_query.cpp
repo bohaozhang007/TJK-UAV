@@ -22,11 +22,13 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
     return true;
   }
   std::ostringstream raw, inflated, out;
-  size_t raw_count = 0, inflated_count = 0;
+  const size_t occupied_budget = 2000000;
+  size_t raw_count = 0, inflated_count = 0, scanned_count = 0;
   for (int x = lo.x(); x <= hi.x(); ++x)
     for (int y = lo.y(); y <= hi.y(); ++y)
       for (int z = lo.z(); z <= hi.z(); ++z)
       {
+        ++scanned_count;
         const Eigen::Vector3i id(x, y, z);
         if (md_.occupancy_buffer_[globalIdx2BufIdx(id)] >= mp_.min_occupancy_log_)
         {
@@ -38,10 +40,15 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
           if (inflated_count++) inflated << ',';
           inflated << '[' << x << ',' << y << ',' << z << ']';
         }
-        if (raw_count + inflated_count > 300000)
+        if (raw_count + inflated_count > occupied_budget)
         {
           res.success = false;
-          res.message = "map query exceeds occupied-cell budget";
+          std::ostringstream error;
+          error << "map query exceeds occupied-cell budget: budget=" << occupied_budget
+                << " occupied=" << raw_count << " inflated=" << inflated_count
+                << " scanned=" << scanned_count << " total=" << size.cast<double>().prod()
+                << " elapsed_s=" << std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+          res.message = error.str();
           return true;
         }
       }
@@ -56,6 +63,7 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
       << ",\"ceiling_m\":" << (mp_.enable_virtual_walll_ ? mp_.virtual_ceil_ - mp_.obstacles_inflation_ : (hi.z()+1)*mp_.resolution_)
       << ",\"query_metrics\":{\"voxel_count\":" << size.cast<double>().prod()
       << ",\"voxel_budget\":8000000,\"occupied_count\":" << raw_count
+      << ",\"occupied_budget\":" << occupied_budget
       << ",\"inflated_count\":" << inflated_count
       << ",\"scan_encode_s\":" << scan_encode_s << "}"
       << ",\"occupied\":[" << raw.str() << "],\"inflated\":[" << inflated.str() << "]}";
