@@ -36,6 +36,9 @@ bash app/robot/i7/build.sh
 bash app/run_i7.sh check
 
 t0 - hardware (MAVROS, LiDAR, FAST-LIO2, RTSP relay; no old planner/nav)
+# Reuses compatible services. Replaces the known vendor LIO only on disarmed
+# POSITION ground state with fresh MAVROS feedback and the v22 bridge stopped.
+# Replacement resets localization; start sensors/bridge/server afterwards.
 cd ~/TJK-UAV
 bash app/run_i7.sh hardware
 
