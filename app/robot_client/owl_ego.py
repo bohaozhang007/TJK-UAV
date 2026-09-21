@@ -74,6 +74,9 @@ class OwlEgoClient:
                 result = json.load(exc)
             if timings is not None:
                 timings['server'] = result.get('timings', {})
+                timings['server_error'] = dict(http_status=exc.code, **{k: result[k]
+                    for k in ('error', 'error_type', 'error_code', 'retryable',
+                              'flight_diagnostics', 'observation_diagnostics') if k in result})
             raise HttpError(exc.code, result) from exc
         if timings is not None:
             timings['server'] = result.get('timings', {})

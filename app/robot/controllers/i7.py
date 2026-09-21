@@ -87,13 +87,22 @@ class I7Controller(OwlEgoController):
                                                           include_image=include_image)
                 except CameraNotStopped as exc:
                     if time.monotonic() >= deadline:
-                        raise ObservationUnavailable('stationary observation timed out after 10 s: '+str(exc)) from exc
+                        error = ObservationUnavailable('stationary observation timed out after 10 s: '+str(exc))
+                        error.flight_diagnostics = getattr(exc, 'flight_diagnostics', None)
+                        error.observation_diagnostics = getattr(exc, 'observation_diagnostics', {})
+                        raise error from exc
                     restarts += 1
                     time.sleep(.05)
                     continue
                 result['assembly_elapsed_s'] = time.monotonic()-started
                 result['capture_timing']['stationary_restarts'] = restarts
                 return result
+        except Exception as exc:
+            detail = dict(getattr(exc, 'observation_diagnostics', {}))
+            detail.update(elapsed_s=time.monotonic()-started, stationary_restarts=restarts,
+                          timeout_s=10., reference='observation_start_pose')
+            exc.observation_diagnostics = detail
+            raise
         finally:
             self.camera_lock.release()
 
@@ -102,11 +111,17 @@ class I7Controller(OwlEgoController):
         finished, lost = threading.Event(), threading.Event()
         interrupted = []
         monitor_thread = None
+        stage = 'initial_hold_check'
         try:
             def guard():
                 if lost.is_set():
                     raise interrupted[0]
-                self.photo_guard(sid, epoch, pose)
+                try:
+                    self.photo_guard(sid, epoch, pose)
+                except Exception as exc:
+                    exc.observation_diagnostics = dict(stage=stage,
+                        attempt_elapsed_s=time.monotonic()-started, reference_pose=copy.deepcopy(pose))
+                    raise
                 if time.monotonic() >= deadline:
                     raise ObservationUnavailable('stationary observation timed out after 10 s')
             def monitor():
@@ -120,16 +135,21 @@ class I7Controller(OwlEgoController):
             guard()
             monitor_thread = threading.Thread(target=monitor, daemon=True)
             monitor_thread.start()
+            stage = 'baseline_before_settle'
             self.require_baseline()
             guard()
             settle = self.config['camera']['observation_settle_s']
             after = self.hw.now_s()+settle
+            stage = 'settle_and_wait_frame'
             self.hw.frame_after(time.monotonic()+settle, settle+3., guard)
+            stage = 'baseline_after_settle'
             camera_baseline = self.require_baseline()
             guard()
+            stage = 'assemble_observation'
             result = super().observation(include_image=include_image)
             result['camera_baseline'] = camera_baseline
             guard()
+            stage = 'validate_frame_timing'
             if result['timestamp_s'] < after:
                 raise ObservationUnavailable('camera frame precedes stationary settling interval')
             result['age_s'] = self.hw.now_s()-result['timestamp_s']
@@ -142,6 +162,7 @@ class I7Controller(OwlEgoController):
             if not 0 <= result['age_s'] <= self.config['hardware']['rgb_max_age_s']:
                 raise ObservationUnavailable('received RTSP frame exceeds freshness tolerance')
             if include_image:
+                stage = 'cache_exposure'
                 with self.hw.lock:
                     image = next((m for m in self.hw.images if abs(m.header.stamp.to_sec()-result['timestamp_s']) < 1e-8), None)
                     if image is None:
@@ -155,6 +176,11 @@ class I7Controller(OwlEgoController):
                         self.exposure_clouds.pop(expired, None)
             guard()
             return result
+        except Exception as exc:
+            if not hasattr(exc, 'observation_diagnostics'):
+                exc.observation_diagnostics = dict(stage=stage,
+                    attempt_elapsed_s=time.monotonic()-started, reference_pose=copy.deepcopy(pose))
+            raise
         finally:
             finished.set()
             if monitor_thread is not None:
@@ -239,6 +265,13 @@ class I7Controller(OwlEgoController):
                     target = np.array([pose['x']/100, -pose['y']/100, pose['z']/100])
                     detail['position_error_cm'] = float(np.linalg.norm(actual[:3]-target)*100)
                     detail['yaw_error_deg'] = abs((detail['actual_pose']['yaw']-pose['yaw']+180)%360-180)
+                    detail['position_delta_cm'] = {k: detail['actual_pose'][k]-pose[k] for k in ('x', 'y', 'z')}
+                    detail['yaw_delta_deg'] = (detail['actual_pose']['yaw']-pose['yaw']+180)%360-180
+                    detail['exceeded_limits'] = []
+                    if detail['position_error_cm'] > detail['position_tolerance_cm']:
+                        detail['exceeded_limits'].append('position')
+                    if detail['yaw_error_deg'] > detail['yaw_tolerance_deg']:
+                        detail['exceeded_limits'].append('yaw')
             exc.flight_diagnostics = detail
             raise
 
@@ -380,6 +413,7 @@ class I7Controller(OwlEgoController):
         camera = Camera()
         photo = {}
         result = dict(status='failed', error='camera worker interrupted')
+        details = None
         self.camera.guard = guard
         def save(frame):
             guard()
@@ -418,6 +452,7 @@ class I7Controller(OwlEgoController):
             original = interruption[0] if interruption else exc
             result = dict(status='failed', error=str(exc), error_type=type(original).__name__,
                           original_error=str(original),
+                          details=details,
                           flight_diagnostics=getattr(original, 'flight_diagnostics', None))
             # CameraControlLost forbids further camera commands, including restoration.
             if not isinstance(exc, CameraControlLost) and not lost.is_set():

@@ -98,11 +98,14 @@ def autofocus_box(controller, img, box, capture, *,
     initial_camera = None
     focus = None
     restoration = None
+    tracking_samples = []
 
     def result(ok, message):
         return dict(ok=ok, message=message, box=bounds.tolist(), box_confirmed=box_confirmed,
                     image_width=w, image_height=h, occupancy=ratio,
                     target_ratio=target_ratio, center_error=center, zoom=zoom,
+                    center_tolerance=center_tolerance, size_tolerance=size_tolerance,
+                    required_stable_frames=2, tracking_samples=tracking_samples,
                     tracker_url=tracker_url, track_count=track_count, actions=history,
                     initial_camera=initial_camera, focus_reached=focus is not None,
                     focus=focus, hold_s=hold_s, restoration=restoration,
@@ -145,6 +148,10 @@ def autofocus_box(controller, img, box, capture, *,
             centered = max(abs(v) for v in center) <= center_tolerance
             sized = abs(ratio - target_ratio) <= size_tolerance
             stable = stable + 1 if centered and sized else 0
+            tracking_samples.append(dict(frame=track_count, elapsed_s=time.monotonic()-(deadline-timeout_s),
+                box=bounds.tolist(), center_error=list(center),
+                center_error_px=[center[0]*w, center[1]*h], occupancy=ratio,
+                centered=centered, sized=sized, stable_frames=stable, zoom=zoom))
             if stable >= 2:
                 focus = dict(box=bounds.tolist(), center_error=list(center), occupancy=ratio, zoom=zoom)
                 if on_photo is not None:
