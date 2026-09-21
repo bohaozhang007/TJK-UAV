@@ -1,5 +1,4 @@
 """Save exposure/mask/occupancy projection evidence without changing localization."""
-import hashlib
 import json
 from pathlib import Path
 
@@ -27,9 +26,6 @@ def save_projection(prefix, obs, mask, diagnostics):
         nearest = float(distance[uv[:, 1], uv[:, 0]].min())
     else:
         nearest = None
-    exposure = prefix.parent / ('exposure_'+hashlib.sha256(obs.frame_id.encode()).hexdigest()[:16]+'.png')
-    if not exposure.exists():
-        Image.fromarray(obs.rgb).save(exposure, compress_level=1)
     base = np.asarray(obs.rgb).copy()
     tinted = base.copy()
     tinted[mask] = (base[mask]*.55+np.array([0, 255, 255])*.45).astype(np.uint8)
@@ -75,7 +71,7 @@ def save_projection(prefix, obs, mask, diagnostics):
         world_from_camera_optical_cm=obs.world_from_camera_cm.tolist(), exposure_metadata=obs.metadata,
         image_size=[width,height], mask_bbox_xyxy=bbox, nearest_projection_to_mask_px=nearest,
         projected_depth_range_m=[float(depth.min()),float(depth.max())] if len(depth) else None,
-        exposure_file=exposure.name, overlay_file=overlay_file.name,
+        overlay_file=overlay_file.name,
         limitations=['Planner occupied voxel centers, not raw lidar returns.',
                      'Zero mask hits alone cannot distinguish missing lidar returns from map filtering or projection error.'])
     report = prefix.with_suffix('.json')
