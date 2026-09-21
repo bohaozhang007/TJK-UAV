@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+from owned_resources import OwnedResources
 
 
 def descendants():
@@ -47,6 +48,8 @@ def main():
         'signal.signal(signal.SIGHUP,signal.SIG_DFL); '
         'os.execvp(sys.argv[1],sys.argv[1:])', *sys.argv[1:]]
     child = subprocess.Popen(command, start_new_session=True, close_fds=True)
+    resources = OwnedResources(descendants)
+    resources.start()
     while child.poll() is None and not stopping:
         time.sleep(.05)
     status = child.poll()
@@ -79,6 +82,8 @@ def main():
             print('Component cleanup incomplete: '+str(sorted(owned)), file=sys.stderr, flush=True)
             return 1
         time.sleep(.05)
+    if not resources.cleanup():
+        return 1
     return 128+stopping[0] if stopping else (status or 0)
 
 

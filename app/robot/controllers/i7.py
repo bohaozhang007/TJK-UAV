@@ -54,7 +54,7 @@ class I7Controller(OwlEgoController):
         self.baseline = dict(yaw_deg=c['baseline_yaw_deg'], pitch_deg=c['baseline_pitch_deg'], zoom=c['baseline_zoom'])
         super().__init__(hardware=hardware or I7Hardware(config), config=config)
 
-    def require_baseline(self, angle_tolerance=3.):
+    def require_baseline(self, angle_tolerance=5.):
         from app.robot.i7.mapping import require_running
         require_running(self.config, self.hw.ros)
         pose, zoom = self.camera.get_gimbal(), self.camera.get_zoom()

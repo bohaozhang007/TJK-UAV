@@ -156,12 +156,18 @@ cleanup() {
       fi
     fi
     for pid in "${PIDS[@]}"; do
-      wait "${pid}" 2>/dev/null || true
+      local component_status=0
+      wait "${pid}" 2>/dev/null || component_status=$?
+      if [[ "$component_status" == 1 ]]; then exit_status=1; fi
     done
     if [[ -n "$CHECK_PID" ]]; then wait "$CHECK_PID" 2>/dev/null || true; fi
   fi
   exec 9>&-
-  echo "I7 bringup cleanup finished; reused services were left running."
+  if [[ "$exit_status" == 1 ]]; then
+    echo "I7 bringup stopped with errors; check component and cleanup messages above." >&2
+  else
+    echo "I7 bringup cleanup finished; reused services were left running."
+  fi
   exit "${exit_status}"
 }
 

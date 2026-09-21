@@ -10,6 +10,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from xmlrpc.client import ServerProxy
+from urllib.parse import urlsplit
 
 import rosgraph
 import rospy
@@ -22,6 +23,51 @@ from app.robot.i7.bringup.reuse_ros_component import run
 
 def registered_nodes(master):
     return {name for group in master.getSystemState() for _, names in group for name in names}
+
+
+def require_no_lio_processes():
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            args = (proc/'cmdline').read_bytes().decode(errors='replace').split('\0')
+        except FileNotFoundError:
+            continue
+        names = {Path(arg).name for arg in args if arg and '\n' not in arg}
+        command = ' '.join(args)
+        if (names & {'run_mapping_online', 'lio_to_mavros'}
+                or ('roslaunch' in names and ('i7_v22_lio_' in command
+                    or ('faster_lio' in command and 'mapping' in command)))):
+            raise RuntimeError('LIO process/launcher still exists; refusing stale registration cleanup: '
+                               +proc.name+' '+command)
+
+
+def clean_stale_lio(master, nodes):
+    import rosnode
+    local_hosts = {host.lower() for host in
+                   ('localhost', '127.0.0.1', '::1', socket.gethostname(), socket.getfqdn())}
+    for name in sorted(set(nodes) & registered_nodes(master)):
+        uri = master.lookupNode(name)
+        try:
+            code, _, _ = ServerProxy(uri).getPid('/i7_lio_start_check')
+        except (OSError, ConnectionError):
+            code = None
+        if code == 1:
+            continue
+        endpoint = urlsplit(uri)
+        if endpoint.hostname not in local_hosts or endpoint.port is None:
+            raise RuntimeError('Unreachable LIO registration is not confirmed local: '+name+' '+uri)
+        # A timeout is not proof of exit; require a closed local endpoint.
+        try:
+            with socket.create_connection(('127.0.0.1', endpoint.port), timeout=1.):
+                raise RuntimeError('LIO endpoint still accepts connections: '+name)
+        except ConnectionRefusedError:
+            pass
+        require_no_lio_processes()
+        if master.lookupNode(name) != uri:
+            raise RuntimeError('LIO registration changed during cleanup: '+name)
+        print('Removing stale local LIO registration: '+name+' '+uri, flush=True)
+        rosnode.cleanup_master_blacklist(master, [name])
 
 
 def require_ground():
@@ -133,10 +179,13 @@ def main():
     config = load_robot_config('i7', os.environ.get('I7_V22_CONFIG'))
     nodes = ['/laserMapping', '/lio_to_mavros']
     master = rosgraph.Master('/i7_lio_start_check')
+    clean_stale_lio(master, nodes)
     registered = registered_nodes(master)
     if set(nodes) & registered:
         if not set(nodes) <= registered:
-            raise RuntimeError('LIO is only partially running; stop its launcher before restarting hardware')
+            raise RuntimeError('LIO is only partially running: present='+str(sorted(set(nodes) & registered))
+                               +'; missing='+str(sorted(set(nodes)-registered))
+                               +'; stop its launcher before restarting hardware')
         try:
             require_running(config, rospy)
         except ValueError as exc:
