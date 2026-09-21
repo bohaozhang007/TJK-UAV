@@ -30,7 +30,7 @@ class Handler(BaseHTTPRequestHandler):
             status = getattr(exc, 'code', 400)
             result = dict(ok=False, error=str(exc), error_type=type(exc).__name__, **{k: getattr(exc, k)
                 for k in ('error_code', 'retryable', 'timings', 'flight_diagnostics',
-                          'observation_diagnostics') if hasattr(exc, k)})
+                          'observation_diagnostics', 'camera_diagnostics') if hasattr(exc, k)})
         body = json.dumps(result, allow_nan=False).encode()
         try:
             self.send_response(status)

@@ -10,7 +10,7 @@ import numpy as np
 from ..hardware.tracker_client import TrackerClient, validate_image_box
 
 
-def restore_camera(controller, initial):
+def restore_camera(controller, initial, *, set_zoom=None):
     """Restore each component and report actual final feedback, including failures."""
     errors = []
     actions = []
@@ -18,14 +18,14 @@ def restore_camera(controller, initial):
         current_zoom = float(controller.get_zoom()['zoom'])
         if abs(current_zoom - initial['zoom']) > .05:
             actions.append(dict(command='zoom', value=initial['zoom']))
-            controller.zoom(initial['zoom'])
+            (set_zoom or controller.zoom)(initial['zoom'])
     except Exception as exc:
         errors.append(f'zoom: {exc}')
     for axis, method in (('yaw_deg', controller.gimbal_yaw), ('pitch_deg', controller.gimbal_pitch)):
         try:
             current = controller.get_gimbal()
             delta = round(initial[axis] - current[axis], 2)
-            if abs(delta) > 3.0:
+            if abs(delta) > .5:
                 actions.append(dict(command='gimbal_' + axis[:-4], value=delta))
                 method(delta)
         except Exception as exc:
@@ -35,7 +35,7 @@ def restore_camera(controller, initial):
         pose = controller.get_gimbal()
         final.update(yaw_deg=pose['yaw_deg'], pitch_deg=pose['pitch_deg'])
         for axis in ('yaw_deg', 'pitch_deg'):
-            if not math.isfinite(final[axis]) or abs(final[axis] - initial[axis]) > 3.0:
+            if not math.isfinite(final[axis]) or abs(final[axis] - initial[axis]) > .5:
                 errors.append(f'{axis} restore verification failed: {final[axis]} vs {initial[axis]}')
     except Exception as exc:
         errors.append(f'pose verification: {exc}')
@@ -45,7 +45,8 @@ def restore_camera(controller, initial):
             errors.append(f'zoom restore verification failed: {final["zoom"]} vs {initial["zoom"]}')
     except Exception as exc:
         errors.append(f'zoom verification: {exc}')
-    return dict(ok=not errors, target=dict(initial), final=final, actions=actions, errors=errors)
+    return dict(ok=not errors, target=dict(initial), final=final, actions=actions, errors=errors,
+                angle_tolerance_deg=.5, zoom_tolerance=.05)
 
 
 def autofocus_box(controller, img, box, capture, *,

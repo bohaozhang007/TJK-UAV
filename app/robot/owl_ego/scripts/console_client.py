@@ -65,6 +65,10 @@ class Runner:
         self.record('http', method=method, path=path, response=result, latency_s=time.monotonic()-begin)
         if result.get('ok') is not True:
             raise Failure(str(result))
+        if path == '/init' and 'camera_preflight' in result:
+            for check in result['camera_preflight']['checks']:
+                print('相机检查 %s: %s（%.3f 秒）' %
+                      (check['sample'], check['state'], check['elapsed_s']), flush=True)
         return result
 
     def post(self, path, **data):

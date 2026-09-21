@@ -343,8 +343,19 @@ class Mission:
             except TargetNotLocalizable as exc:
                 self.event('detection_skipped', **context, reason=str(exc))
                 continue
-            if self.is_duplicate(position):
-                self.event('duplicate', position_cm=position)
+            existing = self.duplicate_target(position)
+            if existing is not None:
+                if (self.c['photography']['autofocus'] and existing['status'] == 'failed'
+                        and existing.get('autofocus_failed')
+                        and existing.get('autofocus_frame_id') != observation.frame_id):
+                    existing.update(status='pending', exposure_pose=dict(observation.pose),
+                                    confidence=detection['confidence'])
+                    new.append((existing, detection['box']))
+                    self.event('autofocus_revisit', target_id=existing['id'],
+                               frame_id=observation.frame_id, position_cm=position,
+                               detection_point_id=self.detection_point_id)
+                    continue
+                self.event('duplicate', target_id=existing['id'], position_cm=position)
                 continue
             record = dict(id=len(self.targets)+1, position_cm=position, status='pending',
                           confidence=detection['confidence'], exposure_pose=dict(observation.pose),
@@ -354,7 +365,7 @@ class Mission:
             self.event('new_target', target=record)
         return new
 
-    def is_duplicate(self, position):
+    def duplicate_target(self, position):
         threshold = self.c['patrol']['dedup_distance_cm']
         mode = self.c['patrol'].get('dedup_mode', '3d')
         for record in self.targets:
@@ -364,8 +375,8 @@ class Mission:
             else:
                 duplicate = np.linalg.norm(delta) < threshold
             if duplicate:
-                return True
-        return False
+                return record
+        return None
 
     def orbit_points(self, target, exposure_pose):
         x, y, z = target['position_cm']
@@ -447,17 +458,21 @@ class Mission:
         self.current_target = target
         self.transition(State.AUTOFOCUS)
         timings = {}
-        self.event('autofocus_started', target_id=target['id'], frame_id=observation.frame_id)
+        attempt = target.get('autofocus_attempts', 0)+1
+        target.update(autofocus_attempts=attempt, autofocus_frame_id=observation.frame_id)
+        self.event('autofocus_started', target_id=target['id'], frame_id=observation.frame_id,
+                   attempt=attempt)
         try:
             result = self.robot.autofocus_photo(observation, box, timings=timings)
         except Exception as exc:
             self.event('autofocus_failed', target_id=target['id'], frame_id=observation.frame_id,
                        error=str(exc), timings=timings)
             raise
-        path = self.output / f'target_{target["id"]:03d}_01.jpg'
+        path = self.output / f'target_{target["id"]:03d}_{attempt:02d}.jpg'
         if not self.artifacts.submit('photo', path, save_photo, result['rgb']):
             raise MissionError('photo storage queue full')
         target['status'] = 'completed' if result['focused'] else 'failed'
+        target['autofocus_failed'] = not result['focused']
         self.event('autofocus_finished', target=target, focused=result['focused'],
                    fallback_photo=not result['focused'], file=path.name, timings=timings,
                    write_status='queued')
@@ -497,7 +512,7 @@ class Mission:
     def handle_error(self, error):
         for target in self.targets:
             if target['status'] == 'pending':
-                target['status'] = 'failed'  # Never automatically revisit failed targets.
+                target['status'] = 'failed'
         action = self.c['safety']['error_action']
         self.event('error', error=str(error) or type(error).__name__, action=action, targets=self.targets)
         if action == 'land':

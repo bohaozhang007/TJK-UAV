@@ -29,6 +29,10 @@ class CameraNotStopped(CameraControlLost):
     pass
 
 
+class CameraBaselineMismatch(ApiError):
+    pass
+
+
 STOP_RECOVERY_TIMEOUT_S = 5.
 STOP_RECOVERY_TOTAL_S = 10.
 
@@ -50,17 +54,55 @@ class I7Controller(OwlEgoController):
         self.baseline = dict(yaw_deg=c['baseline_yaw_deg'], pitch_deg=c['baseline_pitch_deg'], zoom=c['baseline_zoom'])
         super().__init__(hardware=hardware or I7Hardware(config), config=config)
 
-    def require_baseline(self):
+    def require_baseline(self, angle_tolerance=3.):
         from app.robot.i7.mapping import require_running
         require_running(self.config, self.hw.ros)
         pose, zoom = self.camera.get_gimbal(), self.camera.get_zoom()
-        if (any(not math.isfinite(pose[k]) or abs(pose[k]-self.baseline[k]) > 3.0 for k in ('yaw_deg', 'pitch_deg'))
+        if (any(not math.isfinite(pose[k]) or abs(pose[k]-self.baseline[k]) > angle_tolerance for k in ('yaw_deg', 'pitch_deg'))
                 or not math.isfinite(float(zoom['zoom'])) or abs(zoom['zoom']-self.baseline['zoom']) > .05
                 or zoom.get('zooming')):
-            raise ApiError('K40T baseline mismatch: actual='+str(dict(pose, **zoom))
+            error = CameraBaselineMismatch('K40T baseline mismatch: actual='+str(dict(pose, **zoom))
                            +'; expected='+str(self.baseline)
-                           +'; tolerance: yaw/pitch=3 deg, zoom=0.05x')
-        return dict(pose, zoom=zoom['zoom'])
+                           +f'; tolerance: yaw/pitch={angle_tolerance:g} deg, zoom=0.05x')
+            error.camera_diagnostics = dict(actual=dict(pose, **zoom), expected=dict(self.baseline),
+                                            angle_tolerance_deg=angle_tolerance, zoom_tolerance=.05)
+            raise error
+        return dict(pose, zoom=zoom['zoom'], zooming=zoom.get('zooming'),
+                    focal_length_mm=zoom.get('focal_length_mm'))
+
+    def prepare_baseline(self, guard):
+        guard()
+        try:
+            return self.require_baseline(angle_tolerance=.5), None
+        except CameraBaselineMismatch:
+            previous_guard = self.camera.guard
+            self.camera.guard = guard
+            try:
+                restoration = restore_camera(self.camera, self.baseline, set_zoom=self.camera.set_zoom)
+                guard()
+                if not restoration['ok']:
+                    error = ApiError('camera baseline restoration failed: '+str(restoration['errors']))
+                    error.camera_diagnostics = restoration
+                    raise error
+                return self.require_baseline(angle_tolerance=.5), restoration
+            finally:
+                self.camera.guard = previous_guard
+
+    def camera_preflight(self):
+        checks = []
+        for index in range(2):
+            started = time.monotonic()
+            try:
+                state = self.require_baseline()
+            except Exception as exc:
+                checks.append(dict(sample=index+1, elapsed_s=time.monotonic()-started,
+                                   error=str(exc), error_type=type(exc).__name__,
+                                   details=getattr(exc, 'camera_diagnostics', None)))
+                exc.camera_diagnostics = dict(ready=False, checks=checks)
+                raise
+            checks.append(dict(sample=index+1, elapsed_s=time.monotonic()-started, state=state))
+            print('[I7] Camera preflight: '+str(checks[-1]), flush=True)
+        return dict(ready=True, checks=checks)
 
     def health(self):
         # Camera UDP/HTTP latency must never block the control heartbeat monitor.
@@ -136,7 +178,7 @@ class I7Controller(OwlEgoController):
             monitor_thread = threading.Thread(target=monitor, daemon=True)
             monitor_thread.start()
             stage = 'baseline_before_settle'
-            self.require_baseline()
+            _, restoration = self.prepare_baseline(guard)
             guard()
             settle = self.config['camera']['observation_settle_s']
             after = self.hw.now_s()+settle
@@ -155,7 +197,8 @@ class I7Controller(OwlEgoController):
             result['age_s'] = self.hw.now_s()-result['timestamp_s']
             result['assembly_elapsed_s'] = time.monotonic()-started
             result['capture_timing'] = dict(source='stationary_receipt', stationary_checked=True,
-                settle_s=settle, exposure_delay_s=None, pose_reference='receipt_time')
+                settle_s=settle, exposure_delay_s=None, pose_reference='receipt_time',
+                baseline_restoration=restoration)
             result['geometry_assumptions']['limitations'] = [
                 *result['geometry_assumptions'].get('limitations', []),
                 'Stationary receipt-time pose; camera exposure latency is unmeasured.']
@@ -208,8 +251,13 @@ class I7Controller(OwlEgoController):
             if not self.camera_lock.acquire(blocking=False):
                 raise ApiError('camera operation is active')
             try:
-                self.require_baseline()
-                return super().handle_http(method, path, data, local_operator=local_operator)
+                preflight = self.camera_preflight() if path == '/init' else None
+                if preflight is None:
+                    self.require_baseline()
+                result = super().handle_http(method, path, data, local_operator=local_operator)
+                if preflight is not None:
+                    result['camera_preflight'] = preflight
+                return result
             finally:
                 self.camera_lock.release()
         return super().handle_http(method, path, data, local_operator=local_operator)
