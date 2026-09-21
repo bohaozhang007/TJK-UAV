@@ -131,7 +131,14 @@ class Detector:
         if timings is not None:
             timings['server'] = data.get('timings', {})
         with measure(timings, 'validate_and_decode_masks'):
-            return self.decode(data, obs)
+            results = self.decode(data, obs)
+            obs.metadata.pop('detector_image_cache', None)
+            cached = data.get('image_cache')
+            if (results and isinstance(cached,dict) and cached.get('frame_id') == obs.frame_id
+                    and isinstance(cached.get('token'),str) and len(cached['token']) == 32
+                    and all(c in '0123456789abcdef' for c in cached['token'])):
+                obs.metadata['detector_image_cache'] = dict(cached)
+            return results
 
     def decode(self, data, obs):
         if (data.get('ok') is not True or data.get('frame_id') != obs.frame_id

@@ -8,13 +8,10 @@ cd ~\Desktop\project\TJK-UAV
 .\app\run_tracker.bat
 
 t2 - Depth
-# Required only when localization.source: da3; use the detector host.
 cd ~\Desktop\project\TJK-UAV
 .\app\run_depth.bat
 
 uav: OWL v22
-# Set photography.autofocus: false in app/agent/config/v22.yaml.
-# Set localization.source: grid to use occupancy localization without DA3.
 t0 - bridge
 cd ~/TJK-UAV
 # First use only. bash app/robot/owl_ego/build.sh # First use only.

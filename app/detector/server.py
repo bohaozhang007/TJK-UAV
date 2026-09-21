@@ -22,6 +22,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.detector.image_log import ImageLog
+from app.detector.frame_cache import FrameCache
 
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
@@ -121,7 +122,22 @@ class DetectorHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/health":
+        if self.path.startswith('/frames/'):
+            if self.client_address[0] not in ('127.0.0.1', '::1'):
+                self.reply(403, {'ok':False, 'error':'frame cache is local only'})
+                return
+            entry = self.server.frame_cache.get(self.path[len('/frames/'):])
+            if entry is None:
+                self.reply(404, {'ok':False, 'error':'frame cache miss'})
+                return
+            frame_id, encoded = entry
+            self.send_response(200)
+            self.send_header('Content-Type','application/octet-stream')
+            self.send_header('Content-Length',str(len(encoded)))
+            self.send_header('X-Frame-Id',frame_id)
+            self.end_headers()
+            self.wfile.write(encoded)
+        elif self.path == "/health":
             self.reply(200, {"ok": True})
         else:
             self.reply(404, {"ok": False, "error": "unknown endpoint"})
@@ -143,8 +159,9 @@ class DetectorHandler(BaseHTTPRequestHandler):
                 raise ValueError("request must be a JSON object")
             image = decode_image(data.get("image"))
             frame_id = data.get("frame_id")
-            if frame_id is not None and not isinstance(frame_id, str):
-                raise ValueError("frame_id must be a string")
+            if frame_id is not None and (not isinstance(frame_id, str) or len(frame_id)>256
+                    or any(ord(c)<32 or ord(c)>126 for c in frame_id)):
+                raise ValueError("invalid frame_id")
         except (ValueError, OSError) as exc:
             logging.warning("Request rejected client=%s elapsed_s=%.3f error=%s",
                             self.client_address[0], time.perf_counter() - received, exc)
@@ -176,6 +193,11 @@ class DetectorHandler(BaseHTTPRequestHandler):
                       "detections": encoded, "elapsed_s": time.perf_counter() - started, "timings": timings}
             if frame_id is not None:
                 result["frame_id"] = frame_id
+            if detections and frame_id:
+                cache_started = time.perf_counter()
+                token = self.server.frame_cache.put(frame_id, base64.b64decode(data['image'],validate=True))
+                result['image_cache'] = dict(token=token, frame_id=frame_id)
+                timings['image_cache'] = dict(status='ok',elapsed_s=time.perf_counter()-cache_started)
         except Exception as exc:
             logging.exception("Detection failed frame=%r elapsed_s=%.3f", frame_id, time.perf_counter() - received)
             self.reply(500, {"ok": False, "error": str(exc), "timings": timings})
@@ -208,6 +230,7 @@ def main():
         parser.error(str(exc))
     # A single HTTP worker serializes model calls; no prompt/session lifecycle.
     with HTTPServer((args.host, args.port), DetectorHandler) as server:
+        server.frame_cache = FrameCache()
         server.reference_image, server.reference_box = reference, box
         log_dir = (Path(__file__).resolve().parents[2] / "logs" / "detector"
                    / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))

@@ -9,9 +9,7 @@ control:
   position_tolerance_m: 0.15
   yaw_tolerance_rad: 0.0872664626 # 5 deg
 
-  # Allowed pose span = rate threshold * stable_duration_s.
-  stop_speed_m_s: 0.1
-  stop_yaw_rate_rad_s: 0.0872664626
+  # Stop spans are half the arrival tolerances above.
   stable_duration_s: 0.5
 
   # Motion limits and localization resets.

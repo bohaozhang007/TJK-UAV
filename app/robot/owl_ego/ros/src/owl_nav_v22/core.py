@@ -58,7 +58,6 @@ class FlightCore:
     def __init__(self, config, *, manual_offboard_takeoff=False):
         self.manual_offboard_takeoff = manual_offboard_takeoff
         config = dict(config)
-        config.setdefault('stop_position_span_m', config['stop_speed_m_s']*config['stable_duration_s'])
         for key,value in config.items():
             if key in ('flight_enabled','failsafe_validated','sensors_validated'):
                 if type(value) is not bool:
@@ -71,6 +70,8 @@ class FlightCore:
         if config['control_hz'] < 20 or config['stable_samples'] < 2:
             raise ValueError('control/stability rates are too low')
         self.c = config
+        self.stop_position_limit_m = config['position_tolerance_m']/2
+        self.stop_yaw_span_limit_rad = config['yaw_tolerance_rad']/2
         self.epoch = uuid.uuid4().hex
         self.pose = None
         self.odom_at = -math.inf
@@ -153,13 +154,11 @@ class FlightCore:
                     stop_diagnostics=dict(
                         method='pose_window',
                         position_span_m=self.position_span,
-                        position_limit_m=self.c['stop_position_span_m'],
+                        position_limit_m=self.stop_position_limit_m,
                         yaw_span_deg=math.degrees(self.heading_span),
-                        yaw_span_limit_deg=math.degrees(self.c['stop_yaw_rate_rad_s']*self.c['stable_duration_s']),
+                        yaw_span_limit_deg=math.degrees(self.stop_yaw_span_limit_rad),
                         speed_m_s=self.speed if math.isfinite(self.speed) else None,
                         yaw_rate_deg_s=math.degrees(self.yaw_rate) if math.isfinite(self.yaw_rate) else None,
-                        speed_limit_m_s=self.c['stop_speed_m_s'],
-                        yaw_rate_limit_deg_s=math.degrees(self.c['stop_yaw_rate_rad_s']),
                         stable_samples=self.stop_samples,required_samples=self.c['stable_samples'],
                         stable_duration_s=max(0.,self.odom_at-self.stop_since) if self.stop_since is not None else 0.,
                         required_duration_s=self.c['stable_duration_s']))
@@ -290,8 +289,8 @@ class FlightCore:
         span=stamp-self.pose_window[0][0]
         self.position_span=float(np.linalg.norm(np.ptp(samples[:,:3],axis=0)))
         self.heading_span=float(np.ptp(np.unwrap(samples[:,3])))
-        quiet=(self.position_span<=self.c['stop_position_span_m']
-               and self.heading_span<=self.c['stop_yaw_rate_rad_s']*duration)
+        quiet=(self.position_span<=self.stop_position_limit_m
+               and self.heading_span<=self.stop_yaw_span_limit_rad)
         self.stop_samples=len(samples) if quiet else 0
         self.stop_since=now-span if quiet else None
         self.stopped=quiet and len(samples)>=self.c['stable_samples'] and span>=duration

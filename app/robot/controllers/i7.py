@@ -3,6 +3,7 @@ import base64
 from collections import OrderedDict
 import copy
 import math
+import logging
 import threading
 import time
 import uuid
@@ -26,6 +27,10 @@ class CameraControlLost(RuntimeError):
 
 class CameraNotStopped(CameraControlLost):
     pass
+
+
+STOP_RECOVERY_TIMEOUT_S = 5.
+STOP_RECOVERY_TOTAL_S = 10.
 
 
 class I7Controller(OwlEgoController):
@@ -268,7 +273,10 @@ class I7Controller(OwlEgoController):
             if data.get('localization_epoch') != observation['localization_epoch']:
                 raise ApiError('photo exposure epoch mismatch')
             bounds = validate_image_box(raw, data['box'])
-            self.photo_guard(data['session_id'], data['localization_epoch'], observation['pose'])
+            try:
+                self.photo_guard(data['session_id'], data['localization_epoch'], observation['pose'])
+            except CameraNotStopped:
+                pass  # The worker waits within its bounded recovery budget.
             if not self.camera_lock.acquire(blocking=False):
                 raise ApiError('camera operation is active')
             task = 'photo-'+uuid.uuid4().hex
@@ -294,20 +302,56 @@ class I7Controller(OwlEgoController):
         lost = threading.Event()
         finished = threading.Event()
         interruption = []
-        def guard():
-            if lost.is_set():
-                original = interruption[0]
-                error = CameraControlLost('camera operation interrupted: '+type(original).__name__+': '+str(original))
-                error.flight_diagnostics = getattr(original, 'flight_diagnostics', None)
-                raise error from original
-            self.photo_guard(sid, epoch, observation['pose'])
-        def monitor():
-            while not finished.wait(.1):
+        recovery_lock = threading.Lock()
+        recoveries = []
+        recovery = dict(started=None, total_s=0.)
+        def check():
+            with recovery_lock:
+                if lost.is_set():
+                    original = interruption[0]
+                    error = CameraControlLost('camera operation interrupted: '+type(original).__name__+': '+str(original))
+                    error.flight_diagnostics = getattr(original, 'flight_diagnostics', None)
+                    raise error from original
                 try:
-                    guard()
+                    self.photo_guard(sid, epoch, observation['pose'])
+                except CameraNotStopped as exc:
+                    now = time.monotonic()
+                    if recovery['started'] is None:
+                        recovery['started'] = now
+                        recoveries.append(dict(started_s=time.time(), status='waiting',
+                            flight_diagnostics=getattr(exc, 'flight_diagnostics', None)))
+                        logging.warning('Autofocus %s paused: %s', job['task_id'], exc)
+                    elapsed = now-recovery['started']
+                    recoveries[-1].update(elapsed_s=elapsed,
+                        last_flight_diagnostics=getattr(exc, 'flight_diagnostics', None))
+                    if elapsed >= STOP_RECOVERY_TIMEOUT_S or recovery['total_s']+elapsed >= STOP_RECOVERY_TOTAL_S:
+                        recoveries[-1]['status'] = 'timeout'
+                        error = CameraControlLost('stopped hold did not recover within autofocus wait budget')
+                        error.flight_diagnostics = getattr(exc, 'flight_diagnostics', None)
+                        interruption.append(error)
+                        lost.set()
+                        raise error from exc
+                    return False
                 except Exception as exc:
                     interruption.append(exc)
                     lost.set()
+                    raise
+                if recovery['started'] is not None:
+                    elapsed = time.monotonic()-recovery['started']
+                    recovery['total_s'] += elapsed
+                    recovery['started'] = None
+                    recoveries[-1].update(status='recovered', elapsed_s=elapsed)
+                    logging.warning('Autofocus %s stopped hold recovered after %.3f s', job['task_id'], elapsed)
+                return True
+        def guard():
+            while not check():
+                if finished.wait(.05):
+                    raise CameraControlLost('camera task finished during stopped hold wait')
+        def monitor():
+            while not finished.wait(.1):
+                try:
+                    check()
+                except Exception:
                     return
         controller = self
         class Camera:
@@ -336,7 +380,8 @@ class I7Controller(OwlEgoController):
             if not ok:
                 raise RuntimeError('photo encoding failed')
             photo['image_base64'] = base64.b64encode(encoded).decode('ascii')
-        threading.Thread(target=monitor, daemon=True).start()
+        monitor_thread = threading.Thread(target=monitor, daemon=True)
+        monitor_thread.start()
         try:
             guard()
             capture = lambda after, timeout: self.hw.frame_after(after, timeout, guard)
@@ -375,6 +420,12 @@ class I7Controller(OwlEgoController):
                     result['restore_error'] = str(restore_error)
         finally:
             finished.set()
+            monitor_thread.join(timeout=.2)
+            with recovery_lock:
+                if recovery['started'] is not None and recoveries[-1]['status'] == 'waiting':
+                    recoveries[-1].update(status='interrupted', elapsed_s=time.monotonic()-recovery['started'])
+                result['stop_recoveries'] = copy.deepcopy(recoveries)
+                result['stop_recovery_limits'] = dict(per_wait_s=STOP_RECOVERY_TIMEOUT_S, total_s=STOP_RECOVERY_TOTAL_S)
             self.camera.guard = lambda: None
             with self.lock:
                 job.update(result)

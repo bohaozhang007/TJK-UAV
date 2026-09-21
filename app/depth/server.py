@@ -1,4 +1,4 @@
-"""POST /estimate {image: base64 PNG/JPEG, intrinsics: 3x3 K, output: depth|xyz}.
+"""POST /estimate {image or image_cache, frame_id, intrinsics: 3x3 K, output: depth|xyz}.
 K is in input-image pixels. Images pass unchanged to the model. Returns float32 .npy in metres;
 depth is camera Z, xyz axes are right/down/forward. Invalid values are NaN.
 """
@@ -11,6 +11,7 @@ from pathlib import Path
 import socket
 import sys
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import numpy as np
@@ -26,14 +27,14 @@ def build_depth(model_root=None, checkpoint=None, device="cuda", process_res=504
     return Da3Depth(root, checkpoint or root / "checkpoints/DA3NESTED-GIANT-LARGE", device, process_res)
 
 
-def decode_request(data):
+def decode_request(data, image_bytes=None):
     if not isinstance(data, dict):
         raise ValueError("request must be a JSON object")
     value = data.get("image")
-    if not isinstance(value, str) or not value:
+    if image_bytes is None and (not isinstance(value, str) or not value):
         raise ValueError("image must be base64 PNG/JPEG")
     try:
-        with Image.open(io.BytesIO(base64.b64decode(value, validate=True))) as image:
+        with Image.open(io.BytesIO(image_bytes if image_bytes is not None else base64.b64decode(value, validate=True))) as image:
             if image.format not in {"PNG", "JPEG"} or image.width * image.height > 8_000_000:
                 raise ValueError("image must be PNG/JPEG with at most 8,000,000 pixels")
             rgb = np.array(image.convert("RGB"))
@@ -51,6 +52,19 @@ def decode_request(data):
     if output not in ("depth", "xyz"):
         raise ValueError("output must be depth or xyz")
     return rgb, k, output
+
+
+def cached_image(token, frame_id):
+    if not isinstance(token,str) or len(token)!=32 or any(c not in '0123456789abcdef' for c in token):
+        raise ValueError('invalid image cache token')
+    http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with http.open('http://127.0.0.1:8790/frames/'+token,timeout=3.) as response:
+        if response.headers.get('X-Frame-Id') != frame_id:
+            raise ValueError('cached image frame mismatch')
+        image = response.read(32*1024*1024+1)
+        if len(image)>32*1024*1024:
+            raise ValueError('cached image exceeds size limit')
+        return image
 
 
 def depth_to_xyz(depth, intrinsics):
@@ -98,31 +112,64 @@ class DepthHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             if self.headers.get("Transfer-Encoding") or not 0 < length <= 32 * 1024 * 1024:
                 raise ValueError("provide Content-Length between 1 and 32 MiB")
-            data = json.loads(self.rfile.read(length))
-            image, k, output = decode_request(data)
+            phase = time.perf_counter()
+            body = self.rfile.read(length)
+            receive_s = time.perf_counter()-phase
+            phase = time.perf_counter()
+            data = json.loads(body)
+            if not isinstance(data,dict):
+                raise ValueError('request must be a JSON object')
             frame_id = data.get('frame_id', '')
             if (not isinstance(frame_id, str) or len(frame_id) > 256
                     or any(ord(c) < 32 or ord(c) > 126 for c in frame_id)):
                 raise ValueError('invalid frame_id')
+            image_bytes = None
+            cache_lookup_s = 0.
+            if 'image_cache' in data:
+                if 'image' in data or not frame_id:
+                    raise ValueError('cached image requires frame_id and no image payload')
+                cache_started = time.perf_counter()
+                try:
+                    image_bytes = cached_image(data['image_cache'],frame_id)
+                except (ValueError,OSError) as exc:
+                    self.reply(409,dict(ok=False,error=str(exc),error_code='image_cache_miss'))
+                    logging.warning('Depth frame cache unavailable frame_id=%s error=%s',frame_id,exc)
+                    return
+                cache_lookup_s = time.perf_counter()-cache_started
+            image, k, output = decode_request(data,image_bytes=image_bytes)
+            decode_s = time.perf_counter()-phase
         except (ValueError, OSError) as exc:
             self.reply(400, {"ok": False, "error": str(exc)})
             return
         try:
+            phase = time.perf_counter()
             depth = self.server.engine.estimate(image, k.astype(np.float32))
+            inference_s = time.perf_counter()-phase
+            phase = time.perf_counter()
             array = depth if output == "depth" else depth_to_xyz(depth, k)
             buffer = io.BytesIO()
             np.save(buffer, np.asarray(array, dtype=np.float32), allow_pickle=False)
+            encode_s = time.perf_counter()-phase
             elapsed = time.perf_counter() - started
         except Exception as exc:
             logging.exception("Depth estimation failed")
             self.reply(500, {"ok": False, "error": str(exc)})
             return
-        self.send_body(200, buffer.getvalue(), "application/x-npy", {
+        response_body = buffer.getvalue()
+        send_started = time.perf_counter()
+        self.send_body(200, response_body, "application/x-npy", {
             "X-Output": output, "X-Unit": "m", "X-Depth-Type": "camera-z",
             "X-Coordinate-Frame": "camera-optical-right-down-forward", "X-Elapsed-S": f"{elapsed:.3f}",
             "X-Frame-Id": frame_id,
+            "X-Receive-S": f"{receive_s:.6f}", "X-Decode-S": f"{decode_s:.6f}",
+            "X-Inference-S": f"{inference_s:.6f}", "X-Encode-S": f"{encode_s:.6f}",
+            "X-Image-Source": 'detector_cache' if image_bytes is not None else 'upload',
+            "X-Cache-Lookup-S": f"{cache_lookup_s:.6f}",
         })
-        logging.info("Depth response frame_id=%s output=%s shape=%s elapsed_s=%.3f", frame_id, output, array.shape, elapsed)
+        logging.info("Depth response frame_id=%s output=%s shape=%s request_bytes=%d response_bytes=%d "
+                     "receive_s=%.3f decode_s=%.3f inference_s=%.3f encode_s=%.3f send_s=%.3f elapsed_s=%.3f",
+                     frame_id, output, array.shape, length, len(response_body), receive_s, decode_s,
+                     inference_s, encode_s, time.perf_counter()-send_started, time.perf_counter()-started)
 
 
 def main():

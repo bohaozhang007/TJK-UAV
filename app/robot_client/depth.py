@@ -1,7 +1,8 @@
 """DA3 transport and mask depth localization in the exposure camera frame."""
 import io
 import json
-import urllib.request
+import http.client
+import urllib.parse
 from dataclasses import dataclass
 
 import cv2
@@ -61,25 +62,60 @@ class DepthFrame:
 class DepthClient:
     def __init__(self, host):
         self.url = f'http://{host}:{DEPTH_PORT}/estimate'
-        self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def estimate(self, obs, timings):
         with measure(timings, 'depth_prepare'):
-            body = json.dumps(dict(image=obs.image_base64, intrinsics=obs.intrinsics.tolist(),
-                                   output='depth', frame_id=obs.frame_id), allow_nan=False).encode()
-        request = urllib.request.Request(self.url,body,{'Content-Type':'application/json'},method='POST')
+            payload = dict(intrinsics=obs.intrinsics.tolist(),output='depth',frame_id=obs.frame_id)
+            cached = obs.metadata.get('detector_image_cache')
+            if cached and cached['frame_id'] == obs.frame_id:
+                payload['image_cache'] = cached['token']
+            else:
+                payload['image'] = obs.image_base64
+            timings['depth_image_source'] = 'detector_cache' if 'image_cache' in payload else 'upload'
+            body = json.dumps(payload, allow_nan=False).encode()
+        timings['depth_request_bytes'] = len(body)
+        endpoint = urllib.parse.urlsplit(self.url)
+        connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=DEPTH_TIMEOUT_S)
         with measure(timings, 'depth_http'):
-            with self.http.open(request,timeout=DEPTH_TIMEOUT_S) as response:
-                if (response.headers.get('X-Unit') != 'm'
-                        or response.headers.get('X-Depth-Type') != 'camera-z'
-                        or response.headers.get('X-Output') != 'depth'
-                        or response.headers.get('X-Coordinate-Frame') != 'camera-optical-right-down-forward'
-                        or response.headers.get('X-Frame-Id') != obs.frame_id):
-                    raise MissionError('depth response geometry or frame identity mismatch; restart depth server')
-                content = response.read(40*1024*1024+1)
+            try:
+                with measure(timings, 'depth_connect'):
+                    connection.connect()
+                # Upload measures socket writes, not remote receipt completion.
+                with measure(timings, 'depth_upload'):
+                    connection.request('POST',endpoint.path,body,{'Content-Type':'application/json'})
+                with measure(timings, 'depth_wait_response'):
+                    response = connection.getresponse()
+                timings['depth_response_status'] = response.status
+                headers = {key:response.headers.get(key) for key in (
+                    'X-Unit','X-Depth-Type','X-Output','X-Coordinate-Frame','X-Frame-Id')}
+                timings['depth_response_headers'] = headers
+                timings['depth_server_image_source'] = response.headers.get('X-Image-Source')
+                timings['depth_cache_lookup_s'] = response.headers.get('X-Cache-Lookup-S')
+                for key, header in [('depth_server_elapsed_s','X-Elapsed-S'),
+                                    ('depth_server_receive_s','X-Receive-S'),
+                                    ('depth_server_decode_s','X-Decode-S'),
+                                    ('depth_server_inference_s','X-Inference-S'),
+                                    ('depth_server_encode_s','X-Encode-S')]:
+                    timings[key] = response.headers.get(header)
+                with measure(timings, 'depth_download'):
+                    content = response.read(40*1024*1024+1 if response.status == 200 else 4096)
+                timings['depth_response_bytes'] = len(content)
+                if response.status == 409 and 'image_cache' in payload:
+                    error = json.loads(content)
+                    if error.get('error_code') == 'image_cache_miss':
+                        obs.metadata.pop('detector_image_cache',None)
+                        timings['depth_cache_miss'] = True
+                if response.status != 200:
+                    raise MissionError(f'Depth HTTP {response.status}: '+content.decode('utf-8',errors='replace'))
                 if len(content) > 40*1024*1024:
                     raise MissionError('depth response exceeds size limit')
-                timings['depth_server_elapsed_s'] = response.headers.get('X-Elapsed-S')
+                if (headers['X-Unit'] != 'm' or headers['X-Depth-Type'] != 'camera-z'
+                        or headers['X-Output'] != 'depth'
+                        or headers['X-Coordinate-Frame'] != 'camera-optical-right-down-forward'
+                        or headers['X-Frame-Id'] != obs.frame_id):
+                    raise MissionError('depth response geometry or frame identity mismatch; restart depth server')
+            finally:
+                connection.close()
         with measure(timings, 'depth_decode'):
             depth = np.load(io.BytesIO(content),allow_pickle=False)
             if depth.dtype != np.float32 or depth.shape != obs.rgb.shape[:2]:
