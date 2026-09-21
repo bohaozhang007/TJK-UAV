@@ -139,7 +139,8 @@ cleanup() {
     return
   fi
   SHUTTING_DOWN=true
-  trap - HUP INT TERM EXIT
+  trap '' HUP INT TERM
+  trap - EXIT
 
   if ((${#PIDS[@]} > 0)); then
     echo "Stopping components and monitors started by this script (reused services stay running)..."
@@ -148,6 +149,10 @@ cleanup() {
       signal_all TERM
       if ! wait_for_shutdown "${TERMINATE_SHUTDOWN_TIMEOUT_S}"; then
         signal_all KILL
+        if ! wait_for_shutdown 2; then
+          echo 'Cleanup incomplete: component processes remain.' >&2
+          exit_status=1
+        fi
       fi
     fi
     for pid in "${PIDS[@]}"; do
@@ -155,7 +160,8 @@ cleanup() {
     done
     if [[ -n "$CHECK_PID" ]]; then wait "$CHECK_PID" 2>/dev/null || true; fi
   fi
-  echo "I7 bringup stopped; reused services were left running."
+  exec 9>&-
+  echo "I7 bringup cleanup finished; reused services were left running."
   exit "${exit_status}"
 }
 
@@ -176,7 +182,7 @@ for component in "${COMPONENTS[@]}"; do
   component_path="${SCRIPT_DIR}/${component}"
   check_started_components
   echo "Starting ${component}..."
-  setsid -- "${component_path}" 9>&- &
+  python3 "${SCRIPT_DIR}/component_process.py" "${component_path}" 9>&- &
   pid=$!
   PIDS+=("${pid}")
   sleep "${STARTUP_GRACE_S}"
@@ -185,7 +191,7 @@ done
 
 if [[ "$STACK" == true ]]; then
   run_probe() {
-    setsid -- timeout --signal=INT --kill-after=3s 45s "$@" 9>&- &
+    python3 "${SCRIPT_DIR}/component_process.py" timeout --signal=INT --kill-after=3s 45s "$@" 9>&- &
     CHECK_PID=$!
     while kill -0 "$CHECK_PID" 2>/dev/null; do
       check_started_components
@@ -201,7 +207,7 @@ if [[ "$STACK" == true ]]; then
     check_started_components
     echo "Starting ${mode}..."
     COMPONENTS+=("$mode")
-    setsid -- bash app/run_i7.sh "$mode" 9>&- &
+    python3 "${SCRIPT_DIR}/component_process.py" bash app/run_i7.sh "$mode" 9>&- &
     PIDS+=("$!")
     sleep "$STARTUP_GRACE_S"
     check_started_components
@@ -224,10 +230,11 @@ if [[ "$STACK" == true ]]; then
   start_service server
   run_probe python3 -c '
 import json, time, urllib.request
+http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 deadline = time.monotonic()+20.
 while time.monotonic() < deadline:
     try:
-        with urllib.request.urlopen("http://127.0.0.1:8765/v21/capabilities", timeout=1.) as response:
+        with http.open("http://127.0.0.1:8765/v21/capabilities", timeout=1.) as response:
             result=json.load(response)
         if result.get("ok") and result.get("backend")=="i7":
             break

@@ -1,6 +1,7 @@
 """Robot HTTP entry point. OWL and i7 v22 adapters."""
 import argparse
 import json
+import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 
@@ -49,19 +50,32 @@ def main():
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
+    def stop(number, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
     if args.robot == 'i7':
         from .controllers.i7 import I7Controller as Controller
     else:
         from .controllers.owl_ego import OwlEgoController as Controller
     ThreadingHTTPServer.request_queue_size = 64
     with ThreadingHTTPServer((args.host, args.port), Handler) as server:
-        server.controller = Controller(config_path=args.config)
+        controller = None
         try:
+            server.controller = controller = Controller(config_path=args.config)
             server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
-            server.controller.close()
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            try:
+                if controller is not None:
+                    controller.close()
+            finally:
+                import rospy
+                if rospy.core.is_initialized():
+                    rospy.signal_shutdown('Robot server stopped')
 
 
 if __name__ == '__main__':
