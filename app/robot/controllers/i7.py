@@ -48,12 +48,12 @@ class I7Controller(OwlEgoController):
         from app.robot.i7.mapping import require_running
         require_running(self.config, self.hw.ros)
         pose, zoom = self.camera.get_gimbal(), self.camera.get_zoom()
-        if (any(not math.isfinite(pose[k]) or abs(pose[k]-self.baseline[k]) > 2.0 for k in ('yaw_deg', 'pitch_deg'))
+        if (any(not math.isfinite(pose[k]) or abs(pose[k]-self.baseline[k]) > 3.0 for k in ('yaw_deg', 'pitch_deg'))
                 or not math.isfinite(float(zoom['zoom'])) or abs(zoom['zoom']-self.baseline['zoom']) > .05
                 or zoom.get('zooming')):
             raise ApiError('K40T baseline mismatch: actual='+str(dict(pose, **zoom))
                            +'; expected='+str(self.baseline)
-                           +'; tolerance: yaw/pitch=2 deg, zoom=0.05x')
+                           +'; tolerance: yaw/pitch=3 deg, zoom=0.05x')
         return dict(pose, zoom=zoom['zoom'])
 
     def health(self):

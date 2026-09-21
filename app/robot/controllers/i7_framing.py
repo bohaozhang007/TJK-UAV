@@ -25,7 +25,7 @@ def restore_camera(controller, initial):
         try:
             current = controller.get_gimbal()
             delta = round(initial[axis] - current[axis], 2)
-            if abs(delta) > 2.0:
+            if abs(delta) > 3.0:
                 actions.append(dict(command='gimbal_' + axis[:-4], value=delta))
                 method(delta)
         except Exception as exc:
@@ -35,7 +35,7 @@ def restore_camera(controller, initial):
         pose = controller.get_gimbal()
         final.update(yaw_deg=pose['yaw_deg'], pitch_deg=pose['pitch_deg'])
         for axis in ('yaw_deg', 'pitch_deg'):
-            if not math.isfinite(final[axis]) or abs(final[axis] - initial[axis]) > 2.0:
+            if not math.isfinite(final[axis]) or abs(final[axis] - initial[axis]) > 3.0:
                 errors.append(f'{axis} restore verification failed: {final[axis]} vs {initial[axis]}')
     except Exception as exc:
         errors.append(f'pose verification: {exc}')

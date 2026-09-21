@@ -28,10 +28,14 @@ if [[ "${1:-}" == --stack ]]; then
   python3 - 9>&- <<'PY'
 import socket
 with socket.socket() as sock:
+    # Match ThreadingHTTPServer; closed connections may remain in TIME_WAIT.
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(('127.0.0.1', 8765))
-    except OSError:
-        raise SystemExit('Robot port 8765 is occupied; stop the separate server before starting stack.')
+        sock.listen(1)
+    except OSError as exc:
+        raise SystemExit('Robot port 8765 unavailable: '+str(exc)
+                         +'; check for a running Robot server before starting stack.')
 PY
   (
     exec 9>&-
@@ -39,6 +43,8 @@ PY
     python3 - <<'PY'
 import socket
 import rosgraph
+from urllib.parse import urlsplit, urlunsplit
+from xmlrpc.client import ServerProxy
 socket.setdefaulttimeout(1.)
 master = rosgraph.Master('/i7_stack_check')
 try:
@@ -48,8 +54,28 @@ except (OSError, rosgraph.MasterError):
 else:
     names = {n for group in master.getSystemState() for _, nodes in group for n in nodes}
     conflicts = names & {'/i7_v22_sensors', '/i7_ego_v22_bridge', '/i7_ego_v22_robot'}
-    if conflicts:
-        raise SystemExit('Stop separate v22 services before starting stack: '+str(sorted(conflicts)))
+    active = []
+    for name in sorted(conflicts):
+        try:
+            uri = master.lookupNode(name)
+        except rosgraph.MasterError:
+            continue
+        address = urlsplit(uri)
+        # Avoid multi-interface hostname resolution for local ROS nodes.
+        if address.hostname in {socket.gethostname().lower(), socket.getfqdn().lower(), 'localhost'}:
+            uri = urlunsplit((address.scheme, '127.0.0.1:'+str(address.port), address.path, '', ''))
+        try:
+            code, message, pid = ServerProxy(uri).getPid('/i7_stack_check')
+            if code != 1:
+                raise RuntimeError(message)
+        except ConnectionRefusedError:
+            print('Ignoring exited ROS node registration: '+name, flush=True)
+            continue
+        except Exception as exc:
+            raise SystemExit('Cannot verify existing ROS node '+name+': '+str(exc))
+        active.append(name)
+    if active:
+        raise SystemExit('Stop separate v22 services before starting stack: '+str(active))
 PY
   )
 fi
