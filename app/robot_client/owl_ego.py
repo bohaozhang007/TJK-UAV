@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import math
+from pathlib import Path
 import threading
 import time
 import urllib.error
@@ -16,6 +17,7 @@ from PIL import Image
 from app.timing import measure
 from .base import ControlLost, MissionError, Observation, TargetNotLocalizable, NavigationPlanningFailed
 from app.robot.mapping import GridMap, TargetSurfaceUnavailable
+from .artifact_writer import ArtifactWriter
 
 
 # Fixed local Robot deployment and control protocol timings.
@@ -48,6 +50,7 @@ class OwlEgoClient:
         self.thread = None
         self.landing = False
         self.navigation_id = None
+        self.artifacts = ArtifactWriter()
 
     def rpc(self, method, path, data=None, timeout=1., timings=None):
         data = dict(data or {})
@@ -259,12 +262,23 @@ class OwlEgoClient:
                 if diagnostics is not None:
                     from .localization_diagnostics import save_projection
                     try:
-                        summary = save_projection(diagnostic_prefix, observation, mask, diagnostics)
+                        diagnostic_prefix = Path(diagnostic_prefix)
+                        cloud = self.diagnostic_cloud(observation)
+                        queued = self.artifacts.submit('localization', diagnostic_prefix,
+                            save_projection, observation, mask, diagnostics, cloud)
+                        summary = {k: v for k, v in diagnostics.items()
+                                   if k not in ('uv', 'depth_m', 'hits')}
+                        summary.update(write_status='queued' if queued else 'queue_full',
+                            overlay_file=diagnostic_prefix.name+'_projection.jpg',
+                            report_file=diagnostic_prefix.name+'.json')
                         if timings is not None:
                             timings['localization_diagnostics'] = summary
                     except Exception as exc:
                         if timings is not None:
                             timings['localization_diagnostics'] = dict(write_error=str(exc))
+
+    def diagnostic_cloud(self, observation):
+        return None
 
     def points_are_free(self, poses, timings=None):
         grid = self.grid(timings)
@@ -360,3 +374,4 @@ class OwlEgoClient:
             if self.thread:
                 self.thread.join(timeout=2.)
             self.session = None
+            self.artifacts.close()

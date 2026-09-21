@@ -22,6 +22,7 @@ if __package__ in (None, ''):
 from app.timing import measure
 from app.robot_client.base import ControlLost, MissionError, Robot, TargetNotLocalizable, NavigationPlanningFailed
 from app.robot_client.factory import create_robot
+from app.robot_client.artifact_writer import ArtifactWriter, save_photo
 
 
 # Fixed service settings and bounded retry/loop limits.
@@ -172,6 +173,8 @@ class Mission:
         self.origin = None
         self.attached = False
         self.operation_id = 0
+        self.detection_point_id = 0
+        self.artifacts = ArtifactWriter()
         self.events = (self.output/'events.jsonl').open('a', encoding='utf-8', buffering=1)
 
     def event(self, kind, **fields):
@@ -296,7 +299,8 @@ class Mission:
                     raise result
                 return result
             raise MissionError('detector request timed out')
-        return self.retry_read('detection', request, frame_id=observation.frame_id)
+        return self.retry_read('detection', request, frame_id=observation.frame_id,
+                               detection_point_id=self.detection_point_id)
 
     def locate_new_targets(self, observation, detections):
         self.transition(State.LOCALIZE)
@@ -305,10 +309,11 @@ class Mission:
             attempts = [0]
             def locate(timings):
                 attempts[0] += 1
-                prefix = self.output / f'localize_{self.operation_id:03d}_{index:02d}_{attempts[0]:02d}'
+                prefix = self.output / f'localize_{self.detection_point_id:03d}_{index:02d}_{attempts[0]:02d}'
                 return self.robot.locate_target(observation, detection['mask'], timings=timings,
                                                diagnostic_prefix=prefix)
-            context = dict(frame_id=observation.frame_id, detection_index=index,
+            context = dict(frame_id=observation.frame_id, detection_point_id=self.detection_point_id,
+                           detection_index=index,
                            confidence=detection['confidence'])
             try:
                 position = self.retry_read('target localization',
@@ -370,8 +375,10 @@ class Mission:
         self.transition(State.PHOTO)
         obs = self.capture_observation()
         path = self.output / f'target_{target["id"]:03d}_{index:02d}.jpg'
-        Image.fromarray(obs.rgb).save(path, quality=95)
-        self.event('photo', target_id=target['id'], file=path.name, pose=obs.pose, frame_id=obs.frame_id)
+        if not self.artifacts.submit('photo', path, save_photo, obs.rgb):
+            raise MissionError('photo storage queue full')
+        self.event('photo', target_id=target['id'], file=path.name, pose=obs.pose,
+                   frame_id=obs.frame_id, write_status='queued')
         self.guarded_wait(self.c['orbit']['dwell_s'])
 
     def visit_target(self, target):
@@ -421,10 +428,12 @@ class Mission:
         self.event('autofocus_started', target_id=target['id'], frame_id=observation.frame_id)
         result = self.robot.autofocus_photo(observation, box, timings=timings)
         path = self.output / f'target_{target["id"]:03d}_01.jpg'
-        Image.fromarray(result['rgb']).save(path, quality=95)
+        if not self.artifacts.submit('photo', path, save_photo, result['rgb']):
+            raise MissionError('photo storage queue full')
         target['status'] = 'completed' if result['focused'] else 'failed'
         self.event('autofocus_finished', target=target, focused=result['focused'],
-                   fallback_photo=not result['focused'], file=path.name, timings=timings)
+                   fallback_photo=not result['focused'], file=path.name, timings=timings,
+                   write_status='queued')
         self.current_target = None
 
     def patrol(self):
@@ -433,7 +442,10 @@ class Mission:
             for _ in range(MAX_STOPS_PER_WAYPOINT):
                 stop, final = self.plan_stop(goal)
                 self.fly_to(stop, State.PATROL_MOVE)
+                self.detection_point_id += 1
                 observation = self.capture_observation()
+                self.event('detection_point', detection_point_id=self.detection_point_id,
+                           frame_id=observation.frame_id, exposure_pose=dict(observation.pose))
                 detections = self.detect(observation)
                 targets = self.locate_new_targets(observation, detections)
                 # All identities/positions were computed while still at this exposure P.
@@ -525,7 +537,10 @@ class Mission:
             try:
                 self.robot.close()
             finally:
-                self.events.close()
+                try:
+                    self.artifacts.close()
+                finally:
+                    self.events.close()
 
 
 def validate_config(config):

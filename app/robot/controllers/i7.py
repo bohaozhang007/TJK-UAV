@@ -38,6 +38,7 @@ class I7Controller(OwlEgoController):
         self.camera = camera or K40TClient(c['host'], c['port'], c['timeout_s'])
         self.camera_lock = threading.Lock()
         self.exposures = OrderedDict()
+        self.exposure_clouds = OrderedDict()
         self.photo_jobs = {}
         self.photo_active = None
         self.camera_shutdown = threading.Event()
@@ -143,8 +144,10 @@ class I7Controller(OwlEgoController):
                     raw = self.hw.rgb_array(image).copy()
                 with self.lock:
                     self.exposures[result['frame_id']] = (copy.deepcopy(result), raw)
+                    self.exposure_clouds[result['frame_id']] = self.hw.exposure_cloud(result['timestamp_s'], epoch)
                     while len(self.exposures) > 4:
-                        self.exposures.popitem(last=False)
+                        expired, _ = self.exposures.popitem(last=False)
+                        self.exposure_clouds.pop(expired, None)
             guard()
             return result
         finally:
@@ -153,6 +156,8 @@ class I7Controller(OwlEgoController):
                 monitor_thread.join(timeout=.2)
 
     def handle_http(self, method, path, data, *, local_operator=False):
+        if path == '/v22/diagnostic/cloud' and method == 'POST':
+            return self.diagnostic_cloud(data)
         if path == '/v21/capabilities' and method == 'GET':
             return dict(super().handle_http(method, path, data, local_operator=local_operator),
                         autofocus=True, manual_offboard_takeoff=self.hw.snapshot()['health'].get('manual_offboard_takeoff') is True)
@@ -177,6 +182,34 @@ class I7Controller(OwlEgoController):
             finally:
                 self.camera_lock.release()
         return super().handle_http(method, path, data, local_operator=local_operator)
+
+    def diagnostic_cloud(self, data):
+        from sensor_msgs import point_cloud2
+        self._owner(data)
+        epoch = data.get('localization_epoch')
+        self.queries.guard(data['session_id'], epoch)
+        with self.lock:
+            exposure = self.exposures.get(data.get('frame_id'))
+            cloud = self.exposure_clouds.get(data.get('frame_id'))
+        if exposure is None or exposure[0]['localization_epoch'] != epoch:
+            raise ApiError('unknown diagnostic exposure')
+        if cloud is None:
+            raise ApiError('no point cloud near exposure')
+        stamp = cloud.header.stamp.to_sec()
+        delta = stamp-exposure[0]['timestamp_s']
+        if cloud.header.frame_id != self.config['control']['world_frame'] or abs(delta) > .2:
+            raise ApiError('point cloud frame mismatch or exposure time difference exceeds 200 ms')
+        if cloud.width*cloud.height > 200000:
+            raise ApiError('diagnostic point cloud exceeds 200000 point budget')
+        points = np.asarray(list(point_cloud2.read_points(cloud, field_names=('x','y','z'),
+                                                         skip_nans=True)), dtype='<f4').reshape(-1,3)
+        points = points[np.isfinite(points).all(axis=1)]
+        self.queries.guard(data['session_id'], epoch)
+        return dict(ok=True, frame_id=data['frame_id'], localization_epoch=epoch,
+            points_base64=base64.b64encode(points.tobytes()).decode('ascii'),
+            metadata=dict(topic=self.config['topics']['cloud'], frame=cloud.header.frame_id,
+                stamp_s=stamp, image_delta_s=delta, point_count=len(points),
+                source='registered_cloud_single_frame', position_unit='m', encoding='float32_le_xyz'))
 
     def photo_guard(self, sid, epoch, pose):
         if self.camera_shutdown.is_set():

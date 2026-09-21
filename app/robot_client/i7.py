@@ -14,6 +14,25 @@ class I7Client(OwlEgoClient):
     observation_max_age_s = 1.
     observation_sync_max_s = .12
 
+    def diagnostic_cloud(self, observation):
+        key = (observation.epoch, observation.frame_id)
+        if getattr(self, '_diagnostic_cloud_key', None) == key:
+            return self._diagnostic_cloud_value
+        try:
+            result = self.rpc('POST', '/v22/diagnostic/cloud',
+                dict(frame_id=observation.frame_id, localization_epoch=observation.epoch), timeout=2.)
+            if result['localization_epoch'] != observation.epoch or result['frame_id'] != observation.frame_id:
+                raise ValueError('diagnostic cloud exposure mismatch')
+            points = np.frombuffer(base64.b64decode(result['points_base64'], validate=True),
+                                   dtype='<f4').reshape(-1,3)
+            if len(points) != result['metadata']['point_count'] or not np.isfinite(points).all():
+                raise ValueError('invalid diagnostic point cloud')
+            value = dict(points_world_cm=points.astype(float)*100, metadata=result['metadata'])
+        except Exception as exc:
+            value = dict(error=str(exc))
+        self._diagnostic_cloud_key, self._diagnostic_cloud_value = key, value
+        return value
+
     def observation_distortion(self, data):
         g = data.get('geometry_assumptions', {})
         d = np.asarray(data.get('distortion_coefficients', []), float)
