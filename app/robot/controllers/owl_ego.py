@@ -203,7 +203,7 @@ class OwlEgoController:
             try:
                 if path == '/v22/map':
                     with measure(timings, 'map_query'):
-                        grid = self.queries.map(sid,epoch)
+                        grid = self.queries.map(sid,epoch,timings=timings)
                     return dict(ok=True,map=grid,localization_epoch=epoch,timings=timings)
                 goal = enu_pose(data.get('pose'),self.config['control']['world_limit_m'])
                 arrival = data.get('require_arrival',False)

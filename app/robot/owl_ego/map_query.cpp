@@ -1,7 +1,9 @@
 // Included in the pinned grid_map.cpp by patch_ego.py. Read-only, on-demand.
 // The pinned executable uses ros::spin(): this callback cannot interleave map updates.
+#include <chrono>
 bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response &res)
 {
+  const auto started = std::chrono::steady_clock::now();
   const double age = (ros::Time::now() - v22_cloud_stamp_).toSec();
   if (!mp_.have_initialized_ || !md_.has_odom_ || v22_cloud_stamp_.isZero() || age < 0 || age > 0.5)
   {
@@ -13,7 +15,7 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
   const Eigen::Vector3i lo = md_.ringbuffer_lowbound3i_;
   const Eigen::Vector3i hi = lo + md_.ringbuffer_size3i_ - Eigen::Vector3i::Ones();
   const Eigen::Vector3i size = hi - lo + Eigen::Vector3i::Ones();
-  if (size.cast<double>().prod() > 4000000)
+  if (size.cast<double>().prod() > 8000000)
   {
     res.success = false;
     res.message = "map query exceeds voxel budget";
@@ -43,6 +45,7 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
           return true;
         }
       }
+  const double scan_encode_s = std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
   out << std::setprecision(12)
       << "{\"resolution_m\":" << mp_.resolution_
       << ",\"stamp_s\":" << v22_cloud_stamp_.toSec()
@@ -51,6 +54,10 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
       << ",\"upper\":[" << hi.x() << ',' << hi.y() << ',' << hi.z() << ']'
       << ",\"ground_m\":" << (mp_.enable_virtual_walll_ ? mp_.virtual_ground_ + mp_.obstacles_inflation_ : lo.z()*mp_.resolution_)
       << ",\"ceiling_m\":" << (mp_.enable_virtual_walll_ ? mp_.virtual_ceil_ - mp_.obstacles_inflation_ : (hi.z()+1)*mp_.resolution_)
+      << ",\"query_metrics\":{\"voxel_count\":" << size.cast<double>().prod()
+      << ",\"voxel_budget\":8000000,\"occupied_count\":" << raw_count
+      << ",\"inflated_count\":" << inflated_count
+      << ",\"scan_encode_s\":" << scan_encode_s << "}"
       << ",\"occupied\":[" << raw.str() << "],\"inflated\":[" << inflated.str() << "]}";
   res.success = true;
   res.message = out.str();

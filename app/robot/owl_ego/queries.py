@@ -43,7 +43,7 @@ class OwlQueries:
             raise RuntimeError('query requires the current owner, epoch and actual stopped hold')
         return snap
 
-    def map(self, session, epoch):
+    def map(self, session, epoch, timings=None):
         import rospy
         from std_srvs.srv import Trigger
         snap = self.guard(session, epoch)
@@ -62,14 +62,20 @@ class OwlQueries:
             finally:
                 event.set()
         threading.Thread(target=call, daemon=True).start()
-        if not event.wait(1.5):
-            raise RuntimeError('map service timed out')
+        with measure(timings, 'map_service_wait'):
+            if not event.wait(1.5):
+                raise RuntimeError('map service timed out')
         if 'error' in outcome:
             raise RuntimeError('map query failed: ' + str(outcome['error']))
         response = outcome['value']
         if not response.success:
             raise RuntimeError(response.message)
-        result = json.loads(response.message)
+        with measure(timings, 'map_json_decode'):
+            result = json.loads(response.message)
+        if timings is not None:
+            timings['map_details'] = dict(result.get('query_metrics', {}),
+                resolution_m=result['resolution_m'], lower=result['lower'], upper=result['upper'],
+                version=result['version'], response_bytes=len(response.message.encode('utf-8')))
         now = rospy.Time.now().to_sec()
         after = self.guard(session, epoch)
         if (after.get('planner_generation') != generation
@@ -85,7 +91,8 @@ class OwlQueries:
         try:
             snap = self.guard(session, epoch)
             with measure(timings, 'map_before'):
-                grid = self.map(session, epoch)
+                details = {} if timings is None else timings.setdefault('map_before_details', {})
+                grid = self.map(session, epoch, timings=details)
             with measure(timings, 'goal_check'):
                 resolution = grid['resolution_m']
                 start = np.asarray(snap['pose'][:3], float)
@@ -145,7 +152,8 @@ class OwlQueries:
                         raise RuntimeError('EGO did not provide a complete path with zero terminal velocity')
             # Recheck the same persistent map after optimization and fresh cloud updates.
             with measure(timings, 'map_after'):
-                grid = self.map(session, epoch)
+                details = {} if timings is None else timings.setdefault('map_after_details', {})
+                grid = self.map(session, epoch, timings=details)
             if self.guard(session, epoch).get('planner_generation') != data['planner_generation']:
                 raise RuntimeError('preview map process changed during validation')
             with measure(timings, 'path_collision_check'):
