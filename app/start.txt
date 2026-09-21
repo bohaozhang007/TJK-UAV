@@ -39,8 +39,6 @@ t0 - services (hardware, sensors, live checks, bridge, Robot server)
 cd ~/TJK-UAV
 bash app/run_i7.sh stack
 # Wait for "Live checks passed; services launched" before opening console.
-# After landing/disarming, Ctrl-C and wait for "I7 bringup cleanup finished".
-# Owned services and descendants stop; reused hardware stays running.
 
 t1 - Console (keep open after takeoff)
 cd ~/TJK-UAV
