@@ -12,6 +12,7 @@ import numpy as np
 
 
 class OwlEgoHardware:
+    rectify_observations = True
     snapshot_wait_s = .08
     def __init__(self, config):
         self.c = config

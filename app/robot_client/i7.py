@@ -14,6 +14,16 @@ class I7Client(OwlEgoClient):
     observation_max_age_s = 1.
     observation_sync_max_s = .12
 
+    def observation_distortion(self, data):
+        g = data.get('geometry_assumptions', {})
+        d = np.asarray(data.get('distortion_coefficients', []), float)
+        if (data.get('rectified') is not False or g.get('distortion') != 'raw_calibrated'
+                or g.get('intrinsics') != 'configured_calibration' or g.get('extrinsics') != 'sensor_geometry'
+                or not g.get('profile_id') or data.get('distortion_model') not in ('plumb_bob', 'rational_polynomial')
+                or d.ndim != 1 or len(d) not in (4,5,8,12,14) or not np.isfinite(d).all()):
+            raise MissionError('i7 requires raw pixels with calibrated distortion metadata; restart server and Agent')
+        return d
+
     def rpc(self, method, path, data=None, timeout=1., timings=None):
         if path == '/v21/observation':
             timeout = max(timeout, 25.)

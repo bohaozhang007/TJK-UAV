@@ -231,19 +231,6 @@ class I7Controller(OwlEgoController):
                 raise
             return dict(ok=True, task_id=task, timeout_s=self.config['autofocus']['timeout_s']+120.)
 
-    def raw_box(self, box):
-        # Detector boxes use rectified pixels. Tracker starts on the cached raw exposure.
-        c = self.config['hardware']['calibration']
-        k, d = np.asarray(c['K'], float), np.asarray(c['D'], float)
-        xs, ys = np.meshgrid(np.linspace(box[0], box[2], 20), np.linspace(box[1], box[3], 20))
-        pixels = np.column_stack((xs.ravel(), ys.ravel(), np.ones(xs.size)))
-        rays = pixels @ np.linalg.inv(k).T
-        distorted = cv2.projectPoints(rays, np.zeros(3), np.zeros(3), k, d)[0].reshape(-1, 2)
-        w, h = c['image_size']
-        lo, hi = distorted.min(axis=0), distorted.max(axis=0)
-        return [float(np.clip(lo[0], 0, w)), float(np.clip(lo[1], 0, h)),
-                float(np.clip(hi[0], 0, w)), float(np.clip(hi[1], 0, h))]
-
     def run_photo(self, job, observation, raw, bounds, host):
         sid, epoch = job['session_id'], observation['localization_epoch']
         lost = threading.Event()
@@ -292,7 +279,7 @@ class I7Controller(OwlEgoController):
             capture = lambda after, timeout: self.hw.frame_after(after, timeout, guard)
             try:
                 self.require_baseline()
-                details = autofocus_box(camera, raw, self.raw_box(bounds), capture,
+                details = autofocus_box(camera, raw, bounds, capture,
                     tracker_url=f'http://[{host}]:8791' if ':' in host else f'http://{host}:8791',
                     **self.config['autofocus'], on_photo=save, guard=guard)
             except CameraControlLost:

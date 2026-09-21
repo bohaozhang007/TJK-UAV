@@ -30,6 +30,7 @@ class Observation:
     world_from_camera_cm: object
     timestamp_s: float
     metadata: dict = field(default_factory=dict)
+    distortion: object = None
 
 
 class Robot(Protocol):

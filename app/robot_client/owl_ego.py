@@ -164,6 +164,16 @@ class OwlEgoClient:
             time.sleep(.1)
         raise MissionError('actual stop not confirmed')
 
+    def observation_distortion(self, data):
+        if data.get('rectified') is not True:
+            raise MissionError('camera image must be rectified')
+        if data.get('calibration_quality') == 'approximate':
+            g = data.get('geometry_assumptions', {})
+            if (g.get('intrinsics') != 'configured_calibration' or g.get('extrinsics') != 'sensor_geometry'
+                    or g.get('distortion') != 'corrected' or not g.get('profile_id')):
+                raise MissionError('unsupported approximate camera geometry')
+        return None
+
     def observe(self, timings=None):
         with measure(timings, 'wait_stopped'):
             self.wait_stopped()
@@ -176,14 +186,10 @@ class OwlEgoClient:
             with Image.open(io.BytesIO(base64.b64decode(data['rgb_image_base64'], validate=True))) as im:
                 rgb = np.array(im.convert('RGB'))
         quality = data.get('calibration_quality')
-        if (data.get('rectified') is not True or quality not in ('calibrated', 'approximate')
+        if (quality not in ('calibrated', 'approximate')
                 or quality == 'approximate' and not ALLOW_APPROXIMATE_GEOMETRY):
             raise MissionError('camera geometry is not accepted')
-        if quality == 'approximate':
-            g = data.get('geometry_assumptions', {})
-            if (g.get('intrinsics') != 'configured_calibration' or g.get('extrinsics') != 'sensor_geometry'
-                    or g.get('distortion') != 'corrected' or not g.get('profile_id')):
-                raise MissionError('unsupported approximate camera geometry')
+        distortion = self.observation_distortion(data)
         k = np.asarray(data['intrinsics'], float)
         t = np.asarray(data['world_from_camera_optical_cm'], float)
         if (k.shape != (3, 3) or not np.isfinite(k).all() or k[0, 0] <= 0 or k[1, 1] <= 0
@@ -216,7 +222,7 @@ class OwlEgoClient:
                 raise MissionError(f'observation unsynchronized: sync_error_s={sync:.6f}, limit_s={self.observation_sync_max_s:.6f}')
         return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_image_base64'], k, t, data['timestamp_s'],
                            {key:data[key] for key in ('geometry_assumptions', 'camera_baseline', 'capture_timing',
-                               'sync_error_s', 'odom_bracket_span_s') if key in data})
+                               'sync_error_s', 'odom_bracket_span_s') if key in data}, distortion)
 
     def autofocus_photo(self, observation, box, timings=None):
         raise MissionError('Robot does not support camera autofocus')

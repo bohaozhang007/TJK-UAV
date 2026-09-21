@@ -39,7 +39,7 @@ autofocus:
   hold_s: 1.0
 
 hardware:
-  # Native distorted image; rectified with this K before detection.
+  # Native pixels for detection/tracking; K/D apply only to 3D projection.
   calibration:
     image_size: [1920, 1080]
     K:

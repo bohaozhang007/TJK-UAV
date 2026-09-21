@@ -5,6 +5,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
+from app.robot.mapping import project_camera
 
 
 def save_projection(prefix, obs, mask, diagnostics):
@@ -49,14 +50,15 @@ def save_projection(prefix, obs, mask, diagnostics):
     if 'target_position_cm' in summary:
         point = np.array(summary['target_position_cm'])*[1,-1,1]
         camera = (point-obs.world_from_camera_cm[:3,3]) @ obs.world_from_camera_cm[:3,:3]
-        pixel = obs.intrinsics @ camera
-        x,y = map(int, np.rint(pixel[:2]/pixel[2]))
+        pixel = project_camera(camera.reshape(1, 3), obs.intrinsics, obs.distortion)[0]
+        x,y = map(int, np.rint(pixel))
         draw = ImageDraw.Draw(panels[2]); draw.line((x-10,y,x+10,y),fill=(0,255,0),width=3)
         draw.line((x,y-10,x,y+10),fill=(0,255,0),width=3)
     panel_width = min(width, 960); panel_height = round(height*panel_width/width)
     canvas = Image.new('RGB', (3*panel_width, panel_height+80), (24,24,24))
     draw = ImageDraw.Draw(canvas)
-    titles = ['Rectified exposure', 'Mask: cyan', 'Occupied voxel centers: depth colors; mask hits: magenta']
+    titles = ['Raw exposure' if obs.distortion is not None else 'Rectified exposure',
+              'Mask: cyan', 'Occupied voxel centers: depth colors; mask hits: magenta']
     for i,panel in enumerate(panels):
         canvas.paste(panel.resize((panel_width,panel_height)),(i*panel_width,40))
         draw.text((i*panel_width+8,12),titles[i],fill='white')
@@ -68,6 +70,8 @@ def save_projection(prefix, obs, mask, diagnostics):
     canvas.save(overlay_file, quality=95)
     summary.update(frame_id=obs.frame_id, localization_epoch=obs.epoch, timestamp_s=obs.timestamp_s,
         exposure_pose=obs.pose, intrinsics=obs.intrinsics.tolist(),
+        pixel_geometry='raw_distorted' if obs.distortion is not None else 'rectified',
+        distortion_coefficients=obs.distortion.tolist() if obs.distortion is not None else None,
         world_from_camera_optical_cm=obs.world_from_camera_cm.tolist(), exposure_metadata=obs.metadata,
         image_size=[width,height], mask_bbox_xyxy=bbox, nearest_projection_to_mask_px=nearest,
         projected_depth_range_m=[float(depth.min()),float(depth.max())] if len(depth) else None,

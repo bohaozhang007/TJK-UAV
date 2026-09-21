@@ -6,6 +6,17 @@ class TargetSurfaceUnavailable(ValueError):
     pass
 
 
+def project_camera(camera, intrinsics, distortion=None):
+    if not len(camera):
+        return np.empty((0, 2), float)
+    if distortion is not None:
+        import cv2
+        return cv2.projectPoints(np.asarray(camera, float), np.zeros(3), np.zeros(3),
+                                 intrinsics, distortion)[0].reshape(-1, 2)
+    pixels = camera @ intrinsics.T
+    return pixels[:, :2] / pixels[:, 2:3]
+
+
 class GridMap:
     def __init__(self, data):
         self.metadata = {k:data[k] for k in ('version', 'stamp_s', 'age_s', 'resolution_m', 'lower', 'upper') if k in data}
@@ -59,11 +70,10 @@ class GridMap:
                 camera_front_voxels=int(visible.sum()), mask_pixels=int(mask.sum()),
                 min_voxels=min_voxels, depth_gap_m=depth_gap_m)
         world, camera = world[visible], camera[visible]
-        pixels = camera @ obs.intrinsics.T
-        uv = np.rint(pixels[:, :2] / pixels[:, 2:3]).astype(int)
+        uv = np.rint(project_camera(camera, obs.intrinsics, obs.distortion))
         h, w = mask.shape
-        inside = (uv[:, 0] >= 0) & (uv[:, 0] < w) & (uv[:, 1] >= 0) & (uv[:, 1] < h)
-        world, camera, uv = world[inside], camera[inside], uv[inside]
+        inside = np.isfinite(uv).all(axis=1) & (uv[:, 0] >= 0) & (uv[:, 0] < w) & (uv[:, 1] >= 0) & (uv[:, 1] < h)
+        world, camera, uv = world[inside], camera[inside], uv[inside].astype(int)
         selected = mask[uv[:, 1], uv[:, 0]]
         if diagnostics is not None:
             diagnostics.update(image_voxels=len(uv), mask_hit_voxels=int(selected.sum()),

@@ -167,6 +167,11 @@ def build_observation(hw, *, include_image=True, timings=None):
         raise ObservationUnavailable(f'stale RGB acquisition timestamp: age_s={age:.6f}')
     with measure(timings, 'geometry'):
         k,d,rectified,geometry = camera_intrinsics(config['hardware'],m,info)
+        if not hw.rectify_observations:
+            if d is None:
+                raise ValueError('raw observations require calibrated distortion coefficients')
+            rectified = False
+            geometry['distortion'] = 'raw_calibrated'
         world_body,sync,world,body = interpolate_pose(hist,stamp,config['hardware']['sync_max_s'],
                                                    config['hardware'].get('odom_bracket_max_s'))
         bracket_span = min(p['stamp'] for p in hist if p['stamp'] >= stamp)-max(p['stamp'] for p in hist if p['stamp'] <= stamp)
@@ -204,10 +209,10 @@ def build_observation(hw, *, include_image=True, timings=None):
         import cv2
         with measure(timings, 'rgb_decode'):
             bgr = hw.rgb_array(m)
-        with measure(timings, 'rectify'):
-            if d is not None:
+        if hw.rectify_observations and d is not None:
+            with measure(timings, 'rectify'):
                 bgr = hw.rectify_rgb(bgr,k,d)
-        # Keep rectified pixels and intrinsics at the camera's native resolution.
+        # Preserve native image dimensions and pixel coordinates.
         with measure(timings, 'png_encode'):
             success,encoded = cv2.imencode('.png',bgr,[cv2.IMWRITE_PNG_COMPRESSION,1])
             if not success:
@@ -240,4 +245,7 @@ def build_observation(hw, *, include_image=True, timings=None):
                 intrinsics=k.tolist(),world_from_camera_optical_cm=transform.tolist())
     if include_image:
         result['rgb_image_base64'] = image_base64
+    if not hw.rectify_observations:
+        result['distortion_coefficients'] = d.tolist()
+        result['distortion_model'] = config['hardware']['calibration']['distortion_model']
     return result
