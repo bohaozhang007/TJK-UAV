@@ -55,7 +55,8 @@ def autofocus_box(controller, img, box, capture, *,
                   max_yaw_step_deg=3.0, max_pitch_step_deg=3.0, damping=.7,
                   zoom_step_up=1.25, zoom_step_down=.8,
                   target_ratio=.4, center_tolerance=.06, size_tolerance=.08,
-                  max_steps=30, timeout_s=180.0, settle_s=.5, hold_s=1.0, tracker=None, on_photo=None, guard=lambda: None):
+                  max_steps=30, timeout_s=180.0, settle_s=.5, hold_s=1.0, tracker=None, on_photo=None,
+                  guard=lambda: None, image_cache=None):
     """Init with the supplied full-size BGR image/xyxy box, then track each frame.
 
     Gains are degrees/pixel at the reference resolution and zoom, following
@@ -104,7 +105,8 @@ def autofocus_box(controller, img, box, capture, *,
                     target_ratio=target_ratio, center_error=center, zoom=zoom,
                     tracker_url=tracker_url, track_count=track_count, actions=history,
                     initial_camera=initial_camera, focus_reached=focus is not None,
-                    focus=focus, hold_s=hold_s, restoration=restoration)
+                    focus=focus, hold_s=hold_s, restoration=restoration,
+                    tracker_init=getattr(tracker,'init_diagnostics',None))
 
     def budget():
         guard()
@@ -121,7 +123,8 @@ def autofocus_box(controller, img, box, capture, *,
         for key, low, high in (('yaw_deg', -180, 180), ('pitch_deg', -90, 30), ('zoom', 1, 160)):
             if not math.isfinite(initial_camera[key]) or not low <= initial_camera[key] <= high:
                 raise RuntimeError(f'Invalid initial camera {key}: {initial_camera[key]}')
-        tracker = tracker if tracker is not None else TrackerClient(tracker_url, tracker_timeout_s)
+        tracker = tracker if tracker is not None else TrackerClient(tracker_url, tracker_timeout_s,
+                                                                   image_cache=image_cache, guard=guard)
         bounds = validate_image_box(img, tracker.init(img, bounds, timeout_s=min(tracker_timeout_s, budget())))
         zoom = float(controller.get_zoom()['zoom'])
         while True:

@@ -18,6 +18,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.tracker.image_log import ImageLog
+from app.detector.frame_cache import cached_image
 
 
 def build_tracker(name, model_root=None, checkpoint=None, device="cuda"):
@@ -28,11 +29,11 @@ def build_tracker(name, model_root=None, checkpoint=None, device="cuda"):
     raise ValueError(f"Unknown tracker: {name}")
 
 
-def decode_image(value):
-    if not isinstance(value, str) or not value:
+def decode_image(value, image_bytes=None):
+    if image_bytes is None and (not isinstance(value, str) or not value):
         raise ValueError("image must be a base64 PNG or JPEG")
     try:
-        with Image.open(io.BytesIO(base64.b64decode(value, validate=True))) as image:
+        with Image.open(io.BytesIO(image_bytes if image_bytes is not None else base64.b64decode(value, validate=True))) as image:
             if image.format not in {"PNG", "JPEG"} or image.width * image.height > 8_000_000:
                 raise ValueError("image must be PNG/JPEG with at most 8,000,000 pixels")
             return np.array(image.convert("RGB"))
@@ -87,7 +88,17 @@ class TrackerHandler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict):
                 raise ValueError("request must be a JSON object")
-            image = decode_image(data.get("image"))
+            image_bytes = None
+            frame_id = data.get('frame_id')
+            if 'image_cache' in data:
+                if self.path != '/init' or 'image' in data or not isinstance(frame_id,str) or not frame_id:
+                    raise ValueError('cached image is only valid for /init with frame_id and no image payload')
+                try:
+                    image_bytes = cached_image(data['image_cache'],frame_id)
+                except (ValueError,OSError) as exc:
+                    self.reply(409,dict(ok=False,error=str(exc),error_code='image_cache_miss'))
+                    return
+            image = decode_image(data.get("image"),image_bytes=image_bytes)
             box = validate_box(data.get("box"), image) if self.path == "/init" else None
         except (ValueError, OSError) as exc:
             self.reply(400, {"ok": False, "error": str(exc)})
@@ -117,11 +128,14 @@ class TrackerHandler(BaseHTTPRequestHandler):
         elapsed = time.perf_counter() - started
         box = result['box']
         target_id = self.server.target_id
-        logging.info("%s image=%sx%s box=%s elapsed_s=%.3f", self.path, image.shape[1], image.shape[0], box, elapsed)
+        source = 'detector_cache' if image_bytes is not None else 'upload'
+        logging.info("%s frame_id=%s source=%s request_bytes=%d image=%sx%s box=%s elapsed_s=%.3f",
+                     self.path, frame_id, source, length, image.shape[1], image.shape[0], box, elapsed)
         try:
             self.reply(200, {"ok": True, "box": box,
                              "target_id": target_id, "found": box is not None,
-                             "image_size": [image.shape[1], image.shape[0]], "elapsed_s": elapsed})
+                             "image_size": [image.shape[1], image.shape[0]], "elapsed_s": elapsed,
+                             "frame_id": frame_id, "image_source": source})
         finally:
             self.server.image_log.submit(image, result, target_id)
 

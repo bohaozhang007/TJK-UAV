@@ -65,7 +65,8 @@ class I7Client(OwlEgoClient):
         if observation.epoch != self.epoch:
             raise MissionError('photo exposure epoch mismatch')
         result = self.rpc('POST', '/v22/autofocus', dict(frame_id=observation.frame_id,
-            box=box, localization_epoch=self.epoch, tracker_host=self.tracker_host))
+            box=box, localization_epoch=self.epoch, tracker_host=self.tracker_host,
+            image_cache=observation.metadata.get('detector_image_cache')))
         task = result['task_id']
         timeout = result['timeout_s']
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 720:

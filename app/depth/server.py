@@ -11,7 +11,6 @@ from pathlib import Path
 import socket
 import sys
 import time
-import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import numpy as np
@@ -19,6 +18,8 @@ from PIL import Image
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from app.detector.frame_cache import cached_image
 
 
 def build_depth(model_root=None, checkpoint=None, device="cuda", process_res=504):
@@ -52,19 +53,6 @@ def decode_request(data, image_bytes=None):
     if output not in ("depth", "xyz"):
         raise ValueError("output must be depth or xyz")
     return rgb, k, output
-
-
-def cached_image(token, frame_id):
-    if not isinstance(token,str) or len(token)!=32 or any(c not in '0123456789abcdef' for c in token):
-        raise ValueError('invalid image cache token')
-    http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with http.open('http://127.0.0.1:8790/frames/'+token,timeout=3.) as response:
-        if response.headers.get('X-Frame-Id') != frame_id:
-            raise ValueError('cached image frame mismatch')
-        image = response.read(32*1024*1024+1)
-        if len(image)>32*1024*1024:
-            raise ValueError('cached image exceeds size limit')
-        return image
 
 
 def depth_to_xyz(depth, intrinsics):

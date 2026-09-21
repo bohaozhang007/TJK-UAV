@@ -270,6 +270,13 @@ class I7Controller(OwlEgoController):
             if data.get('frame_id') not in self.exposures:
                 raise ApiError('unknown detection exposure')
             observation, raw = self.exposures[data['frame_id']]
+            cached = data.get('image_cache')
+            if cached is not None:
+                if (not isinstance(cached,dict) or cached.get('frame_id') != data['frame_id']
+                        or not isinstance(cached.get('token'),str) or len(cached['token']) != 32
+                        or any(c not in '0123456789abcdef' for c in cached['token'])):
+                    raise ApiError('invalid tracker image cache reference')
+                observation = dict(observation, detector_image_cache=dict(cached))
             if data.get('localization_epoch') != observation['localization_epoch']:
                 raise ApiError('photo exposure epoch mismatch')
             bounds = validate_image_box(raw, data['box'])
@@ -388,6 +395,7 @@ class I7Controller(OwlEgoController):
             try:
                 self.require_baseline()
                 details = autofocus_box(camera, raw, bounds, capture,
+                    image_cache=observation.get('detector_image_cache'),
                     tracker_url=f'http://[{host}]:8791' if ':' in host else f'http://{host}:8791',
                     **self.config['autofocus'], on_photo=save, guard=guard)
             except CameraControlLost:
