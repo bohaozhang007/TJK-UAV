@@ -57,12 +57,12 @@ class Sam2Tracker:
         return (tensor - mean) / std
 
     @staticmethod
-    def _box(masks):
+    def _result(masks):
         mask = (masks[0, 0] > 0).detach().cpu().numpy()
         y, x = np.nonzero(mask)
         if not len(x):
-            return None
-        return [int(x.min()), int(y.min()), int(x.max()) + 1, int(y.max()) + 1]
+            return {"box": None, "mask": mask}
+        return {"box": [int(x.min()), int(y.min()), int(x.max()) + 1, int(y.max()) + 1], "mask": mask}
 
     def init(self, image, box):
         self.reset()
@@ -81,7 +81,7 @@ class Sam2Tracker:
                 _, _, masks = self.predictor.add_new_points_or_box(
                     self.state, frame_idx=0, obj_id=1, box=np.asarray(box, dtype=np.float32))
                 self.predictor.propagate_in_video_preflight(self.state)
-                return self._box(masks)
+                return self._result(masks)
         except Exception:
             self.reset()
             raise
@@ -100,7 +100,7 @@ class Sam2Tracker:
                 result = None
                 for _, _, masks in self.predictor.propagate_in_video(
                         self.state, start_frame_idx=index, max_frame_num_to_track=0):
-                    result = self._box(masks)
+                    result = self._result(masks)
                 # Retain the prompt frame and every recent frame the model can attend to.
                 for outputs in self.state['output_dict_per_obj'].values():
                     history = outputs['non_cond_frame_outputs']

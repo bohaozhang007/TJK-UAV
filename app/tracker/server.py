@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 import socket
 import sys
@@ -15,6 +16,8 @@ from PIL import Image
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from app.tracker.image_log import ImageLog
 
 
 def build_tracker(name, model_root=None, checkpoint=None, device="cuda"):
@@ -95,10 +98,11 @@ class TrackerHandler(BaseHTTPRequestHandler):
         try:
             if self.path == "/init":
                 self.server.initialized = False
-                box = self.server.tracker.init(image, box)
+                result = self.server.tracker.init(image, box)
+                self.server.target_id += 1
                 self.server.initialized = True
             else:
-                box = self.server.tracker.track(image)
+                result = self.server.tracker.track(image)
         except ValueError as exc:
             self.server.initialized = False
             self.server.tracker.reset()
@@ -111,9 +115,15 @@ class TrackerHandler(BaseHTTPRequestHandler):
             self.reply(500, {"ok": False, "error": str(exc)})
             return
         elapsed = time.perf_counter() - started
+        box = result['box']
+        target_id = self.server.target_id
         logging.info("%s image=%sx%s box=%s elapsed_s=%.3f", self.path, image.shape[1], image.shape[0], box, elapsed)
-        self.reply(200, {"ok": True, "box": box, "found": box is not None,
-                         "image_size": [image.shape[1], image.shape[0]], "elapsed_s": elapsed})
+        try:
+            self.reply(200, {"ok": True, "box": box,
+                             "target_id": target_id, "found": box is not None,
+                             "image_size": [image.shape[1], image.shape[0]], "elapsed_s": elapsed})
+        finally:
+            self.server.image_log.submit(image, result, target_id)
 
 
 def main():
@@ -128,6 +138,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     with HTTPServer((args.host, args.port), TrackerHandler) as server:
         server.initialized = False
+        server.target_id = 0
         logging.info("Loading tracker=%s", args.tracker)
         server.tracker = build_tracker(args.tracker, args.model_root, args.checkpoint, args.device)
         try:
@@ -136,6 +147,10 @@ def main():
             logging.info("Local IP (192.168.*.*): %s", ", ".join(addresses) or "not found")
         except OSError:
             logging.info("Local IP unavailable")
+        log_dir = (Path(__file__).resolve().parents[2] / "logs" / "tracker"
+                   / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+        server.image_log = ImageLog(log_dir)
+        logging.info("Tracking images: %s", log_dir)
         try:
             logging.info("Warmup started image=1280x960 (image encoder only)")
             started = time.perf_counter()
@@ -146,7 +161,10 @@ def main():
         except KeyboardInterrupt:
             pass
         finally:
-            server.tracker.reset()
+            try:
+                server.tracker.reset()
+            finally:
+                server.image_log.close()
 
 
 if __name__ == "__main__":

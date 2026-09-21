@@ -1,6 +1,6 @@
 """Save detection overlays outside the HTTP worker."""
 import logging
-from itertools import count
+from datetime import datetime, timedelta
 from queue import SimpleQueue
 from threading import Thread
 
@@ -23,7 +23,7 @@ def save_frame(path, image, detections):
         color = COLORS[index % len(COLORS)]
         x1, y1, x2, y2 = item["box"]
         draw.rectangle((x1, y1, x2, y2), outline=color, width=3)
-        label = f"#{index + 1} {item['confidence']:.3f}"
+        label = item.get("label") or f"#{index + 1} {item['confidence']:.3f}"
         left, top, right, bottom = draw.textbbox((0, 0), label)
         width, height = right - left + 8, bottom - top + 8
         x = max(0, min(int(x1), canvas.width - width))
@@ -38,13 +38,16 @@ class ImageLog:
         self.directory = directory
         self.directory.mkdir(parents=True, exist_ok=False)
         self._queue = SimpleQueue()
-        self._numbers = count(1)
+        self._last_timestamp = datetime.min
         self._worker = Thread(target=self._run, name="detector-image-log", daemon=True)
         self._worker.start()
 
-    def submit(self, image, detections):
+    def submit(self, image, detections, prefix=""):
         # Transfer ownership; callers must not mutate these arrays afterwards.
-        self._queue.put((next(self._numbers), image, detections))
+        timestamp = max(datetime.now(), self._last_timestamp + timedelta(microseconds=1))
+        self._last_timestamp = timestamp
+        filename = prefix + timestamp.strftime("%Y%m%d_%H%M%S_%f") + ".jpg"
+        self._queue.put((filename, image, detections))
 
     def close(self):
         self._queue.put(None)
@@ -55,9 +58,9 @@ class ImageLog:
             job = self._queue.get()
             if job is None:
                 return
-            number, image, detections = job
-            path = self.directory / f"frame_{number:06d}.jpg"
+            filename, image, detections = job
+            path = self.directory / filename
             try:
                 save_frame(path, image, detections)
             except Exception:
-                logging.exception("Failed to save detector frame: %s", path)
+                logging.exception("Failed to save visualization: %s", path)
