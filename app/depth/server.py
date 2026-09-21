@@ -138,8 +138,12 @@ def main():
             logging.info("Local IP (192.168.*.*): %s", ", ".join(ips) or "not found")
         except OSError:
             logging.info("Local IP unavailable")
-        logging.info("Depth ready at http://%s:%s/estimate", args.host, args.port)
         try:
+            logging.info("Warmup started image=1280x960")
+            started = time.perf_counter()
+            server.engine.warmup()
+            logging.info("Warmup finished warmup_s=%.3f", time.perf_counter() - started)
+            logging.info("Depth ready at http://%s:%s/estimate", args.host, args.port)
             server.serve_forever()
         except KeyboardInterrupt:
             pass

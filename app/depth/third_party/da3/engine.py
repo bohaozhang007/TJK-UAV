@@ -31,6 +31,11 @@ class Da3Depth:
         output.intrinsics = intrinsics
         return output
 
+    def warmup(self):
+        image = np.random.default_rng().integers(0, 256, (960, 1280, 3), dtype=np.uint8)
+        intrinsics = np.array([[800., 0., 640.], [0., 800., 480.], [0., 0., 1.]], dtype=np.float32)
+        self.estimate(image, intrinsics)
+
     def estimate(self, image, intrinsics):
         prediction = self.model.inference(
             [image], intrinsics=intrinsics[None], process_res=self.process_res,
