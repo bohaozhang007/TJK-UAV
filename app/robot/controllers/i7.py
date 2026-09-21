@@ -119,9 +119,10 @@ class I7Controller(OwlEgoController):
             settle = self.config['camera']['observation_settle_s']
             after = self.hw.now_s()+settle
             self.hw.frame_after(time.monotonic()+settle, settle+3., guard)
-            self.require_baseline()
+            camera_baseline = self.require_baseline()
             guard()
             result = super().observation(include_image=include_image)
+            result['camera_baseline'] = camera_baseline
             guard()
             if result['timestamp_s'] < after:
                 raise ObservationUnavailable('camera frame precedes stationary settling interval')

@@ -214,7 +214,9 @@ class OwlEgoClient:
                                    f'server_age_s={server_age:.6f}, assembly_s={assembly:.6f}, client_elapsed_s={elapsed:.6f}')
             if not 0 <= sync <= self.observation_sync_max_s:
                 raise MissionError(f'observation unsynchronized: sync_error_s={sync:.6f}, limit_s={self.observation_sync_max_s:.6f}')
-        return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_image_base64'], k, t, data['timestamp_s'])
+        return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_image_base64'], k, t, data['timestamp_s'],
+                           {key:data[key] for key in ('geometry_assumptions', 'camera_baseline', 'capture_timing',
+                               'sync_error_s', 'odom_bracket_span_s') if key in data})
 
     def autofocus_photo(self, observation, box, timings=None):
         raise MissionError('Robot does not support camera autofocus')
@@ -229,7 +231,7 @@ class OwlEgoClient:
         with measure(timings, 'map_decode'):
             return GridMap(data['map'])
 
-    def locate_target(self, observation, mask, timings=None):
+    def locate_target(self, observation, mask, timings=None, diagnostic_prefix=None):
         if observation.epoch != self.epoch:
             raise ControlLost('old exposure epoch')
         current = self.pose()
@@ -238,12 +240,25 @@ class OwlEgoClient:
         if delta > self.tolerances['position_tolerance_cm'] or yaw > self.tolerances['yaw_tolerance_deg']:
             raise MissionError('vehicle moved while awaiting detection')
         grid = self.grid(timings)
+        diagnostics = {} if diagnostic_prefix is not None else None
         with measure(timings, 'mask_projection_and_localization'):
             try:
                 return grid.locate(observation, mask, min_voxels=self.min_target_voxels,
-                                   depth_gap_m=self.target_depth_gap_m)
+                                   depth_gap_m=self.target_depth_gap_m, diagnostics=diagnostics)
             except TargetSurfaceUnavailable as exc:
+                if diagnostics is not None:
+                    diagnostics['error'] = str(exc)
                 raise TargetNotLocalizable(str(exc)) from exc
+            finally:
+                if diagnostics is not None:
+                    from .localization_diagnostics import save_projection
+                    try:
+                        summary = save_projection(diagnostic_prefix, observation, mask, diagnostics)
+                        if timings is not None:
+                            timings['localization_diagnostics'] = summary
+                    except Exception as exc:
+                        if timings is not None:
+                            timings['localization_diagnostics'] = dict(write_error=str(exc))
 
     def points_are_free(self, poses, timings=None):
         grid = self.grid(timings)

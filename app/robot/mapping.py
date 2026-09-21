@@ -8,6 +8,7 @@ class TargetSurfaceUnavailable(ValueError):
 
 class GridMap:
     def __init__(self, data):
+        self.metadata = {k:data[k] for k in ('version', 'stamp_s', 'age_s', 'resolution_m', 'lower', 'upper') if k in data}
         self.resolution = float(data['resolution_m'])
         self.lower = np.asarray(data['lower'], dtype=int)
         self.upper = np.asarray(data['upper'], dtype=int)
@@ -46,13 +47,17 @@ class GridMap:
                 return False
         return True
 
-    def locate(self, obs, mask, *, min_voxels=2, depth_gap_m=.3):
+    def locate(self, obs, mask, *, min_voxels=2, depth_gap_m=.3, diagnostics=None):
         if mask.shape != obs.rgb.shape[:2] or mask.dtype != np.bool_:
             raise ValueError('mask and exposure image do not match')
         world = (self.occupied.astype(float) + .5) * self.resolution * 100
         t = obs.world_from_camera_cm
         camera = (world - t[:3, 3]) @ t[:3, :3]
         visible = camera[:, 2] > 1e-3
+        if diagnostics is not None:
+            diagnostics.update(map=self.metadata, occupied_voxels=len(world),
+                camera_front_voxels=int(visible.sum()), mask_pixels=int(mask.sum()),
+                min_voxels=min_voxels, depth_gap_m=depth_gap_m)
         world, camera = world[visible], camera[visible]
         pixels = camera @ obs.intrinsics.T
         uv = np.rint(pixels[:, :2] / pixels[:, 2:3]).astype(int)
@@ -60,6 +65,9 @@ class GridMap:
         inside = (uv[:, 0] >= 0) & (uv[:, 0] < w) & (uv[:, 1] >= 0) & (uv[:, 1] < h)
         world, camera, uv = world[inside], camera[inside], uv[inside]
         selected = mask[uv[:, 1], uv[:, 0]]
+        if diagnostics is not None:
+            diagnostics.update(image_voxels=len(uv), mask_hit_voxels=int(selected.sum()),
+                uv=uv.copy(), depth_m=camera[:, 2].copy()/100, hits=selected.copy())
         world, camera, uv = world[selected], camera[selected], uv[selected]
         if len(world) < min_voxels:
             raise TargetSurfaceUnavailable(
@@ -71,6 +79,10 @@ class GridMap:
         world, camera = world[order], camera[order]
         groups = np.split(np.arange(len(world)), np.flatnonzero(np.diff(camera[:, 2]) > depth_gap_m*100) + 1)
         groups = [group for group in groups if len(group) >= min_voxels]
+        if diagnostics is not None:
+            diagnostics.update(unique_mask_pixels=len(world), supported_depth_groups=[
+                dict(voxels=len(g), near_m=float(camera[g[0], 2]/100), far_m=float(camera[g[-1], 2]/100))
+                for g in groups])
         if not groups:
             raise TargetSurfaceUnavailable('no supported target surface in mask')
         # Use the foremost supported depth group, not a wall behind the object.
@@ -78,4 +90,6 @@ class GridMap:
         center = np.median(candidates, axis=0)
         point = candidates[np.argmin(np.linalg.norm(candidates-center, axis=1))].copy()
         point[1] *= -1
+        if diagnostics is not None:
+            diagnostics['target_position_cm'] = point.tolist()
         return point.tolist()  # Exactly one actual uninflated voxel centre.

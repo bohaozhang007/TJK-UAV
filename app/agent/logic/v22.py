@@ -302,11 +302,17 @@ class Mission:
         self.transition(State.LOCALIZE)
         new = []
         for index, detection in enumerate(detections, 1):
+            attempts = [0]
+            def locate(timings):
+                attempts[0] += 1
+                prefix = self.output / f'localize_{self.operation_id:03d}_{index:02d}_{attempts[0]:02d}'
+                return self.robot.locate_target(observation, detection['mask'], timings=timings,
+                                               diagnostic_prefix=prefix)
             context = dict(frame_id=observation.frame_id, detection_index=index,
                            confidence=detection['confidence'])
             try:
                 position = self.retry_read('target localization',
-                    lambda t: self.robot.locate_target(observation, detection['mask'], timings=t),
+                    locate,
                     **context)
             except TargetNotLocalizable as exc:
                 self.event('detection_skipped', **context, reason=str(exc))
