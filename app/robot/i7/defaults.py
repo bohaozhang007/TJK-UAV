@@ -23,7 +23,7 @@ DEFAULTS['autofocus'] = dict(tracker_timeout_s=20., reference_width_px=640,
     reference_height_px=360, reference_zoom=1., yaw_deg_per_pixel=.1, pitch_deg_per_pixel=.1,
     max_yaw_step_deg=3., max_pitch_step_deg=3., damping=.7, zoom_step_up=1.25,
     zoom_step_down=.8, target_ratio=.4, center_tolerance=.06, size_tolerance=.08,
-    max_steps=30, timeout_s=180., settle_s=.5, hold_s=1.)
+    stable_frames=2, max_steps=30, timeout_s=180., settle_s=.5, hold_s=1.)
 
 DEFAULTS['bringup'] = dict(startup_grace_s=2., shutdown_poll_interval_s=.1,
     interrupt_shutdown_timeout_s=8., terminate_shutdown_timeout_s=3.,

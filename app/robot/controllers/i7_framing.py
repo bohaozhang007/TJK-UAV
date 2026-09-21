@@ -54,7 +54,7 @@ def autofocus_box(controller, img, box, capture, *,
                   reference_zoom=1.0, yaw_deg_per_pixel=.1, pitch_deg_per_pixel=.1,
                   max_yaw_step_deg=3.0, max_pitch_step_deg=3.0, damping=.7,
                   zoom_step_up=1.25, zoom_step_down=.8,
-                  target_ratio=.4, center_tolerance=.06, size_tolerance=.08,
+                  target_ratio=.4, center_tolerance=.06, size_tolerance=.08, stable_frames=2,
                   max_steps=30, timeout_s=180.0, settle_s=.5, hold_s=1.0, tracker=None, on_photo=None,
                   guard=lambda: None, image_cache=None):
     """Init with the supplied full-size BGR image/xyxy box, then track each frame.
@@ -66,8 +66,8 @@ def autofocus_box(controller, img, box, capture, *,
     bounds = validate_image_box(img, box)
     for name, value, low, high in (
         ('target_ratio', target_ratio, .1, .8),
-        ('center_tolerance', center_tolerance, .005, .1),
-        ('size_tolerance', size_tolerance, .005, .1),
+        ('center_tolerance', center_tolerance, .005, .5),
+        ('size_tolerance', size_tolerance, .005, .5),
         ('timeout_s', timeout_s, 1, 600), ('settle_s', settle_s, .1, 5),
         ('hold_s', hold_s, 0, 10),
         ('tracker_timeout_s', tracker_timeout_s, .1, 180),
@@ -86,6 +86,8 @@ def autofocus_box(controller, img, box, capture, *,
             raise ValueError(f'{name} must be within [{low}, {high}]')
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 200:
         raise ValueError('max_steps must be an integer from 1 to 200')
+    if type(stable_frames) is not int or stable_frames < 1:
+        raise ValueError('stable_frames must be a positive integer')
     h, w = img.shape[:2]
     deadline = time.monotonic() + timeout_s
     history = []
@@ -105,7 +107,7 @@ def autofocus_box(controller, img, box, capture, *,
                     image_width=w, image_height=h, occupancy=ratio,
                     target_ratio=target_ratio, center_error=center, zoom=zoom,
                     center_tolerance=center_tolerance, size_tolerance=size_tolerance,
-                    required_stable_frames=2, tracking_samples=tracking_samples,
+                    required_stable_frames=stable_frames, tracking_samples=tracking_samples,
                     tracker_url=tracker_url, track_count=track_count, actions=history,
                     initial_camera=initial_camera, focus_reached=focus is not None,
                     focus=focus, hold_s=hold_s, restoration=restoration,
@@ -152,7 +154,7 @@ def autofocus_box(controller, img, box, capture, *,
                 box=bounds.tolist(), center_error=list(center),
                 center_error_px=[center[0]*w, center[1]*h], occupancy=ratio,
                 centered=centered, sized=sized, stable_frames=stable, zoom=zoom))
-            if stable >= 2:
+            if stable >= stable_frames:
                 focus = dict(box=bounds.tolist(), center_error=list(center), occupancy=ratio, zoom=zoom)
                 if on_photo is not None:
                     on_photo(frame)

@@ -29,6 +29,7 @@ autofocus:
   center_tolerance: 0.12 # 0.06
   size_tolerance: 0.16 # 0.08 
   max_steps: 30
+  stable_frames: 2
   timeout_s: 180.0
   max_yaw_step_deg: 3.0
   max_pitch_step_deg: 3.0
