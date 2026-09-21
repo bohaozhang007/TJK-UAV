@@ -7,6 +7,10 @@ t1 - Tracker
 cd ~\Desktop\project\TJK-UAV
 .\app\run_tracker.bat
 
+t2 - Depth
+cd ~\Desktop\project\TJK-UAV
+.\app\run_depth.bat
+
 uav: OWL v22
 # Set photography.autofocus: false in app/agent/config/v22.yaml.
 t0 - bridge
