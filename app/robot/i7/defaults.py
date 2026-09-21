@@ -5,7 +5,8 @@ from app.robot.owl_ego.defaults import DEFAULTS as EGO_DEFAULTS
 DEFAULTS = deepcopy(EGO_DEFAULTS)
 DEFAULTS['namespace'] = '/i7_ego_v22'
 DEFAULTS['control'].update(mavros_frame_profile='standard_enu', world_frame='world')
-DEFAULTS['hardware'].update(camera_optical_frame='i7_camera_optical')
+DEFAULTS['hardware'].update(camera_optical_frame='i7_camera_optical', sync_max_s=.12,
+                            odom_bracket_max_s=.12, rgb_max_age_s=.8)
 DEFAULTS['topics'].update(odom='/i7_v22/odometry', rgb='/i7_v22/image_raw',
                          camera_info='/i7_v22/camera_info', cloud='/laserMapping/cloud_registered',
                          bridge_status='/i7_ego_v22/status', command='/i7_ego_v22/command',

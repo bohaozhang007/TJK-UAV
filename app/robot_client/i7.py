@@ -11,6 +11,9 @@ from .base import MissionError
 
 
 class I7Client(OwlEgoClient):
+    observation_max_age_s = 1.
+    observation_sync_max_s = .12
+
     def rpc(self, method, path, data=None, timeout=1., timings=None):
         if path == '/v21/observation':
             timeout = max(timeout, 25.)
@@ -18,6 +21,9 @@ class I7Client(OwlEgoClient):
             timeout = max(timeout, 15.)
         result = super().rpc(method, path, data, timeout, timings)
         if path == '/v21/observation':
+            span = result.get('odom_bracket_span_s')
+            if type(span) not in (int, float) or not math.isfinite(span) or not 0 <= span <= .12:
+                raise MissionError('i7 observation requires an odometry bracket no wider than 120 ms')
             timing = result.get('capture_timing', {})
             if timing.get('source') != 'stationary_receipt' or timing.get('stationary_checked') is not True:
                 raise MissionError('i7 observation lacks stationary receipt-time verification')

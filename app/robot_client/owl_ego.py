@@ -34,6 +34,8 @@ class HttpError(MissionError):
 
 
 class OwlEgoClient:
+    observation_max_age_s = .5
+    observation_sync_max_s = .05
     def __init__(self, *, min_target_voxels, target_depth_gap_m):
         self.min_target_voxels = min_target_voxels
         self.target_depth_gap_m = target_depth_gap_m
@@ -206,12 +208,12 @@ class OwlEgoClient:
             if timings is not None:
                 timings['observation'] = dict(frame_id=data['frame_id'], server_age_s=server_age,
                     server_assembly_elapsed_s=assembly, client_elapsed_s=elapsed,
-                    age_upper_bound_s=age, sync_error_s=sync, max_age_s=.5, max_sync_s=.05)
-            if server_age < 0 or not 0 <= age <= .5:
-                raise MissionError(f'observation stale: age_upper_bound_s={age:.6f}, limit_s=0.500000, '
+                    age_upper_bound_s=age, sync_error_s=sync, max_age_s=self.observation_max_age_s, max_sync_s=self.observation_sync_max_s)
+            if server_age < 0 or not 0 <= age <= self.observation_max_age_s:
+                raise MissionError(f'observation stale: age_upper_bound_s={age:.6f}, limit_s={self.observation_max_age_s:.6f}, '
                                    f'server_age_s={server_age:.6f}, assembly_s={assembly:.6f}, client_elapsed_s={elapsed:.6f}')
-            if not 0 <= sync <= .05:
-                raise MissionError(f'observation unsynchronized: sync_error_s={sync:.6f}, limit_s=0.050000')
+            if not 0 <= sync <= self.observation_sync_max_s:
+                raise MissionError(f'observation unsynchronized: sync_error_s={sync:.6f}, limit_s={self.observation_sync_max_s:.6f}')
         return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_image_base64'], k, t, data['timestamp_s'])
 
     def autofocus_photo(self, observation, box, timings=None):

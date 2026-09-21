@@ -34,12 +34,14 @@ def rotation(q):
                      [2*(x*z-y*w),2*(y*z+x*w),1-2*(x*x+y*y)]])
 
 
-def interpolate_pose(history, stamp, max_sync):
+def interpolate_pose(history, stamp, max_sync, max_span=None):
     before = [p for p in history if p['stamp'] <= stamp]
     after = [p for p in history if p['stamp'] >= stamp]
     if not before or not after:
         raise ObservationUnavailable('exposure not bracketed by odometry')
     a,b = before[-1],after[0]
+    if max_span is not None and b['stamp']-a['stamp'] > max_span:
+        raise ObservationUnavailable('odometry interpolation bracket exceeds limit')
     sync = max(stamp-a['stamp'],b['stamp']-stamp)
     if a['frame'] != b['frame'] or a['body'] != b['body']:
         raise ValueError('odometry exposure frames mismatch')
@@ -165,7 +167,9 @@ def build_observation(hw, *, include_image=True, timings=None):
         raise ObservationUnavailable(f'stale RGB acquisition timestamp: age_s={age:.6f}')
     with measure(timings, 'geometry'):
         k,d,rectified,geometry = camera_intrinsics(config['hardware'],m,info)
-        world_body,sync,world,body = interpolate_pose(hist,stamp,config['hardware']['sync_max_s'])
+        world_body,sync,world,body = interpolate_pose(hist,stamp,config['hardware']['sync_max_s'],
+                                                   config['hardware'].get('odom_bracket_max_s'))
+        bracket_span = min(p['stamp'] for p in hist if p['stamp'] >= stamp)-max(p['stamp'] for p in hist if p['stamp'] <= stamp)
         mode = config['hardware'].get('extrinsics_mode','tf')
         body_camera = np.eye(4)
         if mode == 'body_coincident_fixed':
@@ -202,7 +206,7 @@ def build_observation(hw, *, include_image=True, timings=None):
             bgr = hw.rgb_array(m)
         with measure(timings, 'rectify'):
             if d is not None:
-                bgr = cv2.undistort(bgr,k,d,None,k)
+                bgr = hw.rectify_rgb(bgr,k,d)
         # Keep rectified pixels and intrinsics at the camera's native resolution.
         with measure(timings, 'png_encode'):
             success,encoded = cv2.imencode('.png',bgr,[cv2.IMWRITE_PNG_COMPRESSION,1])
@@ -230,7 +234,7 @@ def build_observation(hw, *, include_image=True, timings=None):
                                       else 'configured_sensor_geometry' if mode == 'sensor_geometry' else 'tf')
     quality = 'approximate' if not rectified or mode != 'tf' else 'calibrated'
     result = dict(ok=True,calibration_quality=quality,geometry_assumptions=geometry,frame_id=epoch+':'+str(m.header.stamp.to_nsec()),timestamp_s=stamp,
-                age_s=age,assembly_elapsed_s=assembly_elapsed,sync_error_s=sync,
+                age_s=age,assembly_elapsed_s=assembly_elapsed,sync_error_s=sync,odom_bracket_span_s=bracket_span,
                 localization_epoch=epoch,world_frame=world,pose=public_pose([*world_body[:3,3],yaw]),
                 image_size=[m.width,m.height],rectified=rectified,
                 intrinsics=k.tolist(),world_from_camera_optical_cm=transform.tolist())
