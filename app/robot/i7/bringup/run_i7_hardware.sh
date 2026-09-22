@@ -220,6 +220,11 @@ if [[ "$STACK" == true ]]; then
   }
 
   start_service sensors
+  echo 'Restoring camera to calibrated baseline...'
+  if ! run_probe python3 -m app.robot.i7.bringup.reset_camera; then
+    echo 'Camera reset failed; bridge/server were not started.' >&2
+    exit 1
+  fi
   ready=false
   for attempt in 1 2 3; do
     echo "Live deployment check ${attempt}/3..."
