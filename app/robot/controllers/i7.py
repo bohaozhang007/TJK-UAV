@@ -4,6 +4,7 @@ from collections import OrderedDict
 import copy
 import math
 import logging
+from pathlib import Path
 import threading
 import time
 import uuid
@@ -13,6 +14,7 @@ import numpy as np
 
 from app.robot.config_loader import load_robot_config
 from app.robot.i7.calibration import validate
+from app.robot.i7.autofocus_trace import AutofocusTrace
 from app.robot.hardware.i7 import I7Hardware
 from app.robot.hardware.k40t import K40TClient
 from app.robot.hardware.tracker_client import validate_image_box
@@ -391,6 +393,10 @@ class I7Controller(OwlEgoController):
 
     def run_photo(self, job, observation, raw, bounds, host):
         sid, epoch = job['session_id'], observation['localization_epoch']
+        trace = AutofocusTrace(Path('logs/i7_v22/autofocus')/(job['task_id']+'.jsonl'), job['task_id'])
+        trace.emit('job_started', detection_frame_id=observation['frame_id'], box=bounds.tolist(),
+                   autofocus_config=self.config['autofocus'],
+                   angle_tolerance_deg=math.degrees(self.config['control']['yaw_tolerance_rad']))
         lost = threading.Event()
         finished = threading.Event()
         interruption = []
@@ -446,27 +452,36 @@ class I7Controller(OwlEgoController):
                 except Exception:
                     return
         controller = self
+        def camera_call(name, *args):
+            started = time.monotonic()
+            trace.emit('camera_call_started', command=name, arguments=args)
+            try:
+                guard()
+                feedback = getattr(controller.camera, name)(*args)
+            except Exception as exc:
+                trace.emit('camera_call_failed', command=name, elapsed_s=time.monotonic()-started,
+                           error_type=type(exc).__name__, error=str(exc))
+                raise
+            trace.emit('camera_call_finished', command=name, elapsed_s=time.monotonic()-started,
+                       feedback=feedback)
+            return feedback
         class Camera:
             def get_gimbal(self):
-                guard()
-                return controller.camera.get_gimbal()
+                return camera_call('get_gimbal')
             def get_zoom(self):
-                guard()
-                return controller.camera.get_zoom()
+                return camera_call('get_zoom')
             def zoom(self, ratio):
-                guard()
-                return controller.camera.set_zoom(ratio)
+                return camera_call('set_zoom', ratio)
             def gimbal_yaw(self, angle):
-                guard()
-                return controller.camera.gimbal_yaw(angle)
+                return camera_call('gimbal_yaw', angle)
             def gimbal_pitch(self, angle):
-                guard()
-                return controller.camera.gimbal_pitch(angle)
+                return camera_call('gimbal_pitch', angle)
         camera = Camera()
         photo = {}
         result = dict(status='failed', error='camera worker interrupted')
         details = None
         self.camera.guard = guard
+        self.camera.trace_sink = lambda event, **fields: trace.emit('k40t_'+event, **fields)
         def save(frame):
             guard()
             ok, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -477,13 +492,23 @@ class I7Controller(OwlEgoController):
         monitor_thread.start()
         try:
             guard()
-            capture = lambda after, timeout: self.hw.frame_after(after, timeout, guard)
+            def capture(after, timeout):
+                diagnostics = {}
+                trace.emit('capture_started', requested_after_monotonic_s=after, timeout_s=timeout)
+                try:
+                    frame = self.hw.frame_after(after, timeout, guard, diagnostics=diagnostics)
+                except Exception as exc:
+                    trace.emit('capture_failed', error_type=type(exc).__name__, error=str(exc))
+                    raise
+                capture.last_diagnostics = diagnostics
+                trace.emit('capture_finished', **diagnostics)
+                return frame
             try:
                 self.require_baseline()
                 details = autofocus_box(camera, raw, bounds, capture,
                     image_cache=observation.get('detector_image_cache'),
                     tracker_url=f'http://[{host}]:8791' if ':' in host else f'http://{host}:8791',
-                    **self.config['autofocus'], on_photo=save, guard=guard)
+                    **self.config['autofocus'], on_photo=save, guard=guard, on_trace=trace.emit)
             except CameraControlLost:
                 raise
             except Exception as exc:
@@ -516,6 +541,8 @@ class I7Controller(OwlEgoController):
                 except Exception as restore_error:
                     result['restore_error'] = str(restore_error)
         finally:
+            result['trace_file'] = str(trace.path)
+            trace.emit('job_finished', **{k: v for k, v in result.items() if k != 'image_base64'})
             finished.set()
             monitor_thread.join(timeout=.2)
             with recovery_lock:
@@ -524,10 +551,12 @@ class I7Controller(OwlEgoController):
                 result['stop_recoveries'] = copy.deepcopy(recoveries)
                 result['stop_recovery_limits'] = dict(per_wait_s=STOP_RECOVERY_TIMEOUT_S, total_s=STOP_RECOVERY_TOTAL_S)
             self.camera.guard = lambda: None
+            self.camera.trace_sink = None
             with self.lock:
                 job.update(result)
                 self.photo_active = None
                 self.camera_lock.release()
+            trace.close()
 
     def close(self):
         self.camera_shutdown.set()

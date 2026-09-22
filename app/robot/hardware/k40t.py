@@ -60,6 +60,7 @@ class K40TClient:
         self._sequence = secrets.randbelow(256)
         self._last_gimbal = None
         self._logger = None
+        self.trace_sink = None
         if log_path is not None:
             path = Path(log_path).expanduser().resolve()
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,6 +137,9 @@ class K40TClient:
         request_id = secrets.token_hex(8)
         started = time.monotonic()
         def log(event, **fields):
+            if self.trace_sink is not None:
+                self.trace_sink(event, request_id=request_id, command=f"0x{message_id:06x}",
+                                elapsed_s=time.monotonic()-started, target=target, **fields)
             if self._logger is not None:
                 self._logger.info(json.dumps(dict(
                     time_unix=time.time(), elapsed_s=round(time.monotonic() - started, 6),

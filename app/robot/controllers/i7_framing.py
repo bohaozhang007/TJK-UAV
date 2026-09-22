@@ -57,7 +57,7 @@ def autofocus_box(controller, img, box, capture, *,
                   zoom_step_up=1.25, zoom_step_down=.8,
                   target_ratio=.4, center_tolerance=.06, size_tolerance=.08, stable_frames=2,
                   max_steps=30, timeout_s=180.0, settle_s=.5, hold_s=1.0, tracker=None, on_photo=None,
-                  guard=lambda: None, image_cache=None):
+                  guard=lambda: None, image_cache=None, on_trace=lambda event, **fields: None):
     """Init with the supplied full-size BGR image/xyxy box, then track each frame.
 
     Gains are degrees/pixel at the reference resolution and zoom, following
@@ -104,6 +104,7 @@ def autofocus_box(controller, img, box, capture, *,
     tracking_samples = []
 
     def result(ok, message):
+        on_trace('framing_finished', ok=ok, message=message, track_count=track_count)
         return dict(ok=ok, message=message, box=bounds.tolist(), box_confirmed=box_confirmed,
                     image_width=w, image_height=h, occupancy=ratio,
                     target_ratio=target_ratio, center_error=center, zoom=zoom,
@@ -138,10 +139,22 @@ def autofocus_box(controller, img, box, capture, *,
             if remaining <= settle_s:
                 return result(False, 'Automatic framing timed out')
             box_confirmed = False
+            capture_started = time.monotonic()
             frame = capture(time.monotonic() + settle_s, min(3.0, remaining))
+            capture_finished = time.monotonic()
+            frame_timing = dict(getattr(capture, 'last_diagnostics', {}))
             if frame.shape[:2] != (h, w):
                 raise RuntimeError('Live image dimensions differ from img; pass a native-resolution image')
-            bounds = validate_image_box(frame, tracker.track(frame, timeout_s=min(tracker_timeout_s, budget())))
+            tracking_started = time.monotonic()
+            on_trace('tracking_started', frame=track_count+1, frame_timing=frame_timing)
+            try:
+                bounds = validate_image_box(frame, tracker.track(frame, timeout_s=min(tracker_timeout_s, budget())))
+            except Exception as exc:
+                on_trace('tracking_failed', frame=track_count+1, frame_timing=frame_timing,
+                         elapsed_s=time.monotonic()-tracking_started,
+                         error_type=type(exc).__name__, error=str(exc))
+                raise
+            tracking_finished = time.monotonic()
             track_count += 1
             budget()
             box_confirmed = True
@@ -154,7 +167,11 @@ def autofocus_box(controller, img, box, capture, *,
             tracking_samples.append(dict(frame=track_count, elapsed_s=time.monotonic()-(deadline-timeout_s),
                 box=bounds.tolist(), center_error=list(center),
                 center_error_px=[center[0]*w, center[1]*h], occupancy=ratio,
-                centered=centered, sized=sized, stable_frames=stable, zoom=zoom))
+                centered=centered, sized=sized, stable_frames=stable, zoom=zoom,
+                capture_started_monotonic_s=capture_started, capture_finished_monotonic_s=capture_finished,
+                tracking_started_monotonic_s=tracking_started, tracking_finished_monotonic_s=tracking_finished,
+                frame_timing=frame_timing))
+            on_trace('tracking_sample', **tracking_samples[-1])
             if stable >= stable_frames:
                 focus = dict(box=bounds.tolist(), center_error=list(center), occupancy=ratio, zoom=zoom)
                 if on_photo is not None:
@@ -186,22 +203,33 @@ def autofocus_box(controller, img, box, capture, *,
                 if abs(delta) < .02:
                     raise RuntimeError('Required correction is below reliable gimbal resolution')
                 name = 'gimbal_yaw' if axis == 0 else 'gimbal_pitch'
-                entry = dict(command=name, value=delta, confirmed=False)
+                entry = dict(command=name, value=delta, confirmed=False, source_frame=track_count,
+                             frame_timing=frame_timing, zoom_used=zoom,
+                             started_monotonic_s=time.monotonic())
                 history.append(entry)
+                on_trace('action_started', **entry)
                 box_confirmed = False
                 feedback = getattr(controller, name)(delta)
                 key = 'yaw_deg' if axis == 0 else 'pitch_deg'
-                entry.update(confirmed=True, actual_delta=feedback[key] - feedback['start'][key])
+                entry.update(confirmed=True, actual_delta=feedback[key] - feedback['start'][key],
+                             finished_monotonic_s=time.monotonic(), feedback=feedback)
+                on_trace('action_finished', **entry)
             else:
                 desired = float(np.clip(zoom * target_ratio / ratio, zoom * zoom_step_down, zoom * zoom_step_up))
                 desired = round(float(np.clip(desired, 1, 160)), 1)
                 if abs(desired - zoom) < .05:
                     raise RuntimeError('Target size cannot be reached at the available zoom range/resolution')
-                entry = dict(command='zoom', value=desired, confirmed=False)
+                entry = dict(command='zoom', value=desired, confirmed=False, source_frame=track_count,
+                             frame_timing=frame_timing, zoom_used=zoom,
+                             started_monotonic_s=time.monotonic())
                 history.append(entry)
+                on_trace('action_started', **entry)
                 box_confirmed = False
                 zoom = float(controller.zoom(desired)['zoom'])
                 entry['confirmed'] = True
+                entry['finished_monotonic_s'] = time.monotonic()
+                entry['actual_zoom'] = zoom
+                on_trace('action_finished', **entry)
     except KeyboardInterrupt:
         return result(False, 'Automatic framing interrupted; no further camera commands will be sent; camera restoration may be incomplete')
     except Exception as exc:
