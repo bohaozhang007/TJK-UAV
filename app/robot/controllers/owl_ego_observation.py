@@ -215,10 +215,12 @@ def build_observation(hw, *, include_image=True, timings=None, retain_image=None
         if retain_image is not None:
             retain_image(bgr.copy())
         # Preserve native image dimensions and pixel coordinates.
-        with measure(timings, 'png_encode'):
-            success,encoded = cv2.imencode('.png',bgr,[cv2.IMWRITE_PNG_COMPRESSION,1])
+        with measure(timings, 'jpeg_encode'):
+            success,encoded = cv2.imencode('.jpg',bgr,[cv2.IMWRITE_JPEG_QUALITY,95])
             if not success:
-                raise ValueError('PNG encoding failed')
+                raise ValueError('JPEG encoding failed')
+        if timings is not None:
+            timings['image_encoding'] = dict(format='jpeg', quality=95, bytes=int(encoded.nbytes))
         with measure(timings, 'base64_encode'):
             image_base64 = base64.b64encode(encoded).decode('ascii')
     transform = world_body@body_camera

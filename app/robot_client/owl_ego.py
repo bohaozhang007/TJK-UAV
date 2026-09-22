@@ -216,17 +216,15 @@ class OwlEgoClient:
             server_age = float(data['age_s'])
             assembly = float(data['assembly_elapsed_s'])
             sync = float(data['sync_error_s'])
-            if not all(math.isfinite(v) for v in (server_age, assembly, sync)) or not 0 <= assembly <= elapsed:
+            if not all(math.isfinite(v) for v in (server_age, assembly, sync)) or assembly < 0:
                 raise MissionError('invalid observation timing metadata')
-            # Request/response overhead remains a conservative age allowance.
-            age = server_age + elapsed - assembly
+            # Use server-reported age directly; client elapsed time is diagnostic only.
             if timings is not None:
                 timings['observation'] = dict(frame_id=data['frame_id'], server_age_s=server_age,
                     server_assembly_elapsed_s=assembly, client_elapsed_s=elapsed,
-                    age_upper_bound_s=age, sync_error_s=sync, max_age_s=self.observation_max_age_s, max_sync_s=self.observation_sync_max_s)
-            if server_age < 0 or not 0 <= age <= self.observation_max_age_s:
-                raise MissionError(f'observation stale: age_upper_bound_s={age:.6f}, limit_s={self.observation_max_age_s:.6f}, '
-                                   f'server_age_s={server_age:.6f}, assembly_s={assembly:.6f}, client_elapsed_s={elapsed:.6f}')
+                    age_source='server', sync_error_s=sync, max_age_s=self.observation_max_age_s, max_sync_s=self.observation_sync_max_s)
+            if not 0 <= server_age <= self.observation_max_age_s:
+                raise MissionError(f'observation stale: server_age_s={server_age:.6f}, limit_s={self.observation_max_age_s:.6f}')
             if not 0 <= sync <= self.observation_sync_max_s:
                 raise MissionError(f'observation unsynchronized: sync_error_s={sync:.6f}, limit_s={self.observation_sync_max_s:.6f}')
         return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_image_base64'], k, t, data['timestamp_s'],
