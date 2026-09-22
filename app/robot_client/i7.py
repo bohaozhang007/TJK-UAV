@@ -11,7 +11,6 @@ from .base import MissionError
 
 
 class I7Client(OwlEgoClient):
-    observation_max_age_s = 1.
     observation_sync_max_s = .12
 
     def diagnostic_cloud(self, observation):

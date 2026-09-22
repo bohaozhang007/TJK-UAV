@@ -36,7 +36,7 @@ class Sensors:
         received_ros = self.ros.Time.now().to_sec()
         stamp = message.header.stamp.to_sec()
         diagnostic = dict(stamp_s=stamp, received_ros_s=received_ros,
-            age_s=received_ros-stamp, timeout_s=self.c['control']['odom_timeout_s'],
+            age_s=received_ros-stamp, timeout_s=self.c['control']['odom_max_age_s'],
             receive_gap_s=None if self.last_odom_received is None else received-self.last_odom_received,
             stamp_gap_s=None if self.previous is None else stamp-self.previous[0])
         self.last_odom_received = received
@@ -49,7 +49,7 @@ class Sensors:
             if not np.isfinite([p.x, p.y, p.z, *quaternion]).all() or abs(np.linalg.norm(quaternion)-1) > .02:
                 raise ValueError('invalid FAST-LIO2 pose')
             stamp = message.header.stamp.to_sec()
-            if not 0 <= self.ros.Time.now().to_sec()-stamp <= self.c['control']['odom_timeout_s']:
+            if not 0 <= self.ros.Time.now().to_sec()-stamp <= self.c['control']['odom_max_age_s']:
                 raise ValueError('stale FAST-LIO2 pose')
             # Vendor odometry already uses the rotated Livox IMU body frame.
             world_body = quaternion_matrix(quaternion)

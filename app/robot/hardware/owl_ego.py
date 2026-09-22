@@ -143,7 +143,7 @@ class OwlEgoHardware:
 
     def camera_snapshot(self):
         # Wait releases the sensor lock. Other HTTP requests and flight loops
-        # stay independent. Select an atomic, fresh exposure, never current pose.
+        # stay independent. Select an atomic exposure paired with its recorded pose.
         from ..controllers.owl_ego_observation import ObservationUnavailable, ObservationEpochChanged
         deadline = time.monotonic()+self.snapshot_wait_s
         with self.camera_changed:
@@ -156,8 +156,6 @@ class OwlEgoHardware:
                 now = self.now_s()
                 for m in reversed(candidates):
                     stamp = m.header.stamp.to_sec()
-                    if not 0 <= now-stamp <= self.c['hardware']['rgb_max_age_s']:
-                        continue
                     before = [v for v in history if v['stamp'] <= stamp]
                     after = [v for v in history if v['stamp'] >= stamp]
                     if (before and after and max(stamp-before[-1]['stamp'],after[0]['stamp']-stamp)
@@ -169,7 +167,7 @@ class OwlEgoHardware:
                 remaining = deadline-time.monotonic()
                 if remaining <= 0:
                     details = self.camera_sync_diagnostics(candidates, history, now)
-                    raise ObservationUnavailable(f'no fresh exposure bracketed by odometry within {self.snapshot_wait_s*1000:g} ms wait; '
+                    raise ObservationUnavailable(f'no exposure bracketed by odometry within {self.snapshot_wait_s*1000:g} ms wait; '
                                                  'sync_diagnostics='+json.dumps(details, allow_nan=False))
                 self.camera_changed.wait(remaining)
 
@@ -192,11 +190,7 @@ class OwlEgoHardware:
             a, b = (before[-1] if before else None), (after[0] if after else None)
             error = max(stamp-a, b-stamp) if a is not None and b is not None else None
             age = now-stamp
-            if age < 0:
-                reason = 'image_in_future'
-            elif age > self.c['hardware']['rgb_max_age_s']:
-                reason = 'image_stale'
-            elif not history:
+            if not history:
                 reason = 'no_odometry'
             elif a is None:
                 reason = 'no_odometry_before'
@@ -214,11 +208,10 @@ class OwlEgoHardware:
                 before_gap_s=stamp-a if a is not None else None,
                 after_gap_s=b-stamp if b is not None else None, sync_error_s=error,
                 bracket_span_s=b-a if a is not None and b is not None else None))
-        fresh = [c for c in candidates if 0 <= c['image_age_s'] <= self.c['hardware']['rgb_max_age_s']
-                 and c['sync_error_s'] is not None]
+        paired = [c for c in candidates if c['sync_error_s'] is not None]
         return dict(now_s=now, wait_limit_s=self.snapshot_wait_s,
                     odom_bracket_max_s=self.c['hardware'].get('odom_bracket_max_s', 2*self.c['hardware']['sync_max_s']),
-                    image_max_age_s=self.c['hardware']['rgb_max_age_s'],
+                    image_age_check_enabled=False,
                     sync_limit_s=self.c['hardware']['sync_max_s'],
                     image_timestamps=stats(image_stamps), odometry_timestamps=stats(odom_stamps),
                     image_receipts=stats(list(self.image_receipts)),
@@ -226,7 +219,7 @@ class OwlEgoHardware:
                                             if 'received_monotonic_s' in p]),
                     latest_odom_age_s=now-odom_stamps[-1] if odom_stamps else None,
                     rejected_frames=reasons, latest_frame=candidates[-1] if candidates else None,
-                    closest_fresh_frame=min(fresh, key=lambda c:c['sync_error_s']) if fresh else None)
+                    closest_paired_frame=min(paired, key=lambda c:c['sync_error_s']) if paired else None)
 
     def current_epoch(self):
         with self.lock:

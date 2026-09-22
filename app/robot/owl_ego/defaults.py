@@ -23,6 +23,7 @@ DEFAULTS = {
         "mavros_frame_profile": "owl_vendor_world",
         "control_hz": 50,
         "odom_timeout_s": 0.5,
+        "odom_max_age_s": 0.5,
         "state_timeout_s": 2,
         "planner_timeout_s": 1,
         "planning_timeout_s": 10,

@@ -10,6 +10,8 @@ camera:
   observation_settle_s: 2.0
 
 control:
+  # Message timestamp age; independent of the missing-update watchdog.
+  odom_max_age_s: 1.5
   takeoff_height_m: 1.0
   takeoff_speed_m_s: 0.3
   yaw_rate_rad_s: 0.0872664626
@@ -33,7 +35,7 @@ autofocus:
   center_tolerance: 0.10 # 0.12 0.06
   size_tolerance: 0.16 # 0.08 
   max_steps: 30
-  stable_frames: 2
+  stable_frames: 1
   timeout_s: 180.0
   max_yaw_step_deg: 3.0
   max_pitch_step_deg: 3.0

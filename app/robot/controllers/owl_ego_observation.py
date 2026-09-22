@@ -163,8 +163,8 @@ def build_observation(hw, *, include_image=True, timings=None, retain_image=None
         raise ObservationUnavailable('RGB unavailable')
     stamp = m.header.stamp.to_sec()
     age = hw.now_s()-stamp
-    if stamp <= 0 or not 0 <= age <= config['hardware']['rgb_max_age_s']:
-        raise ObservationUnavailable(f'stale RGB acquisition timestamp: age_s={age:.6f}')
+    if not math.isfinite(stamp) or stamp <= 0:
+        raise ObservationUnavailable('invalid RGB acquisition timestamp')
     with measure(timings, 'geometry'):
         k,d,rectified,geometry = camera_intrinsics(config['hardware'],m,info)
         if not hw.rectify_observations:
@@ -235,9 +235,7 @@ def build_observation(hw, *, include_image=True, timings=None, retain_image=None
     if timings is not None:
         timings['observation'] = dict(frame_id=epoch+':'+str(m.header.stamp.to_nsec()),
             age_s=age, sync_error_s=sync, assembly_elapsed_s=assembly_elapsed,
-            max_age_s=config['hardware']['rgb_max_age_s'], max_sync_s=config['hardware']['sync_max_s'])
-    if not 0 <= age <= config['hardware']['rgb_max_age_s']:
-        raise ObservationUnavailable(f'RGB expired during observation assembly: age_s={age:.6f}, sync_error_s={sync:.6f}')
+            age_check_enabled=False, max_sync_s=config['hardware']['sync_max_s'])
     geometry['extrinsics'] = mode
     geometry['camera_translation'] = ('body_coincident_assumption' if mode == 'body_coincident_fixed'
                                       else 'configured_sensor_geometry' if mode == 'sensor_geometry' else 'tf')

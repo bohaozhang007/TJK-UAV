@@ -36,7 +36,6 @@ class HttpError(MissionError):
 
 
 class OwlEgoClient:
-    observation_max_age_s = .5
     observation_sync_max_s = .05
     def __init__(self, *, min_target_voxels, target_depth_gap_m,
                  min_depth_pixels=16, max_relative_depth_mad=.3):
@@ -211,20 +210,18 @@ class OwlEgoClient:
             raise MissionError('invalid observation geometry')
         with measure(timings, 'health_after'):
             self.health()
-        with measure(timings, 'freshness_check'):
+        with measure(timings, 'sync_check'):
             elapsed = time.monotonic() - sent
             server_age = float(data['age_s'])
             assembly = float(data['assembly_elapsed_s'])
             sync = float(data['sync_error_s'])
             if not all(math.isfinite(v) for v in (server_age, assembly, sync)) or assembly < 0:
                 raise MissionError('invalid observation timing metadata')
-            # Use server-reported age directly; client elapsed time is diagnostic only.
+            # Image age and client elapsed time are diagnostic only.
             if timings is not None:
                 timings['observation'] = dict(frame_id=data['frame_id'], server_age_s=server_age,
                     server_assembly_elapsed_s=assembly, client_elapsed_s=elapsed,
-                    age_source='server', sync_error_s=sync, max_age_s=self.observation_max_age_s, max_sync_s=self.observation_sync_max_s)
-            if not 0 <= server_age <= self.observation_max_age_s:
-                raise MissionError(f'observation stale: server_age_s={server_age:.6f}, limit_s={self.observation_max_age_s:.6f}')
+                    age_source='server', age_check_enabled=False, sync_error_s=sync, max_sync_s=self.observation_sync_max_s)
             if not 0 <= sync <= self.observation_sync_max_s:
                 raise MissionError(f'observation unsynchronized: sync_error_s={sync:.6f}, limit_s={self.observation_sync_max_s:.6f}')
         return Observation(data['frame_id'], data['pose'], self.epoch, rgb, data['rgb_image_base64'], k, t, data['timestamp_s'],

@@ -122,11 +122,11 @@ class Node:
         received = time.monotonic()
         received_ros = rospy.Time.now().to_sec()
         timing = dict(stamp_s=m.header.stamp.to_sec(), received_ros_s=received_ros,
-            age_s=received_ros-m.header.stamp.to_sec(), timeout_s=self.c['control']['odom_timeout_s'],
+            age_s=received_ros-m.header.stamp.to_sec(), timeout_s=self.c['control']['odom_max_age_s'],
             receive_gap_s=None if self.last_odom_received is None else received-self.last_odom_received)
         self.last_odom_received = received
         self.odom_timing = timing
-        if not 0 <= timing['age_s'] <= self.c['control']['odom_timeout_s']:
+        if not 0 <= timing['age_s'] <= self.c['control']['odom_max_age_s']:
             rospy.logwarn_throttle(1, 'bridge_odometry_rejected '+json.dumps(timing))
             return
         p,q = m.pose.pose.position,m.pose.pose.orientation

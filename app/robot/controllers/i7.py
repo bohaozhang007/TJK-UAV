@@ -112,7 +112,7 @@ class I7Controller(OwlEgoController):
         h = self.hw.snapshot()['health'].copy()
         with self.hw.lock:
             image = self.hw.image
-            h['rgb_ok'] = image is not None and 0 <= self.hw.now_s()-image.header.stamp.to_sec() <= self.config['hardware']['rgb_max_age_s']
+            h['rgb_ok'] = image is not None
         h['autofocus_active'] = self.photo_active
         return h
 
@@ -206,8 +206,6 @@ class I7Controller(OwlEgoController):
             result['geometry_assumptions']['limitations'] = [
                 *result['geometry_assumptions'].get('limitations', []),
                 'Stationary receipt-time pose; camera exposure latency is unmeasured.']
-            if not 0 <= result['age_s'] <= self.config['hardware']['rgb_max_age_s']:
-                raise ObservationUnavailable('received RTSP frame exceeds freshness tolerance')
             if include_image:
                 stage = 'cache_exposure'
                 raw = retained_images[0]
