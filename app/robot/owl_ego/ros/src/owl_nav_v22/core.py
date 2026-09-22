@@ -113,7 +113,7 @@ class FlightCore:
         self.landing = False
 
     def fresh(self, now):
-        return (self.pose is not None and now - self.odom_at <= self.c['odom_timeout_s']
+        return (self.pose is not None and now - self.odom_at <= self.c['sensor_timeout_s']
                 and now - self.state_at <= self.c['state_timeout_s'] and self.connected)
 
     def planner_state(self, now):
@@ -139,7 +139,7 @@ class FlightCore:
                     control_ready=self.initialized and self.enabled and self.fresh(now)
                     and not self.manual and not self.landing and self.mode == 'OFFBOARD'
                     and self.session is not None and self.armed and self.airborne,
-                    odom_ok=self.pose is not None and now-self.odom_at <= self.c['odom_timeout_s'],
+                    odom_ok=self.pose is not None and now-self.odom_at <= self.c['sensor_timeout_s'],
                     planner_ok=self.planner_state(now) == 'ready',
                     planner_state=self.planner_state(now),
                     active_task_id=self.active,
@@ -245,7 +245,7 @@ class FlightCore:
         if self.stamp is not None:
             dt = stamp - self.stamp
             jump = np.linalg.norm(np.asarray(xyz)-self.pose[:3])
-            if (frame != self.frame or dt < 0 or dt > self.c['odom_timeout_s']
+            if (frame != self.frame or dt < 0 or dt > self.c['sensor_timeout_s']
                     or abs(wrap(yaw-self.pose[3])) > self.c['reset_yaw_rad'] + self.c['yaw_rate_rad_s']*max(0,dt)
                     or jump > self.c['reset_jump_m'] + self.c['max_speed_m_s'] * max(0,dt)):
                 self.reset()

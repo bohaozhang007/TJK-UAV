@@ -122,11 +122,11 @@ class Node:
         received = time.monotonic()
         received_ros = rospy.Time.now().to_sec()
         timing = dict(stamp_s=m.header.stamp.to_sec(), received_ros_s=received_ros,
-            age_s=received_ros-m.header.stamp.to_sec(), timeout_s=self.c['control']['odom_max_age_s'],
+            age_s=received_ros-m.header.stamp.to_sec(), timeout_s=self.c['control']['sensor_timeout_s'],
             receive_gap_s=None if self.last_odom_received is None else received-self.last_odom_received)
         self.last_odom_received = received
         self.odom_timing = timing
-        if not 0 <= timing['age_s'] <= self.c['control']['odom_max_age_s']:
+        if not 0 <= timing['age_s'] <= self.c['control']['sensor_timeout_s']:
             rospy.logwarn_throttle(1, 'bridge_odometry_rejected '+json.dumps(timing))
             return
         p,q = m.pose.pose.position,m.pose.pose.orientation
@@ -210,7 +210,7 @@ class Node:
             return
         with self.lock:
             valid = (stamp>self.cloud_stamp and self.last_odom is not None and m.header.frame_id == self.core.frame
-                     and 0 <= now-stamp <= self.c['control']['cloud_timeout_s']
+                     and 0 <= now-stamp <= self.c['control']['sensor_timeout_s']
                      and abs(stamp-self.core.stamp) <= self.c['control']['cloud_sync_max_s']
                      and m.width*m.height > 0 and {'x','y','z'} <= {f.name for f in m.fields})
             if valid:
@@ -224,7 +224,7 @@ class Node:
         return (c['flight_enabled'] and c['failsafe_validated'] and c['sensors_validated']
                 and self.frame_config_ok and (not self.frames.vendor or self.alignment.ready(now))
                 and not self.conflicts and now-self.conflict_at < 2
-                and now-self.cloud_at < c['cloud_timeout_s']
+                and now-self.cloud_at < c['sensor_timeout_s']
                 and now-self.ext_at < c['state_timeout_s'])
 
     def command(self,req):
@@ -293,7 +293,7 @@ class Node:
             odom_receipt_age_s=now-c.odom_at if math.isfinite(c.odom_at) else None,
             state_receipt_age_s=now-c.state_at if math.isfinite(c.state_at) else None,
             setpoint_age_s=now-self.last_output_at if math.isfinite(self.last_output_at) else None,
-            odom_timeout_s=self.c['control']['odom_timeout_s'],
+            odom_timeout_s=self.c['control']['sensor_timeout_s'],
             state_timeout_s=self.c['control']['state_timeout_s'], connected=c.connected)
         self.status_sequence += 1
         data = dict(health=h,session_id=c.session,bridge_id=self.bridge_id,sequence=self.status_sequence,
@@ -329,7 +329,7 @@ class Node:
                     if c.enabled and now-self.ext_at > self.c['control']['state_timeout_s']:
                         c.fail('extended state lost')
                         c.enabled = False
-                    if c.active and not c.landing and now-self.cloud_at > self.c['control']['cloud_timeout_s']:
+                    if c.active and not c.landing and now-self.cloud_at > self.c['control']['sensor_timeout_s']:
                         c.fail('obstacle cloud lost')
                     output = c.tick(now,rospy.Time.now().to_sec())
                     if output is not None:
@@ -380,7 +380,7 @@ class Node:
                             has_hold=c.hold is not None, connected=c.connected,
                             odom_receipt_age_s=now-c.odom_at if math.isfinite(c.odom_at) else None,
                             state_receipt_age_s=now-c.state_at if math.isfinite(c.state_at) else None,
-                            odom_timeout_s=self.c['control']['odom_timeout_s'],
+                            odom_timeout_s=self.c['control']['sensor_timeout_s'],
                             state_timeout_s=self.c['control']['state_timeout_s'],
                             odometry=dict(self.odom_timing), **self.control_timing)
                     was_streaming = streaming

@@ -73,8 +73,7 @@ def live_checks(config, report, check):
         m = rospy.wait_for_message(config['topics'][key], cls, timeout=3.)
         age = rospy.Time.now().to_sec()-m.header.stamp.to_sec()
         max_age = (config['control']['state_timeout_s'] if cls == State
-                   else config['control']['odom_timeout_s'] if cls == Odometry
-                   else config['control']['cloud_timeout_s'])
+                   else config['control']['sensor_timeout_s'])
         if cls != Image and not 0 <= age <= max_age:
             raise ValueError('stale timestamp: '+str(age))
         if cls == State:

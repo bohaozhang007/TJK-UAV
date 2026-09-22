@@ -1,14 +1,26 @@
 // Included in the pinned grid_map.cpp by patch_ego.py. Read-only, on-demand.
 // The pinned executable uses ros::spin(): this callback cannot interleave map updates.
 #include <chrono>
+#include <cmath>
 bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response &res)
 {
   const auto started = std::chrono::steady_clock::now();
   const double age = (ros::Time::now() - v22_cloud_stamp_).toSec();
-  if (!mp_.have_initialized_ || !md_.has_odom_ || v22_cloud_stamp_.isZero() || age < 0 || age > 0.5)
+  double max_age;
+  if (!node_.getParamCached("grid_map/sensor_timeout_s", max_age) || !std::isfinite(max_age) || max_age <= 0)
   {
     res.success = false;
-    res.message = "map has no fresh integrated cloud";
+    res.message = "missing or invalid grid_map/sensor_timeout_s";
+    return true;
+  }
+  if (!mp_.have_initialized_ || !md_.has_odom_ || v22_cloud_stamp_.isZero() || age < 0 || age > max_age)
+  {
+    res.success = false;
+    std::ostringstream diagnostic;
+    diagnostic << "map has no fresh integrated cloud: age_s=" << age
+               << ", max_age_s=" << max_age << ", initialized=" << mp_.have_initialized_
+               << ", has_odom=" << md_.has_odom_ << ", stamp_s=" << v22_cloud_stamp_.toSec();
+    res.message = diagnostic.str();
     return true;
   }
   // Exclude the upper alias: this ring has 2*range cells, not 2*range+1.

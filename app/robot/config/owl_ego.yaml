@@ -1,11 +1,9 @@
-queries:
-  # Maximum map age after query/JSON decoding, independent of RGB freshness.
-  map_max_age_s: 1.5
-
 camera_preflight:
   pitch_range_deg: [18, 21]
 
 control:
+  # Shared odometry/cloud age, missing-update timeout, and map query age limit.
+  sensor_timeout_s: 1.5
   takeoff_height_m: 1
   takeoff_speed_m_s: 0.3
   yaw_rate_rad_s: 0.523598776 # 30 deg/s

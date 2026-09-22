@@ -3,8 +3,7 @@
 DEFAULTS = {
     "namespace": "/owl_ego_v22",
     "queries": {
-        "preview_timeout_s": 12,
-        "map_max_age_s": 1.5
+        "preview_timeout_s": 12
     },
     "controller": {
         "motion_timeout_s": 15,
@@ -22,8 +21,7 @@ DEFAULTS = {
     "control": {
         "mavros_frame_profile": "owl_vendor_world",
         "control_hz": 50,
-        "odom_timeout_s": 0.5,
-        "odom_max_age_s": 0.5,
+        "sensor_timeout_s": 1.5,
         "state_timeout_s": 2,
         "planner_timeout_s": 1,
         "planning_timeout_s": 10,
@@ -32,7 +30,6 @@ DEFAULTS = {
         "stable_samples": 5,
         "takeoff_max_lead_m": 0.2,
         "takeoff_progress_timeout_s": 10,
-        "cloud_timeout_s": 0.5,
         "cloud_sync_max_s": 0.1,
         "world_frame": "world"
     },

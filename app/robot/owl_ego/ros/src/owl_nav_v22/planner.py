@@ -47,6 +47,8 @@ class PlannerProcess:
             raise RuntimeError('planner executable SHA256 mismatch')
         with open(p['parameters']) as f:
             params = yaml.safe_load(f)
+        params['grid_map/sensor_timeout_s'] = config['control']['sensor_timeout_s']
+        params['grid_map/odom_depth_timeout'] = config['control']['sensor_timeout_s']
         for key,value in params.items():
             rospy.set_param(self.ns+'/ego/'+key,value)
         self.fsm_ready = False
