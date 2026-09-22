@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 import signal
 import socket
-import subprocess
 import sys
 import tempfile
 import threading
@@ -19,6 +18,7 @@ import yaml
 from app.robot.config_loader import load_robot_config
 from app.robot.i7.mapping import parameters, fingerprint, require_running
 from app.robot.i7.bringup.reuse_ros_component import run
+from app.robot.i7.bringup.launch_process import run_launcher
 
 
 def registered_nodes(master):
@@ -217,12 +217,14 @@ def main():
                       output='screen', required='true')
         launch_file = folder/'mapping.launch'
         ET.ElementTree(launch).write(str(launch_file), encoding='unicode')
-        raise SystemExit(subprocess.call(['roslaunch', str(launch_file)]))
+        raise SystemExit(run_launcher(['roslaunch', str(launch_file)]))
 
 
 if __name__ == '__main__':
     try:
         main()
+    except KeyboardInterrupt:
+        sys.exit(130)
     except (RuntimeError, ValueError, rospy.ROSException) as exc:
         print('I7 LIO startup failed: '+str(exc), file=sys.stderr, flush=True)
         sys.exit(1)
