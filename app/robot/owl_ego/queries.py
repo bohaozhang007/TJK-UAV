@@ -4,17 +4,18 @@ import threading
 
 import numpy as np
 from app.timing import measure
+from app.robot.occupancy import VoxelOccupancy
 
 
 def validate_preview_path(points, grid):
     resolution = grid['resolution_m']
     indices = np.floor(points / resolution).astype(int)
-    blocked = {tuple(v) for v in grid['inflated']}
+    occupancy = VoxelOccupancy(grid)
     checks = {
         'preview_outside_map': np.any((indices < grid['lower']) | (indices > grid['upper']), axis=1),
         'preview_below_ground': points[:, 2] <= grid['ground_m'],
         'preview_above_ceiling': points[:, 2] >= grid['ceiling_m'],
-        'preview_inflated_collision': np.array([tuple(v) in blocked for v in indices]),
+        'preview_inflated_collision': occupancy.inflated_at(indices),
     }
     failures = [(int(np.flatnonzero(mask)[0]), reason) for reason, mask in checks.items() if mask.any()]
     if not failures:
@@ -79,7 +80,8 @@ class OwlQueries:
         if timings is not None:
             timings['map_details'] = dict(result.get('query_metrics', {}),
                 resolution_m=result['resolution_m'], lower=result['lower'], upper=result['upper'],
-                version=result['version'], response_bytes=len(response.message.encode('utf-8')))
+                version=result['version'], encoding=result.get('encoding', 'json-coordinates'),
+                response_bytes=len(response.message.encode('utf-8')))
         after = self.guard(session, epoch)
         now = rospy.Time.now().to_sec()
         age = now-result['stamp_s']
@@ -115,7 +117,7 @@ class OwlQueries:
                     raise RuntimeError('goal outside current map bounds')
                 if not grid['ground_m'] < xyz[2] < grid['ceiling_m']:
                     raise RuntimeError('goal outside map height bounds')
-                if require_arrival and tuple(index) in {tuple(v) for v in grid['inflated']}:
+                if require_arrival and tuple(index) in VoxelOccupancy(grid):
                     raise RuntimeError('goal is in inflated occupancy')
                 if np.linalg.norm(start-xyz) < .01:
                     points = np.array([start, xyz])

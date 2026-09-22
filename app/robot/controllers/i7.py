@@ -288,7 +288,7 @@ class I7Controller(OwlEgoController):
                 stamp_s=stamp, image_delta_s=delta, point_count=len(points),
                 source='registered_cloud_single_frame', position_unit='m', encoding='float32_le_xyz'))
 
-    def photo_guard(self, sid, epoch, pose):
+    def photo_guard(self, sid, epoch, pose=None):
         snap = None
         try:
             if self.camera_shutdown.is_set():
@@ -302,12 +302,14 @@ class I7Controller(OwlEgoController):
             if snap is not None:
                 detail.update(health=copy.deepcopy(snap['health']),
                               owner_matches=snap.get('session_id') == sid,
-                              position_tolerance_cm=self.config['control']['position_tolerance_m']*100,
-                              yaw_tolerance_deg=math.degrees(self.config['control']['yaw_tolerance_rad']))
+                              reference_pose_check_enabled=pose is not None)
                 actual = np.asarray(snap['pose'], float)
                 detail['actual_pose_world_m_rad'] = [float(v) if math.isfinite(v) else None for v in actual]
                 if np.isfinite(actual).all():
                     detail['actual_pose'] = public_pose(actual)
+                if pose is not None and np.isfinite(actual).all():
+                    detail.update(position_tolerance_cm=self.config['control']['position_tolerance_m']*100,
+                                  yaw_tolerance_deg=math.degrees(self.config['control']['yaw_tolerance_rad']))
                     target = np.array([pose['x']/100, -pose['y']/100, pose['z']/100])
                     detail['position_error_cm'] = float(np.linalg.norm(actual[:3]-target)*100)
                     detail['yaw_error_deg'] = abs((detail['actual_pose']['yaw']-pose['yaw']+180)%360-180)
@@ -321,7 +323,7 @@ class I7Controller(OwlEgoController):
             exc.flight_diagnostics = detail
             raise
 
-    def check_photo_state(self, snap, sid, epoch, pose):
+    def check_photo_state(self, snap, sid, epoch, pose=None):
         if self.camera_shutdown.is_set():
             raise CameraControlLost('camera server shutting down')
         h = snap['health']
@@ -333,11 +335,15 @@ class I7Controller(OwlEgoController):
                 +str(dict(unavailable=missing, active_task_id=h.get('active_task_id'),
                           stop_diagnostics=h.get('stop_diagnostics'), flight_error=h.get('error'))))
         actual = snap['pose']
-        target = [pose['x']/100, -pose['y']/100, pose['z']/100, -math.radians(pose['yaw'])]
-        if (not np.isfinite(actual).all()
-                or np.linalg.norm(np.asarray(actual[:3])-target[:3]) > self.config['control']['position_tolerance_m']
-                or abs((actual[3]-target[3]+math.pi)%(2*math.pi)-math.pi) > self.config['control']['yaw_tolerance_rad']):
-            raise CameraControlLost('aircraft moved from the detection exposure')
+        if not np.isfinite(actual).all():
+            raise CameraControlLost('invalid aircraft pose')
+        # Only stationary observation assembly binds the aircraft to a reference
+        # pose. Autofocus tracks live images without the old exposure constraint.
+        if pose is not None:
+            target = [pose['x']/100, -pose['y']/100, pose['z']/100, -math.radians(pose['yaw'])]
+            if (np.linalg.norm(np.asarray(actual[:3])-target[:3]) > self.config['control']['position_tolerance_m']
+                    or abs((actual[3]-target[3]+math.pi)%(2*math.pi)-math.pi) > self.config['control']['yaw_tolerance_rad']):
+                raise CameraControlLost('aircraft moved from the observation reference pose')
         if 'stopped' in missing:
             raise CameraNotStopped('waiting for stopped flight hold: '+str(h.get('stop_diagnostics')))
 
@@ -360,7 +366,7 @@ class I7Controller(OwlEgoController):
                 raise ApiError('photo exposure epoch mismatch')
             bounds = validate_image_box(raw, data['box'])
             try:
-                self.photo_guard(data['session_id'], data['localization_epoch'], observation['pose'])
+                self.photo_guard(data['session_id'], data['localization_epoch'])
             except CameraNotStopped:
                 pass  # The worker waits within its bounded recovery budget.
             if not self.camera_lock.acquire(blocking=False):
@@ -399,7 +405,7 @@ class I7Controller(OwlEgoController):
                     error.flight_diagnostics = getattr(original, 'flight_diagnostics', None)
                     raise error from original
                 try:
-                    self.photo_guard(sid, epoch, observation['pose'])
+                    self.photo_guard(sid, epoch)
                 except CameraNotStopped as exc:
                     now = time.monotonic()
                     if recovery['started'] is None:

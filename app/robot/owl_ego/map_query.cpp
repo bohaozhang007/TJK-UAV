@@ -2,6 +2,26 @@
 // The pinned executable uses ros::spin(): this callback cannot interleave map updates.
 #include <chrono>
 #include <cmath>
+namespace {
+std::string v22Base64(const std::string &bytes)
+{
+  static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string result;
+  result.reserve(((bytes.size() + 2) / 3) * 4);
+  for (size_t i = 0; i < bytes.size(); i += 3)
+  {
+    const uint32_t a = static_cast<unsigned char>(bytes[i]);
+    const uint32_t b = i + 1 < bytes.size() ? static_cast<unsigned char>(bytes[i + 1]) : 0;
+    const uint32_t c = i + 2 < bytes.size() ? static_cast<unsigned char>(bytes[i + 2]) : 0;
+    const uint32_t value = (a << 16) | (b << 8) | c;
+    result += alphabet[(value >> 18) & 63];
+    result += alphabet[(value >> 12) & 63];
+    result += i + 1 < bytes.size() ? alphabet[(value >> 6) & 63] : '=';
+    result += i + 2 < bytes.size() ? alphabet[value & 63] : '=';
+  }
+  return result;
+}
+}
 bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response &res)
 {
   const auto started = std::chrono::steady_clock::now();
@@ -33,25 +53,29 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
     res.message = "map query exceeds voxel budget";
     return true;
   }
-  std::ostringstream raw, inflated, out;
+  std::ostringstream out;
+  std::string cells((static_cast<size_t>(size.cast<double>().prod()) + 3) / 4, '\0');
   const size_t occupied_budget = 2000000;
   size_t raw_count = 0, inflated_count = 0, scanned_count = 0;
   for (int x = lo.x(); x <= hi.x(); ++x)
     for (int y = lo.y(); y <= hi.y(); ++y)
       for (int z = lo.z(); z <= hi.z(); ++z)
       {
-        ++scanned_count;
+        const size_t linear = scanned_count++;
+        unsigned char flags = 0;
         const Eigen::Vector3i id(x, y, z);
         if (md_.occupancy_buffer_[globalIdx2BufIdx(id)] >= mp_.min_occupancy_log_)
         {
-          if (raw_count++) raw << ',';
-          raw << '[' << x << ',' << y << ',' << z << ']';
+          ++raw_count;
+          flags |= 1;
         }
         if (md_.occupancy_buffer_inflate_[globalIdx2InfBufIdx(id)])
         {
-          if (inflated_count++) inflated << ',';
-          inflated << '[' << x << ',' << y << ',' << z << ']';
+          ++inflated_count;
+          flags |= 2;
         }
+        cells[linear / 4] = static_cast<char>(static_cast<unsigned char>(cells[linear / 4])
+                                             | (flags << (2 * (linear % 4))));
         if (raw_count + inflated_count > occupied_budget)
         {
           res.success = false;
@@ -64,6 +88,7 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
           return true;
         }
       }
+  const std::string encoded = v22Base64(cells);
   const double scan_encode_s = std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
   out << std::setprecision(12)
       << "{\"resolution_m\":" << mp_.resolution_
@@ -78,7 +103,7 @@ bool GridMap::v22Query(std_srvs::Trigger::Request &, std_srvs::Trigger::Response
       << ",\"occupied_budget\":" << occupied_budget
       << ",\"inflated_count\":" << inflated_count
       << ",\"scan_encode_s\":" << scan_encode_s << "}"
-      << ",\"occupied\":[" << raw.str() << "],\"inflated\":[" << inflated.str() << "]}";
+      << ",\"encoding\":\"voxel-flags-2bit-v1\",\"cells_base64\":\"" << encoded << "\"}";
   res.success = true;
   res.message = out.str();
   return true;

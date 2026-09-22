@@ -1,5 +1,6 @@
 """Stop-and-detect mission. All physical operations use the public Robot interface."""
 import argparse
+import base64
 import enum
 from http.client import HTTPException
 import json
@@ -9,12 +10,14 @@ import queue
 import sys
 import threading
 import time
+from types import SimpleNamespace
+import uuid
 import urllib.error
 import urllib.request
 
 import numpy as np
 import yaml
-from PIL import Image
+from PIL import Image, ImageDraw
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -104,6 +107,43 @@ class Detector:
         self.health_url = url.rstrip('/') + '/health'
         self.timeout = DETECTOR_TIMEOUT_S
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def save_fallback_photo(self, path, rgb, context):
+        """Detect the saved photo itself; old exposure boxes are not transferable."""
+        path = Path(path)
+        if rgb is not None:
+            save_photo(path, rgb)
+        metadata_path = path.with_suffix('.json')
+        annotated_path = path.with_name(path.stem + '_boxes.jpg')
+        with Image.open(path) as source:
+            image = source.convert('RGB')
+        frame_id = 'fallback-photo:' + uuid.uuid4().hex
+        obs = SimpleNamespace(frame_id=frame_id, rgb=np.array(image), metadata={},
+                              image_base64=base64.b64encode(path.read_bytes()).decode('ascii'))
+        metadata = dict(context, file=path.name, frame_id=frame_id,
+                        image_size=list(image.size), box_format='xyxy', box_unit='pixel',
+                        source='fallback_photo_redetection', target_association='unassigned',
+                        detections=[], timings={})
+        try:
+            self.health()
+            detections = self.detect(obs, timings=metadata['timings'])
+            metadata['detections'] = [dict(box=d['box'], confidence=d['confidence']) for d in detections]
+            metadata['status'] = 'detected' if detections else 'no_detections'
+            draw = ImageDraw.Draw(image)
+            for index, detection in enumerate(detections, 1):
+                box = detection['box']
+                draw.rectangle(box, outline='red', width=3)
+                draw.text((box[0], max(0, box[1]-14)),
+                          f"{index}: {detection['confidence']:.3f}", fill='red')
+            image.save(annotated_path, quality=95)
+            metadata['annotated_file'] = annotated_path.name
+        except Exception as exc:
+            metadata.update(status='error', error=str(exc))
+            raise
+        finally:
+            metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False)+'\n', encoding='utf-8')
+        return dict(metadata_file=metadata_path.name, annotated_file=annotated_path.name,
+                    detection_status=metadata['status'], detection_count=len(detections))
 
     def health(self):
         try:
@@ -472,7 +512,12 @@ class Mission:
                        error=str(exc), timings=timings)
             raise
         path = self.output / f'target_{target["id"]:03d}_{attempt:02d}.jpg'
-        if not self.artifacts.submit('photo', path, save_photo, result['rgb']):
+        if result['focused']:
+            submitted = self.artifacts.submit('photo', path, save_photo, result['rgb'])
+        else:
+            submitted = self.artifacts.submit('photo', path, self.detector.save_fallback_photo,
+                result['rgb'], dict(target_id=target['id'], detection_frame_id=observation.frame_id))
+        if not submitted:
             raise MissionError('photo storage queue full')
         target['status'] = 'completed' if result['focused'] else 'failed'
         target['autofocus_failed'] = not result['focused']

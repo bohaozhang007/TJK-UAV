@@ -1,5 +1,6 @@
 """Platform-independent operations on a bounded occupancy grid and camera geometry."""
 import numpy as np
+from .occupancy import VoxelOccupancy
 
 
 class TargetSurfaceUnavailable(ValueError):
@@ -23,8 +24,8 @@ class GridMap:
         self.resolution = float(data['resolution_m'])
         self.lower = np.asarray(data['lower'], dtype=int)
         self.upper = np.asarray(data['upper'], dtype=int)
-        self.occupied = np.asarray(data['occupied'], dtype=int).reshape(-1, 3)
-        self.inflated = {tuple(v) for v in data['inflated']}
+        self.inflated = VoxelOccupancy(data)
+        self.occupied = self.inflated.occupied_indices()
         self.ground = float(data['ground_m'])
         self.ceiling = float(data['ceiling_m'])
         if (not np.isfinite(self.resolution) or self.resolution <= 0
