@@ -32,6 +32,10 @@ def validate_preview_path(points, grid):
 class OwlQueries:
     def __init__(self, hardware, config):
         self.hw, self.c = hardware, config
+        map_max_age = config['queries']['map_max_age_s']
+        if (isinstance(map_max_age, bool) or not isinstance(map_max_age, (int, float))
+                or not np.isfinite(map_max_age) or map_max_age <= 0):
+            raise ValueError('queries.map_max_age_s must be a finite positive number')
         self.lock = threading.Lock()
 
     def guard(self, session, epoch):
@@ -76,11 +80,20 @@ class OwlQueries:
             timings['map_details'] = dict(result.get('query_metrics', {}),
                 resolution_m=result['resolution_m'], lower=result['lower'], upper=result['upper'],
                 version=result['version'], response_bytes=len(response.message.encode('utf-8')))
-        now = rospy.Time.now().to_sec()
         after = self.guard(session, epoch)
-        if (after.get('planner_generation') != generation
-                or not 0 <= now-result['stamp_s'] <= self.c['hardware']['rgb_max_age_s'] + .1):
-            raise RuntimeError('map changed generation or became stale during query')
+        now = rospy.Time.now().to_sec()
+        age = now-result['stamp_s']
+        max_age = self.c['queries']['map_max_age_s']
+        if timings is not None:
+            timings['map_freshness'] = dict(age_s=age, max_age_s=max_age,
+                stamp_s=result['stamp_s'], checked_at_s=now,
+                planner_generation=generation, planner_generation_after=after.get('planner_generation'))
+        if after.get('planner_generation') != generation:
+            raise RuntimeError('map changed planner generation during query: '
+                               f"before={generation}, after={after.get('planner_generation')}")
+        if not 0 <= age <= max_age:
+            raise RuntimeError(f'map stale or invalid timestamp during query: age_s={age:.6f}, '
+                               f'max_age_s={max_age:.6f}')
         return result
 
     def preview(self, session, epoch, goal, require_arrival, timings=None):

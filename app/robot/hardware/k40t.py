@@ -47,9 +47,12 @@ def decode_packet(packet: bytes):
 
 
 class K40TClient:
-    def __init__(self, host: str, port: int, timeout_s: float, *, log_path=None, guard=lambda: None):
+    def __init__(self, host: str, port: int, timeout_s: float, *, angle_tolerance_deg, log_path=None, guard=lambda: None):
         if not host or not 1 <= port <= 65535 or not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("Invalid K40T address or timeout")
+        if not math.isfinite(angle_tolerance_deg) or angle_tolerance_deg <= 0:
+            raise ValueError("Invalid K40T angle tolerance")
+        self.angle_tolerance_deg = angle_tolerance_deg
         self.guard = guard
         self.address = (host, port)
         self.timeout_s = timeout_s
@@ -222,7 +225,7 @@ class K40TClient:
                         return last_status
                     # Compare joint angles directly, without wrapping across
                     # +/-180: the physical travel limit must not be bypassed.
-                    reached = all(abs(last_status[key] - target[key]) <= 0.5 for key in ("yaw_deg", "pitch_deg"))
+                    reached = all(abs(last_status[key] - target[key]) <= self.angle_tolerance_deg for key in ("yaw_deg", "pitch_deg"))
                     stable_samples = stable_samples + 1 if reached else 0
                     if stable_samples >= 3:
                         return last_status

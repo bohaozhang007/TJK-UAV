@@ -10,7 +10,7 @@ import numpy as np
 from ..hardware.tracker_client import TrackerClient, validate_image_box
 
 
-def restore_camera(controller, initial, *, set_zoom=None):
+def restore_camera(controller, initial, *, angle_tolerance_deg, set_zoom=None):
     """Restore each component and report actual final feedback, including failures."""
     errors = []
     actions = []
@@ -25,7 +25,7 @@ def restore_camera(controller, initial, *, set_zoom=None):
         try:
             current = controller.get_gimbal()
             delta = round(initial[axis] - current[axis], 2)
-            if abs(delta) > .5:
+            if delta != 0:
                 actions.append(dict(command='gimbal_' + axis[:-4], value=delta))
                 method(delta)
         except Exception as exc:
@@ -35,7 +35,7 @@ def restore_camera(controller, initial, *, set_zoom=None):
         pose = controller.get_gimbal()
         final.update(yaw_deg=pose['yaw_deg'], pitch_deg=pose['pitch_deg'])
         for axis in ('yaw_deg', 'pitch_deg'):
-            if not math.isfinite(final[axis]) or abs(final[axis] - initial[axis]) > .5:
+            if not math.isfinite(final[axis]) or abs(final[axis] - initial[axis]) > angle_tolerance_deg:
                 errors.append(f'{axis} restore verification failed: {final[axis]} vs {initial[axis]}')
     except Exception as exc:
         errors.append(f'pose verification: {exc}')
@@ -46,7 +46,7 @@ def restore_camera(controller, initial, *, set_zoom=None):
     except Exception as exc:
         errors.append(f'zoom verification: {exc}')
     return dict(ok=not errors, target=dict(initial), final=final, actions=actions, errors=errors,
-                angle_tolerance_deg=.5, zoom_tolerance=.05)
+                angle_tolerance_deg=angle_tolerance_deg, zoom_tolerance=.05)
 
 
 def autofocus_box(controller, img, box, capture, *,

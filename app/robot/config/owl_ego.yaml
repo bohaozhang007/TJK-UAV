@@ -1,3 +1,7 @@
+queries:
+  # Maximum map age after query/JSON decoding, independent of RGB freshness.
+  map_max_age_s: 1.5
+
 camera_preflight:
   pitch_range_deg: [18, 21]
 

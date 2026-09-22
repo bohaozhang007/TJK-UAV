@@ -3,7 +3,8 @@
 DEFAULTS = {
     "namespace": "/owl_ego_v22",
     "queries": {
-        "preview_timeout_s": 12
+        "preview_timeout_s": 12,
+        "map_max_age_s": 1.5
     },
     "controller": {
         "motion_timeout_s": 15,

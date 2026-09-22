@@ -44,7 +44,8 @@ class I7Controller(OwlEgoController):
         config = config or load_robot_config('i7', config_path)
         validate(config)
         c = config['camera']
-        self.camera = camera or K40TClient(c['host'], c['port'], c['timeout_s'])
+        self.camera = camera or K40TClient(c['host'], c['port'], c['timeout_s'],
+            angle_tolerance_deg=math.degrees(config['control']['yaw_tolerance_rad']))
         self.camera_lock = threading.Lock()
         self.exposures = OrderedDict()
         self.exposure_clouds = OrderedDict()
@@ -54,7 +55,8 @@ class I7Controller(OwlEgoController):
         self.baseline = dict(yaw_deg=c['baseline_yaw_deg'], pitch_deg=c['baseline_pitch_deg'], zoom=c['baseline_zoom'])
         super().__init__(hardware=hardware or I7Hardware(config), config=config)
 
-    def require_baseline(self, angle_tolerance=5.):
+    def require_baseline(self):
+        angle_tolerance = math.degrees(self.config['control']['yaw_tolerance_rad'])
         from app.robot.i7.mapping import require_running
         require_running(self.config, self.hw.ros)
         pose, zoom = self.camera.get_gimbal(), self.camera.get_zoom()
@@ -73,18 +75,19 @@ class I7Controller(OwlEgoController):
     def prepare_baseline(self, guard):
         guard()
         try:
-            return self.require_baseline(angle_tolerance=.5), None
+            return self.require_baseline(), None
         except CameraBaselineMismatch:
             previous_guard = self.camera.guard
             self.camera.guard = guard
             try:
-                restoration = restore_camera(self.camera, self.baseline, set_zoom=self.camera.set_zoom)
+                restoration = restore_camera(self.camera, self.baseline, set_zoom=self.camera.set_zoom,
+                    angle_tolerance_deg=math.degrees(self.config['control']['yaw_tolerance_rad']))
                 guard()
                 if not restoration['ok']:
                     error = ApiError('camera baseline restoration failed: '+str(restoration['errors']))
                     error.camera_diagnostics = restoration
                     raise error
-                return self.require_baseline(angle_tolerance=.5), restoration
+                return self.require_baseline(), restoration
             finally:
                 self.camera.guard = previous_guard
 
@@ -482,7 +485,8 @@ class I7Controller(OwlEgoController):
             except Exception as exc:
                 details = dict(ok=False, message=str(exc))
             guard()
-            restoration = restore_camera(camera, self.baseline)
+            restoration = restore_camera(camera, self.baseline,
+                        angle_tolerance_deg=math.degrees(self.config['control']['yaw_tolerance_rad']))
             guard()
             if not restoration['ok']:
                 raise RuntimeError('camera baseline restoration failed: '+ '; '.join(restoration['errors']))
@@ -503,7 +507,8 @@ class I7Controller(OwlEgoController):
             if not isinstance(exc, CameraControlLost) and not lost.is_set():
                 try:
                     guard()
-                    result['restoration'] = restore_camera(camera, self.baseline)
+                    result['restoration'] = restore_camera(camera, self.baseline,
+                        angle_tolerance_deg=math.degrees(self.config['control']['yaw_tolerance_rad']))
                 except Exception as restore_error:
                     result['restore_error'] = str(restore_error)
         finally:
