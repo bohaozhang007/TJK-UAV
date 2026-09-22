@@ -323,7 +323,10 @@ class Mission:
             if self.depth_client is None:
                 raise MissionError('DA3 localization requires a depth client')
             depth = self.retry_read('depth estimation',
-                lambda t: self.wait_perception(lambda details: self.depth_client.estimate(observation, details),
+                lambda t: self.wait_perception(lambda details: self.depth_client.locate_targets(
+                    observation, [d['mask'] for d in detections],
+                    self.c['localization']['min_depth_pixels'],
+                    self.c['localization']['max_relative_depth_mad'], details),
                                                DEPTH_TIMEOUT_S, t),
                 frame_id=observation.frame_id, detection_point_id=self.detection_point_id)
         for index, detection in enumerate(detections, 1):

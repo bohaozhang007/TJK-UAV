@@ -63,9 +63,28 @@ class DepthClient:
     def __init__(self, host):
         self.url = f'http://{host}:{DEPTH_PORT}/estimate'
 
-    def estimate(self, obs, timings):
+    def locate_targets(self, obs, masks, min_pixels, max_relative_mad, timings):
+        return self.estimate(obs, timings, masks, min_pixels, max_relative_mad)
+
+    def estimate(self, obs, timings, masks=None, min_pixels=16, max_relative_mad=.3):
         with measure(timings, 'depth_prepare'):
             payload = dict(intrinsics=obs.intrinsics.tolist(),output='depth',frame_id=obs.frame_id)
+            if masks is not None:
+                if not 1 <= len(masks) <= 3:
+                    raise MissionError('expected 1 to 3 target masks')
+                encoded = []
+                for mask in masks:
+                    if mask.shape != obs.rgb.shape[:2] or mask.dtype != np.bool_:
+                        raise MissionError('depth mask does not match exposure')
+                    flat = mask.ravel(order='C')
+                    changes = np.flatnonzero(flat[1:] != flat[:-1]) + 1
+                    counts = np.diff(np.r_[0, changes, flat.size]).tolist()
+                    if flat[0]:
+                        counts.insert(0, 0)
+                    encoded.append(dict(size=list(mask.shape), encoding='rle', order='C', counts=counts))
+                payload.update(masks=encoded, world_from_camera_cm=obs.world_from_camera_cm.tolist(),
+                    distortion=obs.distortion.tolist() if obs.distortion is not None else None,
+                    min_depth_pixels=min_pixels, max_relative_depth_mad=max_relative_mad)
             cached = obs.metadata.get('detector_image_cache')
             if cached and cached['frame_id'] == obs.frame_id:
                 payload['image_cache'] = cached['token']
@@ -74,7 +93,7 @@ class DepthClient:
             timings['depth_image_source'] = 'detector_cache' if 'image_cache' in payload else 'upload'
             body = json.dumps(payload, allow_nan=False).encode()
         timings['depth_request_bytes'] = len(body)
-        endpoint = urllib.parse.urlsplit(self.url)
+        endpoint = urllib.parse.urlsplit(self.url if masks is None else self.url.rsplit('/', 1)[0] + '/locate')
         connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=DEPTH_TIMEOUT_S)
         with measure(timings, 'depth_http'):
             try:
@@ -97,8 +116,9 @@ class DepthClient:
                                     ('depth_server_inference_s','X-Inference-S'),
                                     ('depth_server_encode_s','X-Encode-S')]:
                     timings[key] = response.headers.get(header)
+                limit = 40*1024*1024 if masks is None else 64*1024
                 with measure(timings, 'depth_download'):
-                    content = response.read(40*1024*1024+1 if response.status == 200 else 4096)
+                    content = response.read(limit+1 if response.status == 200 else 4096)
                 timings['depth_response_bytes'] = len(content)
                 if response.status == 409 and 'image_cache' in payload:
                     error = json.loads(content)
@@ -107,22 +127,64 @@ class DepthClient:
                         timings['depth_cache_miss'] = True
                 if response.status != 200:
                     raise MissionError(f'Depth HTTP {response.status}: '+content.decode('utf-8',errors='replace'))
-                if len(content) > 40*1024*1024:
+                if len(content) > limit:
                     raise MissionError('depth response exceeds size limit')
-                if (headers['X-Unit'] != 'm' or headers['X-Depth-Type'] != 'camera-z'
-                        or headers['X-Output'] != 'depth'
-                        or headers['X-Coordinate-Frame'] != 'camera-optical-right-down-forward'
+                if (headers['X-Unit'] != ('m' if masks is None else 'cm') or headers['X-Depth-Type'] != 'camera-z'
+                        or headers['X-Output'] != ('depth' if masks is None else 'position')
+                        or headers['X-Coordinate-Frame'] != ('camera-optical-right-down-forward' if masks is None else 'public-world-x-neg-y-z')
                         or headers['X-Frame-Id'] != obs.frame_id):
                     raise MissionError('depth response geometry or frame identity mismatch; restart depth server')
             finally:
                 connection.close()
         with measure(timings, 'depth_decode'):
+            if masks is not None:
+                data = json.loads(content)
+                if (not isinstance(data, dict) or data.get('ok') is not True
+                        or data.get('frame_id') != obs.frame_id or data.get('unit') != 'cm'
+                        or data.get('coordinate_frame') != 'public-world-x-neg-y-z'
+                        or not isinstance(data.get('results'), list) or len(data['results']) != len(masks)):
+                    raise MissionError('invalid remote localization response')
+                for result in data['results']:
+                    if not isinstance(result, dict):
+                        raise MissionError('invalid target localization result')
+                    if result.get('ok') is True:
+                        point = np.asarray(result.get('target_position_cm'), dtype=float)
+                        if point.shape != (3,) or not np.isfinite(point).all():
+                            raise MissionError('invalid remote target position')
+                    elif result.get('ok') is not False or result.get('error_code') != 'target_not_localizable':
+                        raise MissionError('unexpected remote localization failure')
+                return LocatedFrame(obs.frame_id, obs.epoch, [m.copy() for m in masks],
+                                    data['results'], min_pixels, max_relative_mad)
             depth = np.load(io.BytesIO(content),allow_pickle=False)
             if depth.dtype != np.float32 or depth.shape != obs.rgb.shape[:2]:
                 raise MissionError('depth response shape or dtype mismatch')
             if not (np.isfinite(depth) & (depth > 0)).any():
                 raise MissionError('depth response has no valid pixels')
         return DepthFrame(obs.frame_id,obs.epoch,depth,obs.intrinsics.copy())
+
+
+@dataclass
+class LocatedFrame:
+    frame_id: str
+    epoch: str
+    masks: list
+    results: list
+    min_pixels: int
+    max_relative_mad: float
+
+    def locate(self, obs, mask, min_pixels, max_relative_mad):
+        if (self.frame_id, self.epoch) != (obs.frame_id, obs.epoch):
+            raise ControlLost('depth exposure identity mismatch')
+        if (min_pixels, max_relative_mad) != (self.min_pixels, self.max_relative_mad):
+            raise MissionError('remote localization thresholds differ from Robot thresholds')
+        for original, result in zip(self.masks, self.results):
+            if np.array_equal(mask, original):
+                if not result['ok']:
+                    raise TargetNotLocalizable(result['error'])
+                summary = dict(result, source='da3', frame_id=self.frame_id, localization_epoch=self.epoch)
+                summary.pop('ok')
+                return list(result['target_position_cm']), summary
+        raise MissionError('mask not included in remote localization request')
 
 
 def save_depth_report(prefix, report):

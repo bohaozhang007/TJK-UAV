@@ -129,7 +129,14 @@ class DepthHandler(BaseHTTPRequestHandler):
                     return
                 cache_lookup_s = time.perf_counter()-cache_started
             image, k, output = decode_request(data,image_bytes=image_bytes)
-            geometry = decode_localization(data, image.shape[:2]) if self.path == '/locate' else None
+            geometry = None
+            batch = self.path == '/locate' and 'masks' in data
+            if self.path == '/locate':
+                masks = data.get('masks') if batch else [data.get('mask')]
+                if (not isinstance(masks, list) or not 1 <= len(masks) <= 3
+                        or (batch and 'mask' in data)):
+                    raise ValueError('provide mask or masks (1 to 3 masks)')
+                geometry = [decode_localization(dict(data, mask=mask), image.shape[:2]) for mask in masks]
             decode_s = time.perf_counter()-phase
         except (ValueError, OSError) as exc:
             self.reply(400, {"ok": False, "error": str(exc)})
@@ -142,10 +149,21 @@ class DepthHandler(BaseHTTPRequestHandler):
             if geometry is not None:
                 if depth.shape != image.shape[:2]:
                     raise RuntimeError('depth dimensions do not match image')
-                summary = locate(depth, k, *geometry)
+                results = []
+                for item in geometry:
+                    try:
+                        results.append(dict(ok=True, **locate(depth, k, *item)))
+                    except TargetNotLocalizable as exc:
+                        if not batch:
+                            raise
+                        results.append(dict(ok=False, error=str(exc), error_code='target_not_localizable'))
                 output = 'position'
                 payload = dict(ok=True, source='da3', frame_id=frame_id, unit='cm',
-                               coordinate_frame='public-world-x-neg-y-z', **summary)
+                               coordinate_frame='public-world-x-neg-y-z')
+                if batch:
+                    payload['results'] = results
+                else:
+                    payload.update(results[0])
                 response_body = json.dumps(payload, allow_nan=False).encode('utf-8')
                 content_type = 'application/json'
                 result_shape = (3,)
