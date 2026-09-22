@@ -71,7 +71,11 @@ class Node:
         self.fcu_uncertain = False
         self.stream_since = None
         self.last_output_at = -math.inf
+        self.last_setpoint_published = None
         self.last_control_sample = None
+        self.last_odom_received = None
+        self.odom_timing = {}
+        self.control_timing = {}
         namespace = self.c['namespace']
         topics = self.c['topics']
         self.status_pub = rospy.Publisher(topics['bridge_status'],String,queue_size=1)
@@ -115,7 +119,15 @@ class Node:
 
     def odom(self,m):
         from tf.transformations import quaternion_matrix, euler_from_quaternion
-        if not 0 <= rospy.Time.now().to_sec()-m.header.stamp.to_sec() <= self.c['control']['odom_timeout_s']:
+        received = time.monotonic()
+        received_ros = rospy.Time.now().to_sec()
+        timing = dict(stamp_s=m.header.stamp.to_sec(), received_ros_s=received_ros,
+            age_s=received_ros-m.header.stamp.to_sec(), timeout_s=self.c['control']['odom_timeout_s'],
+            receive_gap_s=None if self.last_odom_received is None else received-self.last_odom_received)
+        self.last_odom_received = received
+        self.odom_timing = timing
+        if not 0 <= timing['age_s'] <= self.c['control']['odom_timeout_s']:
+            rospy.logwarn_throttle(1, 'bridge_odometry_rejected '+json.dumps(timing))
             return
         p,q = m.pose.pose.position,m.pose.pose.orientation
         quat = [q.x,q.y,q.z,q.w]
@@ -151,6 +163,8 @@ class Node:
                     self.core.reset(str(e))
                     return
         self.odom_pub.publish(planner_odom)
+        timing['processing_s'] = time.monotonic()-received
+        rospy.loginfo_throttle(5, 'bridge_odometry_timing '+json.dumps(timing))
 
     def reference(self,kind,m):
         from tf.transformations import euler_from_quaternion
@@ -274,6 +288,13 @@ class Node:
         h['frame_alignment_error'] = self.alignment.error if self.frames.vendor else None
         h['takeoff_phase'] = c.tasks.get(c.active, {}).get('takeoff_phase')
         h['manual_offboard_takeoff'] = self.manual_offboard_takeoff
+        h['stream_diagnostics'] = dict(self.control_timing,
+            odometry=dict(self.odom_timing),
+            odom_receipt_age_s=now-c.odom_at if math.isfinite(c.odom_at) else None,
+            state_receipt_age_s=now-c.state_at if math.isfinite(c.state_at) else None,
+            setpoint_age_s=now-self.last_output_at if math.isfinite(self.last_output_at) else None,
+            odom_timeout_s=self.c['control']['odom_timeout_s'],
+            state_timeout_s=self.c['control']['state_timeout_s'], connected=c.connected)
         self.status_sequence += 1
         data = dict(health=h,session_id=c.session,bridge_id=self.bridge_id,sequence=self.status_sequence,
                     planner_generation=self.planner_generation if self.planner_epoch == c.epoch else None,
@@ -287,10 +308,17 @@ class Node:
     def control_loop(self):
         dt = 1/self.c['control']['control_hz']
         last_status = 0
+        last_loop = None
+        was_streaming = False
         while not self.stop.wait(dt):
+            entered = time.monotonic()
+            loop_gap = None if last_loop is None else entered-last_loop
+            last_loop = entered
+            stream_event = None
             try:
                 with self.lock:
                     now = time.monotonic()
+                    self.control_timing = dict(loop_gap_s=loop_gap, lock_wait_s=now-entered)
                     c = self.core
                     if c.enabled and (not self.frame_config_ok or (self.frames.vendor and not self.alignment.ready(now))):
                         c.reset('frame alignment unavailable')
@@ -323,6 +351,10 @@ class Node:
                         m.acceleration_or_force.x,m.acceleration_or_force.y,m.acceleration_or_force.z = a
                         m.yaw = y
                         self.setpoint_pub.publish(m)
+                        published = time.monotonic()
+                        self.control_timing['setpoint_gap_s'] = (published-self.last_setpoint_published
+                            if self.last_setpoint_published is not None else None)
+                        self.last_setpoint_published = published
                         sample = c.output_diagnostics(now,m.header.stamp.to_sec(),output)
                         sample.update(mavros_profile=self.frames.profile,
                                       mavros_frame_id=m.header.frame_id,
@@ -341,9 +373,26 @@ class Node:
                         self.last_output_at = now
                     else:
                         self.stream_since = None
+                    streaming = output is not None
+                    if was_streaming and not streaming:
+                        stream_event = dict(event='offboard_stream_stopped', error=c.last_error,
+                            enabled=c.enabled, manual=c.manual, landing=c.landing, mode=c.mode,
+                            has_hold=c.hold is not None, connected=c.connected,
+                            odom_receipt_age_s=now-c.odom_at if math.isfinite(c.odom_at) else None,
+                            state_receipt_age_s=now-c.state_at if math.isfinite(c.state_at) else None,
+                            odom_timeout_s=self.c['control']['odom_timeout_s'],
+                            state_timeout_s=self.c['control']['state_timeout_s'],
+                            odometry=dict(self.odom_timing), **self.control_timing)
+                    was_streaming = streaming
+                    self.control_timing['processing_s'] = time.monotonic()-now
                     if now-last_status >= .1:
                         self.publish_status(now)
                         last_status = now
+                if stream_event is not None:
+                    rospy.logwarn(json.dumps(stream_event))
+                if loop_gap is not None and loop_gap > .15:
+                    rospy.logwarn_throttle(1, 'control_loop_delayed '+json.dumps(self.control_timing))
+                rospy.loginfo_throttle(5, 'control_stream_timing '+json.dumps(self.control_timing))
             except Exception as e:
                 with self.lock:
                     self.core.fail('control loop error: '+str(e))

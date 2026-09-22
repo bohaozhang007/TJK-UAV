@@ -1,6 +1,7 @@
 """Normalize FAST-LIO2 odometry and publish K40T frames with receipt timestamps."""
 import argparse
 import copy
+import json
 import os
 import threading
 import time
@@ -20,6 +21,7 @@ class Sensors:
         from sensor_msgs.msg import Image
         self.ros, self.c, self.cv = rospy, config, CvBridge()
         self.previous = None
+        self.last_odom_received = None
         self.odom_pub = rospy.Publisher(config['topics']['odom'], Odometry, queue_size=5)
         self.rgb_pub = rospy.Publisher(config['topics']['rgb'], Image, queue_size=1)
         self.sub = rospy.Subscriber(config['source']['odom'], Odometry, self.odometry, queue_size=5)
@@ -30,6 +32,14 @@ class Sensors:
 
     def odometry(self, message):
         from tf.transformations import quaternion_matrix, quaternion_from_matrix
+        received = time.monotonic()
+        received_ros = self.ros.Time.now().to_sec()
+        stamp = message.header.stamp.to_sec()
+        diagnostic = dict(stamp_s=stamp, received_ros_s=received_ros,
+            age_s=received_ros-stamp, timeout_s=self.c['control']['odom_timeout_s'],
+            receive_gap_s=None if self.last_odom_received is None else received-self.last_odom_received,
+            stamp_gap_s=None if self.previous is None else stamp-self.previous[0])
+        self.last_odom_received = received
         try:
             if (message.header.frame_id != self.c['source']['world_frame']
                     or message.child_frame_id != self.c['source']['body_frame']):
@@ -64,7 +74,11 @@ class Sensors:
             out.twist.twist.angular.x, out.twist.twist.angular.y, out.twist.twist.angular.z = angular
             self.odom_pub.publish(out)
         except (ValueError, TypeError) as exc:
-            self.ros.logerr_throttle(1, str(exc))
+            diagnostic.update(error=str(exc), processing_s=time.monotonic()-received)
+            self.ros.logerr_throttle(1, 'i7_odometry_rejected '+json.dumps(diagnostic))
+        else:
+            diagnostic['processing_s'] = time.monotonic()-received
+            self.ros.loginfo_throttle(5, 'i7_odometry_timing '+json.dumps(diagnostic))
 
     def camera(self):
         os.environ.setdefault('OPENCV_FFMPEG_CAPTURE_OPTIONS', 'rtsp_transport;tcp|stimeout;3000000')
