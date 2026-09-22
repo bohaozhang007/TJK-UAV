@@ -188,7 +188,8 @@ class I7Controller(OwlEgoController):
             camera_baseline = self.require_baseline()
             guard()
             stage = 'assemble_observation'
-            result = super().observation(include_image=include_image)
+            retained_images = []
+            result = super().observation(include_image=include_image, retain_image=retained_images.append)
             result['camera_baseline'] = camera_baseline
             guard()
             stage = 'validate_frame_timing'
@@ -206,11 +207,7 @@ class I7Controller(OwlEgoController):
                 raise ObservationUnavailable('received RTSP frame exceeds freshness tolerance')
             if include_image:
                 stage = 'cache_exposure'
-                with self.hw.lock:
-                    image = next((m for m in self.hw.images if abs(m.header.stamp.to_sec()-result['timestamp_s']) < 1e-8), None)
-                    if image is None:
-                        raise ApiError('exposure expired from camera cache')
-                    raw = self.hw.rgb_array(image).copy()
+                raw = retained_images[0]
                 with self.lock:
                     self.exposures[result['frame_id']] = (copy.deepcopy(result), raw)
                     self.exposure_clouds[result['frame_id']] = self.hw.exposure_cloud(result['timestamp_s'], epoch)

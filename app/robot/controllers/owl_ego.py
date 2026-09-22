@@ -300,12 +300,13 @@ class OwlEgoController:
             self._command('cancel',session_id=sid,task_id=tid)
         raise ApiError('motion timed out; stop requested' if path != '/land' else 'landing confirmation timed out',504)
 
-    def observation(self, *, include_image=True):
+    def observation(self, *, include_image=True, retain_image=None):
         from .owl_ego_observation import build_observation, InvalidObservation
         timings = {}
         try:
             with measure(timings, 'assembly'):
-                result = build_observation(self.hw, include_image=include_image, timings=timings)
+                result = build_observation(self.hw, include_image=include_image, timings=timings,
+                                           retain_image=retain_image)
             result['timings'] = timings
             return result
         except Exception as exc:

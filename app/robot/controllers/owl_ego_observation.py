@@ -153,7 +153,7 @@ def fixed_optical_rotation(hardware):
     return r
 
 
-def build_observation(hw, *, include_image=True, timings=None):
+def build_observation(hw, *, include_image=True, timings=None, retain_image=None):
     from .owl_ego import public_pose
     started = time.monotonic()
     with measure(timings, 'camera_snapshot'):
@@ -212,6 +212,8 @@ def build_observation(hw, *, include_image=True, timings=None):
         if hw.rectify_observations and d is not None:
             with measure(timings, 'rectify'):
                 bgr = hw.rectify_rgb(bgr,k,d)
+        if retain_image is not None:
+            retain_image(bgr.copy())
         # Preserve native image dimensions and pixel coordinates.
         with measure(timings, 'png_encode'):
             success,encoded = cv2.imencode('.png',bgr,[cv2.IMWRITE_PNG_COMPRESSION,1])
