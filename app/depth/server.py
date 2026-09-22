@@ -1,6 +1,9 @@
 """POST /estimate {image or image_cache, frame_id, intrinsics: 3x3 K, output: depth|xyz}.
 K is in input-image pixels. Images pass unchanged to the model. Returns float32 .npy in metres;
 depth is camera Z, xyz axes are right/down/forward. Invalid values are NaN.
+POST /locate additionally accepts mask (C-order RLE), world_from_camera_cm (4x4),
+optional distortion/min_depth_pixels/max_relative_depth_mad. Returns target_position_cm
+in the public world frame (world X, -world Y, world Z), not a depth array.
 """
 import argparse
 import base64
@@ -20,6 +23,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.detector.frame_cache import cached_image
+from app.depth.localization import decode_localization, locate, TargetNotLocalizable
 
 
 def build_depth(model_root=None, checkpoint=None, device="cuda", process_res=504):
@@ -91,7 +95,7 @@ class DepthHandler(BaseHTTPRequestHandler):
             self.reply(404, {"ok": False, "error": "unknown endpoint"})
 
     def do_POST(self):
-        if self.path != "/estimate":
+        if self.path not in ("/estimate", "/locate"):
             self.reply(404, {"ok": False, "error": "unknown endpoint"})
             return
         started = time.perf_counter()
@@ -125,6 +129,7 @@ class DepthHandler(BaseHTTPRequestHandler):
                     return
                 cache_lookup_s = time.perf_counter()-cache_started
             image, k, output = decode_request(data,image_bytes=image_bytes)
+            geometry = decode_localization(data, image.shape[:2]) if self.path == '/locate' else None
             decode_s = time.perf_counter()-phase
         except (ValueError, OSError) as exc:
             self.reply(400, {"ok": False, "error": str(exc)})
@@ -134,20 +139,37 @@ class DepthHandler(BaseHTTPRequestHandler):
             depth = self.server.engine.estimate(image, k.astype(np.float32))
             inference_s = time.perf_counter()-phase
             phase = time.perf_counter()
-            array = depth if output == "depth" else depth_to_xyz(depth, k)
-            buffer = io.BytesIO()
-            np.save(buffer, np.asarray(array, dtype=np.float32), allow_pickle=False)
+            if geometry is not None:
+                if depth.shape != image.shape[:2]:
+                    raise RuntimeError('depth dimensions do not match image')
+                summary = locate(depth, k, *geometry)
+                output = 'position'
+                payload = dict(ok=True, source='da3', frame_id=frame_id, unit='cm',
+                               coordinate_frame='public-world-x-neg-y-z', **summary)
+                response_body = json.dumps(payload, allow_nan=False).encode('utf-8')
+                content_type = 'application/json'
+                result_shape = (3,)
+            else:
+                array = depth if output == "depth" else depth_to_xyz(depth, k)
+                buffer = io.BytesIO()
+                np.save(buffer, np.asarray(array, dtype=np.float32), allow_pickle=False)
+                response_body = buffer.getvalue()
+                content_type = 'application/x-npy'
+                result_shape = array.shape
             encode_s = time.perf_counter()-phase
             elapsed = time.perf_counter() - started
+        except TargetNotLocalizable as exc:
+            self.reply(422, dict(ok=False, error=str(exc), error_code='target_not_localizable', frame_id=frame_id))
+            return
         except Exception as exc:
             logging.exception("Depth estimation failed")
             self.reply(500, {"ok": False, "error": str(exc)})
             return
-        response_body = buffer.getvalue()
         send_started = time.perf_counter()
-        self.send_body(200, response_body, "application/x-npy", {
-            "X-Output": output, "X-Unit": "m", "X-Depth-Type": "camera-z",
-            "X-Coordinate-Frame": "camera-optical-right-down-forward", "X-Elapsed-S": f"{elapsed:.3f}",
+        self.send_body(200, response_body, content_type, {
+            "X-Output": output, "X-Unit": "cm" if geometry is not None else "m", "X-Depth-Type": "camera-z",
+            "X-Coordinate-Frame": "public-world-x-neg-y-z" if geometry is not None else "camera-optical-right-down-forward",
+            "X-Elapsed-S": f"{elapsed:.3f}",
             "X-Frame-Id": frame_id,
             "X-Receive-S": f"{receive_s:.6f}", "X-Decode-S": f"{decode_s:.6f}",
             "X-Inference-S": f"{inference_s:.6f}", "X-Encode-S": f"{encode_s:.6f}",
@@ -156,7 +178,7 @@ class DepthHandler(BaseHTTPRequestHandler):
         })
         logging.info("Depth response frame_id=%s output=%s shape=%s request_bytes=%d response_bytes=%d "
                      "receive_s=%.3f decode_s=%.3f inference_s=%.3f encode_s=%.3f send_s=%.3f elapsed_s=%.3f",
-                     frame_id, output, array.shape, length, len(response_body), receive_s, decode_s,
+                     frame_id, output, result_shape, length, len(response_body), receive_s, decode_s,
                      inference_s, encode_s, time.perf_counter()-send_started, time.perf_counter()-started)
 
 
