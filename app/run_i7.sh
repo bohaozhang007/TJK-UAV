@@ -10,7 +10,7 @@ export I7_V22_CONFIG="$CONFIG"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 cd "$ROOT"
 case "$MODE" in
-  stack) exec bash app/robot/i7/bringup/run_i7_hardware.sh --stack "$@" ;;
+  stack) exec python3 -m app.robot.i7.bringup.stack_supervisor "$@" ;;
   hardware) exec bash app/robot/i7/bringup/run_i7_hardware.sh "$@" ;;
   console) exec python3 app/robot/owl_ego/scripts/console.py --output "logs/i7_v22_console/$(date +%Y%m%d-%H%M%S)-$$" "$@" ;;
   check)

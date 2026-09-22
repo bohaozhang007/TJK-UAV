@@ -159,9 +159,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config')
     parser.add_argument('--live', action='store_true')
+    parser.add_argument('--output', help='Save the complete check report for startup recovery')
     args = parser.parse_args()
     report = inspect(load_robot_config('i7', args.config), args.live)
     print(json.dumps(report, ensure_ascii=False, indent=2))
+    if args.output:
+        Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n')
     raise SystemExit(0 if report['deployment_ready'] else 1)
 
 

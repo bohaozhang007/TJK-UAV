@@ -84,12 +84,22 @@ process_group_alive() {
   kill -0 -- "-$1" 2>/dev/null
 }
 
+record_startup_failure() {
+  if [[ -n "${I7_STARTUP_REPORT:-}" ]]; then
+    python3 - "$I7_STARTUP_REPORT" "$1" "$2" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'errors': [sys.argv[2]+': '+sys.argv[3]]})+'\n')
+PY
+  fi
+}
+
 check_started_components() {
   local index
   for ((index=0; index<${#PIDS[@]}; index++)); do
     if ! kill -0 "${PIDS[index]}" 2>/dev/null; then
       wait "${PIDS[index]}" 2>/dev/null || true
       echo "I7 component exited during startup: ${COMPONENTS[index]}" >&2
+      record_startup_failure component "${COMPONENTS[index]}"
       exit 1
     fi
   done
@@ -222,13 +232,16 @@ if [[ "$STACK" == true ]]; then
   start_service sensors
   echo 'Restoring camera to calibrated baseline...'
   if ! run_probe python3 -m app.robot.i7.bringup.reset_camera; then
+    record_startup_failure camera_baseline 'startup reset failed'
     echo 'Camera reset failed; bridge/server were not started.' >&2
     exit 1
   fi
   ready=false
+  report_args=()
+  if [[ -n "${I7_STARTUP_REPORT:-}" ]]; then report_args=(--output "$I7_STARTUP_REPORT"); fi
   for attempt in 1 2 3; do
     echo "Live deployment check ${attempt}/3..."
-    if run_probe bash app/run_i7.sh check --live; then ready=true; fi
+    if run_probe bash app/run_i7.sh check --live "${report_args[@]}"; then ready=true; fi
     if [[ "$ready" == true ]]; then break; fi
     sleep 1
   done
@@ -237,9 +250,9 @@ if [[ "$STACK" == true ]]; then
     exit 1
   fi
   start_service bridge
-  run_probe bash -c 'source /opt/ros/noetic/setup.bash; python3 -c '\''import os, rospy; from app.robot.config_loader import load_robot_config; c=load_robot_config("i7", os.environ.get("I7_V22_CONFIG")); rospy.wait_for_service(c["topics"]["command"], timeout=30.)'\'''
+  run_probe bash -c 'source /opt/ros/noetic/setup.bash; python3 -c '\''import os, rospy; from app.robot.config_loader import load_robot_config; c=load_robot_config("i7", os.environ.get("I7_V22_CONFIG")); rospy.wait_for_service(c["topics"]["command"], timeout=30.)'\''' || { record_startup_failure component bridge; exit 1; }
   start_service server
-  run_probe python3 -c '
+  if ! run_probe python3 -c '
 import json, time, urllib.request
 http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 deadline = time.monotonic()+20.
@@ -254,8 +267,12 @@ while time.monotonic() < deadline:
     time.sleep(.2)
 else:
     raise SystemExit("Robot server readiness timed out")
-'
+'; then
+    record_startup_failure component server
+    exit 1
+  fi
   check_started_components
+  if [[ -n "${I7_STARTUP_READY:-}" ]]; then touch "$I7_STARTUP_READY"; fi
   echo 'Live checks passed; services launched. Open console in another terminal. Keep this terminal open until landing and disarming.'
 fi
 
