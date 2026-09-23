@@ -206,13 +206,13 @@ class DetectorHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--reference-img",
+        "--ref-img",
         type=Path,
         required=True,
         help="Local reference image path",
     )
     parser.add_argument(
-        "--reference-box",
+        "--ref-box",
         type=Path,
         required=True,
         help="Text file containing pixel x1 y1 x2 y2",
