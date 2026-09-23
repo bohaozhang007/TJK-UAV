@@ -420,8 +420,8 @@ def validate_config(config):
         raise ValueError('invalid localization.min_depth_pixels')
     if type(spread) not in (int,float) or not math.isfinite(spread) or not 0 < spread <= 1:
         raise ValueError('invalid localization.max_relative_depth_mad')
-    if config.get('photography', {}).get('mode') not in ('autofocus', 'orbit'):
-        raise ValueError('photography.mode must be autofocus or orbit')
+    if config.get('photography', {}).get('mode') not in ('autofocus', 'orbit', 'photo'):
+        raise ValueError('photography.mode must be autofocus, orbit or photo')
     if config['patrol'].get('dedup_mode', '3d') not in ('3d', 'separate'):
         raise ValueError('patrol.dedup_mode must be 3d or separate')
     if config['safety']['error_action'] not in ('hold', 'land'):

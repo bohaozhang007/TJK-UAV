@@ -40,7 +40,10 @@ patrol:
   waypoint_tolerance_cm: 30.0
 
 photography:
-  mode: orbit # autofocus: gimbal/zoom; orbit: fly with fixed camera settings.
+  mode: orbit 
+  # autofocus: gimbal/zoom; 
+  # orbit: fly with fixed camera settings.
+  # photo: save a new frame without flight/gimbal/zoom commands.
 
 orbit:
   radius_m: 2.0
@@ -50,7 +53,9 @@ orbit:
   top: 2 # Maximum photos; prefer smaller yaw changes, then distance.
 
 localization:
-  source: da3 # da3: image + K/T; grid: LiDAR occupancy + K/T.
+  source: da3 
+  # da3: image + K/T; 
+  # grid: LiDAR occupancy + K/T.
 
   min_depth_pixels: 16
   max_relative_depth_mad: 0.3

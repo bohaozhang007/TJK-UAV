@@ -1,4 +1,4 @@
-"""Autofocus and orbit photography through the public Robot interface."""
+"""Stationary, autofocus and orbit photography through the public Robot interface."""
 import math
 
 from app.robot_client.base import MissionError, NavigationPlanningFailed
@@ -14,8 +14,23 @@ class PhotographyMixin:
     def capture_target(self, target, observation, box):
         if self.c["photography"]["mode"] == "autofocus":
             self.photograph_target(target, observation, box)
+        elif self.c["photography"]["mode"] == "photo":
+            self.photograph_stationary(target)
         else:
             self.visit_target(target)
+
+    def photograph_stationary(self, target):
+        self.current_target = target
+        self.transition(State.PHOTO)
+        obs = self.capture_observation()
+        path = self.output / f'target_{target["id"]:03d}_01.jpg'
+        if not self.artifacts.submit('photo', path, save_photo, obs.rgb):
+            raise MissionError('photo storage queue full')
+        self.event('photo', target_id=target['id'], file=path.name, pose=obs.pose,
+                   frame_id=obs.frame_id, write_status='queued')
+        target['status'] = 'completed'
+        self.event('target_completed', target=target, photo_count=1)
+        self.current_target = None
 
     def orbit_points(self, target, exposure_pose):
         x, y, z = target['position_cm']
