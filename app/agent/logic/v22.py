@@ -1,7 +1,6 @@
 """Stop-and-detect mission. All physical operations use the public Robot interface."""
 import argparse
 import base64
-import enum
 from http.client import HTTPException
 import json
 import math
@@ -23,10 +22,13 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.timing import measure
-from app.robot_client.base import ControlLost, MissionError, Robot, TargetNotLocalizable, NavigationPlanningFailed
+from app.robot_client.base import ControlLost, MissionError, Robot, TargetNotLocalizable
 from app.robot_client.factory import create_robot
 from app.robot_client.artifact_writer import ArtifactWriter, save_photo
-from app.robot_client.depth import DepthClient, DEPTH_TIMEOUT_S
+from app.robot_client.depth import DepthClient
+from app.agent.logic.state import State, NEXT
+from app.agent.logic.localization import LocalizationMixin
+from app.agent.logic.photography import PhotographyMixin
 
 
 # Fixed service settings and bounded retry/loop limits.
@@ -36,43 +38,6 @@ DETECTOR_HEALTH_TIMEOUT_S = 5.0
 READ_ATTEMPTS = 2
 READ_RETRY_DELAY_S = 0.5
 MAX_STOPS_PER_WAYPOINT = 100
-
-
-class State(enum.Enum):
-    WAIT_OPERATOR = 'wait_operator'
-    PATROL_PLAN = 'patrol_plan'
-    PATROL_MOVE = 'patrol_move'
-    DETECT = 'detect'
-    LOCALIZE = 'localize'
-    ORBIT_PLAN = 'orbit_plan'
-    ORBIT_MOVE = 'orbit_move'
-    PHOTO = 'photo'
-    AUTOFOCUS = 'autofocus'
-    RETURN_CAPTURE = 'return_capture'
-    RETURN_HOME = 'return_home'
-    LANDING = 'landing'
-    COMPLETE = 'complete'
-    ERROR_HOLD = 'error_hold'
-    ERROR_LANDING = 'error_landing'
-    FAILED = 'failed'
-    CONTROL_LOST = 'control_lost'
-
-
-NEXT = {
-    State.WAIT_OPERATOR: {State.PATROL_PLAN},
-    State.PATROL_PLAN: {State.PATROL_MOVE, State.RETURN_HOME},
-    State.PATROL_MOVE: {State.DETECT},
-    State.DETECT: {State.LOCALIZE},
-    State.LOCALIZE: {State.AUTOFOCUS, State.ORBIT_PLAN, State.PATROL_PLAN, State.RETURN_HOME},
-    State.AUTOFOCUS: {State.AUTOFOCUS, State.PATROL_PLAN, State.RETURN_HOME},
-    State.ORBIT_PLAN: {State.ORBIT_MOVE, State.RETURN_CAPTURE},
-    State.ORBIT_MOVE: {State.PHOTO, State.ORBIT_PLAN, State.RETURN_CAPTURE},
-    State.PHOTO: {State.ORBIT_MOVE, State.ORBIT_PLAN, State.RETURN_CAPTURE},
-    State.RETURN_CAPTURE: {State.ORBIT_PLAN, State.PATROL_PLAN, State.RETURN_HOME},
-    State.RETURN_HOME: {State.LANDING},
-    State.LANDING: {State.COMPLETE},
-    State.ERROR_LANDING: {State.FAILED},
-}
 
 
 def wrap(yaw):
@@ -197,7 +162,7 @@ class Detector:
         return sorted(results, key=lambda d: d['confidence'], reverse=True)
 
 
-class Mission:
+class Mission(LocalizationMixin, PhotographyMixin):
     def __init__(self, robot: Robot, detector, config, output, depth_client=None):
         self.robot, self.detector, self.c = robot, detector, config
         self.depth_client = depth_client
@@ -341,177 +306,6 @@ class Mission:
             return result
         raise MissionError('perception request timed out')
 
-    def locate_new_targets(self, observation, detections):
-        self.transition(State.LOCALIZE)
-        new = []
-        depth = None
-        source = self.c['localization']['source']
-        if detections and source == 'da3':
-            if self.depth_client is None:
-                raise MissionError('DA3 localization requires a depth client')
-            depth = self.retry_read('depth estimation',
-                lambda t: self.wait_perception(lambda details: self.depth_client.locate_targets(
-                    observation, [d['mask'] for d in detections],
-                    self.c['localization']['min_depth_pixels'],
-                    self.c['localization']['max_relative_depth_mad'], details),
-                                               DEPTH_TIMEOUT_S, t),
-                frame_id=observation.frame_id, detection_point_id=self.detection_point_id)
-        for index, detection in enumerate(detections, 1):
-            attempts = [0]
-            def locate(timings):
-                attempts[0] += 1
-                prefix = self.output / f'localize_{self.detection_point_id:03d}_{index:02d}_{attempts[0]:02d}'
-                return self.robot.locate_target(observation, detection['mask'], timings=timings,
-                                               diagnostic_prefix=prefix, depth=depth)
-            context = dict(frame_id=observation.frame_id, detection_point_id=self.detection_point_id,
-                           detection_index=index, localization_source=source,
-                           confidence=detection['confidence'])
-            try:
-                position = self.retry_read('target localization',
-                    locate,
-                    **context)
-            except TargetNotLocalizable as exc:
-                self.event('detection_skipped', **context, reason=str(exc))
-                continue
-            existing = self.duplicate_target(position)
-            if existing is not None:
-                if (self.c['photography']['autofocus'] and existing['status'] == 'failed'
-                        and existing.get('autofocus_failed')
-                        and existing.get('autofocus_frame_id') != observation.frame_id):
-                    existing.update(status='pending', exposure_pose=dict(observation.pose),
-                                    confidence=detection['confidence'])
-                    new.append((existing, detection['box']))
-                    self.event('autofocus_revisit', target_id=existing['id'],
-                               frame_id=observation.frame_id, position_cm=position,
-                               detection_point_id=self.detection_point_id)
-                    continue
-                self.event('duplicate', target_id=existing['id'], position_cm=position)
-                continue
-            record = dict(id=len(self.targets)+1, position_cm=position, status='pending',
-                          confidence=detection['confidence'], exposure_pose=dict(observation.pose),
-                          localization_source=source)
-            self.targets.append(record)
-            new.append((record, detection['box']))
-            self.event('new_target', target=record)
-        return new
-
-    def duplicate_target(self, position):
-        threshold = self.c['patrol']['dedup_distance_cm']
-        mode = self.c['patrol'].get('dedup_mode', '3d')
-        for record in self.targets:
-            delta = np.asarray(position) - record['position_cm']
-            if mode == 'separate':
-                duplicate = np.all(np.abs(delta) < threshold)
-            else:
-                duplicate = np.linalg.norm(delta) < threshold
-            if duplicate:
-                return record
-        return None
-
-    def orbit_points(self, target, exposure_pose):
-        x, y, z = target['position_cm']
-        z = max(self.c['safety']['safe_z_cm'], z)
-        radius = self.c['orbit']['radius_m'] * 100
-        count = self.c['orbit'].get('all_cand', 6)
-        start = math.atan2(exposure_pose['y']-y, exposure_pose['x']-x)
-        points = []
-        for i in range(count):
-            angle = start + i * math.tau / count  # Clockwise in the public Y-right frame.
-            px, py = x + radius*math.cos(angle), y + radius*math.sin(angle)
-            points.append(dict(x=px, y=py, z=z, yaw=wrap(math.degrees(math.atan2(y-py, x-px)))))
-        return points
-
-    def orbit_candidates(self, target, exposure_pose):
-        self.transition(State.ORBIT_PLAN)
-        points = self.orbit_points(target, exposure_pose)
-        free = self.retry_read('orbit point batch query',
-            lambda t: self.robot.points_are_free(points, timings=t))
-        candidates = []
-        for index, (point, available) in enumerate(zip(points, free)):
-            self.event('orbit_candidate', target_id=target['id'], candidate_index=index+1,
-                       pose=point, available=available)
-            if available:
-                candidates.append(dict(index=index, pose=point))
-        return candidates
-
-    def take_photo(self, target, index):
-        self.transition(State.PHOTO)
-        obs = self.capture_observation()
-        path = self.output / f'target_{target["id"]:03d}_{index:02d}.jpg'
-        if not self.artifacts.submit('photo', path, save_photo, obs.rgb):
-            raise MissionError('photo storage queue full')
-        self.event('photo', target_id=target['id'], file=path.name, pose=obs.pose,
-                   frame_id=obs.frame_id, write_status='queued')
-        self.guarded_wait(self.c['orbit']['dwell_s'])
-
-    def visit_target(self, target):
-        self.current_target = target
-        candidates = self.orbit_candidates(target, target['exposure_pose'])
-        limit = self.c['orbit'].get('top', 6)
-        photos = 0
-        reference_pose = dict(target['exposure_pose'])
-        while candidates and photos < limit:
-            self.transition(State.ORBIT_PLAN)
-            candidates.sort(key=lambda p: (
-                abs(wrap(p['pose']['yaw']-reference_pose['yaw'])),
-                sum((p['pose'][k]-reference_pose[k])**2 for k in ('x', 'y', 'z')),
-                p['index']))
-            candidate = candidates.pop(0)
-            point = candidate['pose']
-            self.event('orbit_selection', target_id=target['id'],
-                       candidate_indices=[candidate['index']+1], completed_photos=photos,
-                       reference_pose=reference_pose,
-                       yaw_delta_deg=abs(wrap(point['yaw']-reference_pose['yaw'])))
-            context = dict(target_id=target['id'], candidate_index=candidate['index']+1, pose=point)
-            if not self.retry_read('map point recheck',
-                    lambda t: self.robot.point_is_free(point, timings=t),
-                    pose=point, candidate_index=candidate['index']+1):
-                self.event('orbit_point_skipped', **context, reason='point no longer free in current map')
-            else:
-                try:
-                    self.fly_to(point, State.ORBIT_MOVE)
-                except NavigationPlanningFailed as exc:
-                    self.event('orbit_point_skipped', **context, reason=str(exc))
-                else:
-                    photos += 1
-                    self.take_photo(target, photos)
-            if candidates and photos < limit:
-                reference_pose = self.robot.pose()
-        if not photos:
-            raise MissionError('zero reachable orbit points')
-        self.fly_to(target['exposure_pose'], State.RETURN_CAPTURE)
-        target['status'] = 'completed'
-        self.event('target_completed', target=target, photo_count=photos)
-        self.current_target = None
-
-    def photograph_target(self, target, observation, box):
-        self.current_target = target
-        self.transition(State.AUTOFOCUS)
-        timings = {}
-        attempt = target.get('autofocus_attempts', 0)+1
-        target.update(autofocus_attempts=attempt, autofocus_frame_id=observation.frame_id)
-        self.event('autofocus_started', target_id=target['id'], frame_id=observation.frame_id,
-                   attempt=attempt)
-        try:
-            result = self.robot.autofocus_photo(observation, box, timings=timings)
-        except Exception as exc:
-            self.event('autofocus_failed', target_id=target['id'], frame_id=observation.frame_id,
-                       error=str(exc), timings=timings)
-            raise
-        path = self.output / f'target_{target["id"]:03d}_{attempt:02d}.jpg'
-        if result['focused']:
-            submitted = self.artifacts.submit('photo', path, save_photo, result['rgb'])
-        else:
-            submitted = self.artifacts.submit('photo', path, self.detector.save_fallback_photo,
-                result['rgb'])
-        if not submitted:
-            raise MissionError('photo storage queue full')
-        target['status'] = 'completed' if result['focused'] else 'failed'
-        target['autofocus_failed'] = not result['focused']
-        self.event('autofocus_finished', target=target, focused=result['focused'],
-                   fallback_photo=not result['focused'], file=path.name, timings=timings,
-                   write_status='queued')
-        self.current_target = None
 
     def patrol(self):
         for waypoint in self.c['mission']['waypoints']:
@@ -527,10 +321,7 @@ class Mission:
                 targets = self.locate_new_targets(observation, detections)
                 # All identities/positions were computed while still at this exposure P.
                 for target, box in targets:
-                    if self.c['photography']['autofocus']:
-                        self.photograph_target(target, observation, box)
-                    else:
-                        self.visit_target(target)
+                    self.capture_target(target, observation, box)
                 if final:
                     break
             else:
@@ -629,8 +420,8 @@ def validate_config(config):
         raise ValueError('invalid localization.min_depth_pixels')
     if type(spread) not in (int,float) or not math.isfinite(spread) or not 0 < spread <= 1:
         raise ValueError('invalid localization.max_relative_depth_mad')
-    if type(config.get('photography', {}).get('autofocus')) is not bool:
-        raise ValueError('photography.autofocus must be boolean')
+    if config.get('photography', {}).get('mode') not in ('autofocus', 'orbit'):
+        raise ValueError('photography.mode must be autofocus or orbit')
     if config['patrol'].get('dedup_mode', '3d') not in ('3d', 'separate'):
         raise ValueError('patrol.dedup_mode must be 3d or separate')
     if config['safety']['error_action'] not in ('hold', 'land'):
@@ -683,7 +474,7 @@ def main():
         parser.exit(1, f'Error: {exc}; mission not started.\n')
     print(f'Detector health OK ({time.monotonic()-started:.3f}s)', flush=True)
     try:
-        robot = create_robot(config['localization'], autofocus=config['photography']['autofocus'],
+        robot = create_robot(config['localization'], autofocus=config['photography']['mode'] == 'autofocus',
                              tracker_host=args.detector_host)
     except (ValueError,KeyError,TypeError) as exc:
         parser.error(str(exc))

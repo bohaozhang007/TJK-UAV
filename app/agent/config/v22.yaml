@@ -40,17 +40,17 @@ patrol:
   waypoint_tolerance_cm: 30.0
 
 photography:
-  autofocus: true # Camera framing at the exposure point; false uses orbit photos.
+  mode: orbit # autofocus: gimbal/zoom; orbit: fly with fixed camera settings.
 
 orbit:
-  radius_m: 1.0
+  radius_m: 2.0
   dwell_s: 1.0
 
   all_cand: 8 # Equally spaced candidates.
-  top: 2 # Nearest reachable candidates to visit.
+  top: 2 # Maximum photos; prefer smaller yaw changes, then distance.
 
 localization:
-  source: da3 # da3 or grid
+  source: da3 # da3: image + K/T; grid: LiDAR occupancy + K/T.
 
   min_depth_pixels: 16
   max_relative_depth_mad: 0.3

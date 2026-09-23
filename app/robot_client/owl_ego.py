@@ -113,7 +113,7 @@ class OwlEgoClient:
     def attach(self):
         caps = self.rpc('GET', '/v21/capabilities')
         if getattr(self, 'autofocus_enabled', False) and caps.get('autofocus') is not True:
-            raise MissionError('Robot does not support autofocus; set photography.autofocus=false')
+            raise MissionError('Robot does not support autofocus; set photography.mode=orbit')
         for key in ('async_navigation', 'cancel_and_hold', 'synchronized_observation', 'control_lease',
                     'sensor_geometry', 'map_query', 'preview_only', 'stop_at_goal'):
             if caps.get(key) is not True:
