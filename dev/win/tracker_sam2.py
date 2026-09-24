@@ -1,8 +1,11 @@
 import pickle
 import sys
 from collections import OrderedDict
-from contextlib import nullcontext, redirect_stdout
 from pathlib import Path
+
+# Reserve the binary reply pipe before any third-party imports emit logs.
+output = sys.stdout.buffer
+sys.stdout = sys.stderr
 
 import cv2
 import numpy as np
@@ -12,8 +15,7 @@ from PIL import Image
 
 MODEL_ROOT = Path(__file__).resolve().parents[3] / "sam2"
 sys.path.insert(0, str(MODEL_ROOT))
-with redirect_stdout(sys.stderr):
-    from sam2.build_sam import build_sam2_video_predictor
+from sam2.build_sam import build_sam2_video_predictor
 
 
 CHECKPOINT = MODEL_ROOT / "checkpoints/sam2.1_hiera_small.pt"
@@ -23,18 +25,12 @@ WARMUP_SHAPE = (1080, 1920, 3)
 
 class Sam2Tracker:
     def __init__(self):
+        if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+            raise RuntimeError("SAM2 requires a CUDA GPU with bf16 support")
         self.predictor = build_sam2_video_predictor(MODEL_CONFIG, str(CHECKPOINT))
         self.device = self.predictor.device
         self.state = None
         self.frame_index = 0
-
-    def precision(self):
-        if (
-            self.device.type == "cuda"
-            and torch.cuda.is_bf16_supported()
-        ):
-            return torch.autocast("cuda", dtype=torch.bfloat16)
-        return nullcontext()
 
     def image_tensor(self, img):
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -70,7 +66,7 @@ class Sam2Tracker:
             or not 0 <= box[1] < box[3] <= height
         ):
             raise ValueError("Tracker box must be inside the current image")
-        with torch.inference_mode(), self.precision():
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             # Match the local SAM2 video state without loading a video from disk.
             self.state = {
                 "images": {0: self.image_tensor(img)}, "num_frames": 1,
@@ -97,7 +93,7 @@ class Sam2Tracker:
             raise RuntimeError("Initialize SAM2 before tracking")
         if img.shape[:2] != (self.state["video_height"], self.state["video_width"]):
             raise ValueError("Tracker image dimensions changed")
-        with torch.inference_mode(), self.precision():
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             self.frame_index += 1
             index = self.frame_index
             self.state["images"] = {index: self.image_tensor(img)}
@@ -136,9 +132,7 @@ def reply(
     output.flush()
 
 
-def main():
-    output = sys.stdout.buffer
-    sys.stdout = sys.stderr
+def main(output):
     try:
         pickle.load(sys.stdin.buffer)
         print("[sam2] Loading model...", flush=True)
@@ -173,5 +167,4 @@ def main():
             reply(output, result)
 
 
-if __name__ == "__main__":
-    main()
+main(output)
