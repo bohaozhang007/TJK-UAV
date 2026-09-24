@@ -1,0 +1,20 @@
+﻿win:
+cd ~\Desktop\project\TJK-UAV\dev
+python win/server.py --ref-img "reference.jpg" --ref-box "box.txt"
+
+uav:
+roslaunch /home/jkhk/jkhk_robot/release/mission/share/uav_nav/launch/mission.launch
+
+cd ~/TJK-UAV/dev
+python3 task/main.py
+
+uav: to_B test (do not run task/main.py at the same time)
+# Load the ROS environment and cd ~/TJK-UAV/dev in both terminals.
+# Terminal A: subscribe before sending each target; arrival True is published only once.
+python3 to_B/check_goal_reached.py
+
+# Terminal B: replace the example SLAM position (metres) and yaw (degrees).
+python3 to_B/to_target_pose.py --position 1 2 1.5 --yaw 90 --frame world
+
+# After Terminal A reports "Goal reached.", release control to resume the route.
+python3 to_B/release_control.py
