@@ -1,6 +1,6 @@
 import queue
 import threading
-import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -12,7 +12,8 @@ JPEG_QUALITY = 95
 
 class ImageWriter:
     def __init__(self):
-        SAVE_DIR.mkdir(parents=True, exist_ok=True)
+        self.save_dir = SAVE_DIR / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.save_dir.mkdir(parents=True, exist_ok=True)
         # Keep every decoded image without blocking requests on disk writes.
         self.queue = queue.Queue()
         self.worker = threading.Thread(target=self.run)
@@ -23,7 +24,8 @@ class ImageWriter:
         img,
         detections,
     ):
-        self.queue.put((img, detections))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.queue.put((img, detections, timestamp))
 
     def run(self):
         while True:
@@ -31,7 +33,7 @@ class ImageWriter:
             if item is None:
                 return
             try:
-                img, detections = item
+                img, detections, timestamp = item
                 img = img.copy()
                 for box, confidence in detections:
                     x1, y1, x2, y2 = [round(value) for value in box]
@@ -59,7 +61,7 @@ class ImageWriter:
                 )
                 if not ok:
                     raise RuntimeError("Failed to encode saved image")
-                encoded.tofile(SAVE_DIR / f"{time.time_ns()}.jpg")
+                encoded.tofile(self.save_dir / f"img_{timestamp}.jpg")
             except Exception as exc:
                 print(f"Image save failed: {exc}", flush=True)
 

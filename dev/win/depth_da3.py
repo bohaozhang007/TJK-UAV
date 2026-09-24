@@ -141,10 +141,12 @@ def main():
     try:
         args = pickle.load(sys.stdin.buffer)
         img = np.zeros((1080, 1920, 3), dtype=np.uint8)
-        print(f"Loading da3 with {sys.executable}...", flush=True)
+        print("[da3] Loading model...", flush=True)
         model = Da3Depth(*args)
-        print("Warming up da3 at 1920 x 1080...", flush=True)
+        print("[da3] Model loaded.", flush=True)
+        print("[da3] Warming up at 1920 x 1080...", flush=True)
         model.estimate(img)
+        print("[da3] Warmup complete.", flush=True)
     except Exception as exc:
         reply(None, str(exc))
         return

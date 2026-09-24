@@ -3,6 +3,7 @@ import json
 import os
 import pickle
 import subprocess
+import threading
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -30,24 +31,38 @@ class ModelProcess:
         script = {"sam3": "detector_sam3.py", "da3": "depth_da3.py"}[name]
         env = os.environ.copy()
         env["CONDA_PREFIX"] = str(python.parent)
+        env["PYTHONIOENCODING"] = "utf-8"
         env["PATH"] = os.pathsep.join([
             str(python.parent),
             str(python.parent / "Library/bin"),
             str(python.parent / "Scripts"),
             env["PATH"],
         ])
+        print(f"[{name}] Starting model process: {python}", flush=True)
         self.process = subprocess.Popen(
             [str(python), "-u", str(Path(__file__).with_name(script))],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=env,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
+        self.log_worker = threading.Thread(target=self.forward_logs, daemon=True)
+        self.log_worker.start()
         try:
             self.request(init_args)
         except BaseException:
             self.close()
             raise
+
+    def forward_logs(self):
+        # Drain logs independently; stdout remains reserved for binary model replies.
+        for line in self.process.stderr:
+            print(
+                line.decode("utf-8", errors="replace"),
+                end="",
+                flush=True,
+            )
 
     def receive(self):
         try:
@@ -71,6 +86,8 @@ class ModelProcess:
             self.process.terminate()
             self.process.wait()
         self.process.stdout.close()
+        self.log_worker.join()
+        self.process.stderr.close()
 
 
 def decode_img(encoded):

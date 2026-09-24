@@ -154,10 +154,12 @@ def main():
     try:
         args = pickle.load(sys.stdin.buffer)
         img = np.zeros((1080, 1920, 3), dtype=np.uint8)
-        print(f"Loading sam3 with {sys.executable}...", flush=True)
+        print("[sam3] Loading model...", flush=True)
         model = Sam3Detector(*args)
-        print("Warming up sam3 at 1920 x 1080...", flush=True)
+        print("[sam3] Model loaded.", flush=True)
+        print("[sam3] Warming up at 1920 x 1080...", flush=True)
         model.detect(img)
+        print("[sam3] Warmup complete.", flush=True)
     except Exception as exc:
         reply(None, str(exc))
         return
