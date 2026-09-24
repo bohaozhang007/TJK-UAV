@@ -1,6 +1,7 @@
 ﻿win:
 cd ~\Desktop\project\TJK-UAV\dev
 python win/server.py --ref-img "C:\Users\colab999\Desktop\project\TJK-UAV\assets\red.jpg" --ref-box "C:\Users\colab999\Desktop\project\TJK-UAV\assets\red.txt"
+
 uav:
 roslaunch /home/jkhk/jkhk_robot/release/mission/share/uav_nav/launch/mission.launch
 

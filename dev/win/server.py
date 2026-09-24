@@ -129,11 +129,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        self.reply(200, {"ok": True}) if self.path == "/health" else self.reply(404, {"error": "not found"})
+        if self.path != "/health":
+            self.reply(404, {"error": "not found"})
+            return
+        self.reply(200, {"ok": True, "tracker_ready": self.tracker_ready()})
+
+    def tracker_ready(self):
+        # ModelProcess initialization returns only after successful warmup.
+        return (
+            self.server.tracker is not None
+            and self.server.tracker.process.poll() is None
+        )
 
     def do_POST(self):
         if self.path not in ("/detect", "/track/init", "/track"):
             self.reply(404, {"error": "not found"})
+            return
+        if (
+            self.path != "/detect"
+            and not self.tracker_ready()
+        ):
+            self.reply(503, {"error": "Tracker is unavailable; start the server with --autofocus"})
             return
         img = None
         annotations = []
@@ -191,6 +207,11 @@ def main():
         required=True,
         help="Text file containing pixel x1 y1 x2 y2",
     )
+    parser.add_argument(
+        "--autofocus",
+        action="store_true",
+        help="Load and warm up SAM2 to enable autofocus tracking",
+    )
     args = parser.parse_args()
     try:
         reference_img, reference_box = load_reference(args.ref_img, args.ref_box)
@@ -202,10 +223,13 @@ def main():
         server = stack.enter_context(HTTPServer((SERVER_HOST, SERVER_PORT), Handler))
         server.detector = stack.enter_context(closing(ModelProcess("sam3", (reference_img, reference_box, (1080, 1920)))))
         server.depth = stack.enter_context(closing(ModelProcess("da3")))
-        server.tracker = stack.enter_context(closing(ModelProcess("sam2")))
+        server.tracker = None
+        if args.autofocus:
+            server.tracker = stack.enter_context(closing(ModelProcess("sam2")))
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         server.detector_writer = stack.enter_context(closing(ImageWriter("detector", timestamp)))
-        server.tracker_writer = stack.enter_context(closing(ImageWriter("tracker", timestamp)))
+        if args.autofocus:
+            server.tracker_writer = stack.enter_context(closing(ImageWriter("tracker", timestamp)))
         print(f"Ready: http://{SERVER_HOST}:{SERVER_PORT}", flush=True)
         try:
             server.serve_forever()

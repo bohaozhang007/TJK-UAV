@@ -126,6 +126,18 @@ def detect_img(img, pose):
         return json.load(response)
 
 
+def check_tracker():
+    """Require a running tracker that has completed model warmup."""
+    http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with http.open(f"http://{WINDOWS_IP}:{DETECTOR_PORT}/health", timeout=120) as response:
+            status = json.load(response)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to confirm tracker readiness: {exc}") from exc
+    if status.get("tracker_ready") is not True:
+        raise RuntimeError("Tracker is unavailable; start the Windows server with --autofocus and wait for Ready")
+
+
 def track_img(img, box=None):
     """Initialize with a current-image box, or track the next BGR frame."""
     headers = {"Content-Type": "image/jpeg"}
@@ -274,6 +286,8 @@ def set_gimbal(
     pitch_deg,
     yaw_deg,
     guard=None,
+    *,
+    mount=None,
 ):
     """Set absolute joint angles: pitch positive up, yaw positive right."""
     if (
@@ -283,7 +297,9 @@ def set_gimbal(
         or not -180 <= yaw_deg <= 180
     ):
         raise ValueError("Gimbal target is outside its angular limits")
-    status = get_gimbal(guard)
+    # Relative moves reuse the mounting status from their fresh angle query.
+    if mount is None:
+        mount = get_gimbal(guard)["mount"]
     payload = struct.pack(
         "<BHBHB",
         0 if pitch_deg >= 0 else 1,
@@ -297,7 +313,7 @@ def set_gimbal(
         payload,
         {"pitch_deg": pitch_deg, "yaw_deg": yaw_deg},
         guard,
-        status["mount"],
+        mount,
     )
 
 
@@ -307,6 +323,7 @@ def gimbal_pitch(delta_deg, guard=None):
         status["pitch_deg"] + delta_deg,
         status["yaw_deg"],
         guard,
+        mount=status["mount"],
     )
 
 
@@ -316,6 +333,7 @@ def gimbal_yaw(delta_deg, guard=None):
         status["pitch_deg"],
         status["yaw_deg"] + delta_deg,
         guard,
+        mount=status["mount"],
     )
 
 

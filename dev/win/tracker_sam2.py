@@ -24,11 +24,7 @@ WARMUP_SHAPE = (1080, 1920, 3)
 class Sam2Tracker:
     def __init__(self):
         self.predictor = build_sam2_video_predictor(MODEL_CONFIG, str(CHECKPOINT))
-        # The optional hole-filling CUDA extension is unavailable on Windows.
-        self.predictor.fill_hole_area = 0
         self.device = self.predictor.device
-        self.keep_frames = max(self.predictor.max_obj_ptrs_in_encoder,
-                               self.predictor.num_maskmem * self.predictor.memory_temporal_stride_for_eval) + 1
         self.state = None
         self.frame_index = 0
 
@@ -113,14 +109,6 @@ class Sam2Tracker:
                 max_frame_num_to_track=0,
             ):
                 result = mask_result(masks)
-            # Keep the prompt and the recent frames used by temporal attention.
-            histories = [output["non_cond_frame_outputs"]
-                         for output in self.state["output_dict_per_obj"].values()]
-            histories.extend(self.state["frames_tracked_per_obj"].values())
-            for history in histories:
-                for old in list(history):
-                    if old <= index - self.keep_frames:
-                        del history[old]
             if result is None:
                 raise RuntimeError("SAM2 returned no tracking output")
             return result

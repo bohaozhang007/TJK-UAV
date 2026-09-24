@@ -5,25 +5,34 @@ import numpy as np
 import rospy
 
 from hardware.k40t import close_camera, get_img, detect_img, track_img, set_gimbal, gimbal_pitch, gimbal_yaw
-from hardware.k40t import get_zoom, set_zoom
+from hardware.k40t import get_zoom, set_zoom, check_tracker
 from hardware.pose import close_pose, get_pose
 from task.detection import sample_is_fresh
 
 
+# Target matching
 MATCH_DISTANCE_M = 1.0
+
+# Framing completion
 CENTER_TOLERANCE = 0.06
+TARGET_RATIO = 0.4
+SIZE_TOLERANCE = 0.08
 STABLE_FRAMES = 2
+
+# Timing and iteration limits
 MAX_STEPS = 30
 TIMEOUT_S = 180.0
 SETTLE_S = 0.5
 FRAME_MAX_AGE_S = 0.5
+
+# Gimbal control
 YAW_GAIN_DEG = 64.0
 PITCH_GAIN_DEG = 36.0
 DAMPING = 0.7
 MAX_STEP_DEG = 3.0
+
+# Zoom control
 BASELINE_ZOOM = 1.0
-TARGET_RATIO = 0.4
-SIZE_TOLERANCE = 0.08
 ZOOM_STEP_UP = 1.25
 ZOOM_STEP_DOWN = 0.8
 MAX_ZOOM = 160.0
@@ -59,6 +68,8 @@ def center_error(box, shape):
 
 
 def run(flight, plan):
+    # Recheck before any camera movement in case the tracker exited after startup.
+    check_tracker()
     deadline = time.monotonic() + TIMEOUT_S
     interrupted = False
 

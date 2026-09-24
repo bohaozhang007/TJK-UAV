@@ -7,6 +7,7 @@ import rospy
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from util.flight import FlightControl
+from hardware.k40t import check_tracker
 from task.approach_target import prepare as prepare_approaches
 from task.approach_target import run as approach
 from task.autofocus import run as autofocus
@@ -44,6 +45,8 @@ def run_tasks(
 
 
 def main():
+    if autofocus in TASKS:
+        check_tracker()
     rospy.init_node("i7_detection_main", disable_signals=True)
     flight = FlightControl()
     detection = Detection()
