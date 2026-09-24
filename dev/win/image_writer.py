@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 
 
-SAVE_DIR = Path(__file__).resolve().parents[1] / "received_images"
+SAVE_DIR = Path(__file__).resolve().parents[2] / "logs" / "received_images"
 JPEG_QUALITY = 95
 
 
