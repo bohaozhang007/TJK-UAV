@@ -119,13 +119,14 @@ class Sam3Detector:
         self.canvas[:th, :tw] = target_img
 
         self.processor.set_confidence_threshold(confidence_threshold)
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            state = self.processor.set_image(Image.fromarray(cv2.cvtColor(self.canvas, cv2.COLOR_BGR2RGB)))
-            state = self.processor.add_geometric_prompt(
-                box=self.prompt,
-                label=True,
-                state=state,
-            )
+        with torch.inference_mode():
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                state = self.processor.set_image(Image.fromarray(cv2.cvtColor(self.canvas, cv2.COLOR_BGR2RGB)))
+                state = self.processor.add_geometric_prompt(
+                    box=self.prompt,
+                    label=True,
+                    state=state,
+                )
         boxes = state["boxes"].detach().float().cpu().numpy().reshape(-1, 4)
         scores = state["scores"].detach().float().cpu().numpy().reshape(-1)
         detections = select_boxes(

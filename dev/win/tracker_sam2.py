@@ -66,48 +66,49 @@ class Sam2Tracker:
             or not 0 <= box[1] < box[3] <= height
         ):
             raise ValueError("Tracker box must be inside the current image")
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            # Match the local SAM2 video state without loading a video from disk.
-            self.state = {
-                "images": {0: self.image_tensor(img)}, "num_frames": 1,
-                "offload_video_to_cpu": False, "offload_state_to_cpu": False,
-                "video_height": height, "video_width": width,
-                "device": self.device, "storage_device": self.device,
-                "point_inputs_per_obj": {}, "mask_inputs_per_obj": {},
-                "cached_features": {}, "constants": {},
-                "obj_id_to_idx": OrderedDict(), "obj_idx_to_id": OrderedDict(),
-                "obj_ids": [], "output_dict_per_obj": {},
-                "temp_output_dict_per_obj": {}, "frames_tracked_per_obj": {},
-            }
-            _, _, masks = self.predictor.add_new_points_or_box(
-                self.state,
-                frame_idx=0,
-                obj_id=1,
-                box=box,
-            )
-            self.predictor.propagate_in_video_preflight(self.state)
-            return mask_result(masks)
+        with torch.inference_mode():
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                # Match the local SAM2 video state without loading a video from disk.
+                self.state = {
+                    "images": {0: self.image_tensor(img)}, "num_frames": 1,
+                    "video_height": height, "video_width": width,
+                    "device": self.device, "storage_device": self.device,
+                    "point_inputs_per_obj": {}, "mask_inputs_per_obj": {},
+                    "cached_features": {}, "constants": {},
+                    "obj_id_to_idx": OrderedDict(), "obj_idx_to_id": OrderedDict(),
+                    "obj_ids": [], "output_dict_per_obj": {},
+                    "temp_output_dict_per_obj": {}, "frames_tracked_per_obj": {},
+                }
+                _, _, masks = self.predictor.add_new_points_or_box(
+                    self.state,
+                    frame_idx=0,
+                    obj_id=1,
+                    box=box,
+                )
+                self.predictor.propagate_in_video_preflight(self.state)
+                return mask_result(masks)
 
     def track(self, img):
         if self.state is None:
             raise RuntimeError("Initialize SAM2 before tracking")
         if img.shape[:2] != (self.state["video_height"], self.state["video_width"]):
             raise ValueError("Tracker image dimensions changed")
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            self.frame_index += 1
-            index = self.frame_index
-            self.state["images"] = {index: self.image_tensor(img)}
-            self.state["num_frames"] = index + 1
-            result = None
-            for _, _, masks in self.predictor.propagate_in_video(
-                self.state,
-                start_frame_idx=index,
-                max_frame_num_to_track=0,
-            ):
-                result = mask_result(masks)
-            if result is None:
-                raise RuntimeError("SAM2 returned no tracking output")
-            return result
+        with torch.inference_mode():
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                self.frame_index += 1
+                index = self.frame_index
+                self.state["images"] = {index: self.image_tensor(img)}
+                self.state["num_frames"] = index + 1
+                result = None
+                for _, _, masks in self.predictor.propagate_in_video(
+                    self.state,
+                    start_frame_idx=index,
+                    max_frame_num_to_track=0,
+                ):
+                    result = mask_result(masks)
+                if result is None:
+                    raise RuntimeError("SAM2 returned no tracking output")
+                return result
 
     def warmup(self):
         img = np.zeros(WARMUP_SHAPE, dtype=np.uint8)
