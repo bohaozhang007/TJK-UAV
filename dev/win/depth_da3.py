@@ -1,8 +1,11 @@
 import pickle
-from contextlib import redirect_stdout
 import os
 from pathlib import Path
 import sys
+
+# Reserve the binary reply pipe before any third-party imports emit logs.
+output = sys.stdout.buffer
+sys.stdout = sys.stderr
 
 import cv2
 import numpy as np
@@ -12,8 +15,7 @@ from scipy.spatial.transform import Rotation
 MODEL_ROOT = Path(__file__).resolve().parents[3] / "depth-anything-3"
 sys.path.insert(0, str(MODEL_ROOT / "src"))
 os.environ.setdefault("XFORMERS_FORCE_DISABLE_TRITON", "1")
-with redirect_stdout(sys.stderr):
-    from depth_anything_3.api import DepthAnything3
+from depth_anything_3.api import DepthAnything3
 
 
 CHECKPOINT = MODEL_ROOT / "checkpoints/DA3NESTED-GIANT-LARGE"
@@ -22,49 +24,6 @@ CHECKPOINT = MODEL_ROOT / "checkpoints/DA3NESTED-GIANT-LARGE"
 BODY_FROM_OPTICAL = np.array([[0., 0., 1.], [-1., 0., 0.], [0., -1., 0.]])
 MIN_MASK_PIXELS = 16
 MAX_RELATIVE_DEPTH_MAD = 0.3
-
-
-def world_from_camera(pose):
-    position = np.asarray(pose["position_m"], dtype=float)
-    quaternion = np.asarray(pose["quaternion_xyzw"], dtype=float)
-    if (
-        position.shape != (3,)
-        or quaternion.shape != (4,)
-        or not np.isfinite(position).all()
-        or not np.isfinite(quaternion).all()
-        or abs(np.linalg.norm(quaternion) - 1.0) > 0.02
-    ):
-        raise ValueError("Pose must contain a finite position and unit xyzw quaternion")
-    transform = np.eye(4)
-    transform[:3, :3] = Rotation.from_quat(quaternion).as_matrix() @ BODY_FROM_OPTICAL
-    transform[:3, 3] = position
-    return transform
-
-
-def mask_points(
-    depth,
-    mask,
-    intrinsics,
-):
-    """Return robust visible-surface points in optical coordinates, in metres."""
-    ys, xs = np.nonzero(
-        mask
-        & np.isfinite(depth)
-        & (depth > 0)
-    )
-    if len(xs) < MIN_MASK_PIXELS:
-        raise ValueError("Insufficient valid target depth pixels")
-    z = depth[ys, xs]
-    median = np.median(z)
-    mad = np.median(np.abs(z - median))
-    if mad / median > MAX_RELATIVE_DEPTH_MAD:
-        raise ValueError("Target depth is too dispersed")
-    keep = np.abs(z - median) <= max(3 * mad, median * 0.05)
-    if np.count_nonzero(keep) < MIN_MASK_PIXELS:
-        raise ValueError("Insufficient target depth inliers")
-    pixels = np.column_stack((xs[keep], ys[keep], np.ones(keep.sum())))
-    rays = np.linalg.solve(intrinsics, pixels.T).T
-    return rays * z[keep, None]
 
 
 class Da3Depth:
@@ -129,11 +88,50 @@ class Da3Depth:
         return results
 
 
-def main():
-    # Reserve stdout for binary replies; model logs go to stderr.
-    output = sys.stdout.buffer
-    sys.stdout = sys.stderr
+def world_from_camera(pose):
+    position = np.asarray(pose["position_m"], dtype=float)
+    quaternion = np.asarray(pose["quaternion_xyzw"], dtype=float)
+    if (
+        position.shape != (3,)
+        or quaternion.shape != (4,)
+        or not np.isfinite(position).all()
+        or not np.isfinite(quaternion).all()
+        or abs(np.linalg.norm(quaternion) - 1.0) > 0.02
+    ):
+        raise ValueError("Pose must contain a finite position and unit xyzw quaternion")
+    transform = np.eye(4)
+    transform[:3, :3] = Rotation.from_quat(quaternion).as_matrix() @ BODY_FROM_OPTICAL
+    transform[:3, 3] = position
+    return transform
 
+
+def mask_points(
+    depth,
+    mask,
+    intrinsics,
+):
+    """Return robust visible-surface points in optical coordinates, in metres."""
+    ys, xs = np.nonzero(
+        mask
+        & np.isfinite(depth)
+        & (depth > 0)
+    )
+    if len(xs) < MIN_MASK_PIXELS:
+        raise ValueError("Insufficient valid target depth pixels")
+    z = depth[ys, xs]
+    median = np.median(z)
+    mad = np.median(np.abs(z - median))
+    if mad / median > MAX_RELATIVE_DEPTH_MAD:
+        raise ValueError("Target depth is too dispersed")
+    keep = np.abs(z - median) <= max(3 * mad, median * 0.05)
+    if np.count_nonzero(keep) < MIN_MASK_PIXELS:
+        raise ValueError("Insufficient target depth inliers")
+    pixels = np.column_stack((xs[keep], ys[keep], np.ones(keep.sum())))
+    rays = np.linalg.solve(intrinsics, pixels.T).T
+    return rays * z[keep, None]
+
+
+def main(output):
     def reply(result, error=None):
         pickle.dump((result, error), output)
         output.flush()
@@ -165,5 +163,4 @@ def main():
             reply(result)
 
 
-if __name__ == "__main__":
-    main()
+main(output)
