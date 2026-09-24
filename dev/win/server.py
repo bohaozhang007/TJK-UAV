@@ -4,7 +4,8 @@ import os
 import pickle
 import subprocess
 import threading
-from contextlib import closing
+from contextlib import ExitStack, closing
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -28,7 +29,7 @@ class ModelProcess:
         init_args=(),
     ):
         python = CONDA_ENVS / name / "python.exe"
-        script = {"sam3": "detector_sam3.py", "da3": "depth_da3.py"}[name]
+        script = {"sam3": "detector_sam3.py", "da3": "depth_da3.py", "sam2": "tracker_sam2.py"}[name]
         env = os.environ.copy()
         env["CONDA_PREFIX"] = str(python.parent)
         env["PYTHONIOENCODING"] = "utf-8"
@@ -131,7 +132,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {"ok": True}) if self.path == "/health" else self.reply(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path != "/detect":
+        if self.path not in ("/detect", "/track/init", "/track"):
             self.reply(404, {"error": "not found"})
             return
         img = None
@@ -142,25 +143,38 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 64 * 1024 * 1024:
                 raise ValueError("Request size must be between 1 byte and 64 MiB")
             img = decode_img(self.rfile.read(length))
-            pose = json.loads(self.headers["X-Pose"])
-            detections = self.server.detector.request((img,))
-            annotations = [(item["box"], item["confidence"]) for item in detections]
-            if detections:
-                locations = self.server.depth.request((
-                    img,
-                    [item.pop("mask") for item in detections],
-                    pose,
-                ))
-                detections = [{**item, **location, "world_frame": pose["frame_id"]}
-                              for item, location in zip(detections, locations)]
+            if self.path == "/detect":
+                pose = json.loads(self.headers["X-Pose"])
+                result = self.server.detector.request((img,))
+                annotations = [item.copy() for item in result]
+                if result:
+                    locations = self.server.depth.request((
+                        img,
+                        [item.pop("mask") for item in result],
+                        pose,
+                    ))
+                    result = [{**item, **location, "world_frame": pose["frame_id"]}
+                              for item, location in zip(result, locations)]
+            else:
+                box = json.loads(self.headers["X-Box"]) if self.path == "/track/init" else None
+                if (
+                    self.path == "/track/init"
+                    and box is None
+                ):
+                    raise ValueError("Tracker initialization requires a box")
+                result = self.server.tracker.request((img, box))
+                if result["box"] is not None:
+                    annotations = [result.copy()]
+                result.pop("mask")
         except Exception as exc:
             self.reply(500, {"error": str(exc)})
         else:
-            self.reply(200, detections)
+            self.reply(200, result)
         finally:
             # Queue after replying; the worker owns drawing, encoding and disk I/O.
             if img is not None:
-                self.server.image_writer.submit(img, annotations)
+                writer = self.server.detector_writer if self.path == "/detect" else self.server.tracker_writer
+                writer.submit(img, annotations)
 
 
 def main():
@@ -184,16 +198,19 @@ def main():
         parser.error(str(exc))
 
     # Each child loads and warms up its model before accepting requests.
-    with HTTPServer((SERVER_HOST, SERVER_PORT), Handler) as server:
-        with closing(ModelProcess("sam3", (reference_img, reference_box, (1080, 1920)))) as detector:
-            with closing(ModelProcess("da3")) as depth, closing(ImageWriter()) as image_writer:
-                server.detector, server.depth = detector, depth
-                server.image_writer = image_writer
-                print(f"Ready: http://{SERVER_HOST}:{SERVER_PORT}", flush=True)
-                try:
-                    server.serve_forever()
-                except KeyboardInterrupt:
-                    pass
+    with ExitStack() as stack:
+        server = stack.enter_context(HTTPServer((SERVER_HOST, SERVER_PORT), Handler))
+        server.detector = stack.enter_context(closing(ModelProcess("sam3", (reference_img, reference_box, (1080, 1920)))))
+        server.depth = stack.enter_context(closing(ModelProcess("da3")))
+        server.tracker = stack.enter_context(closing(ModelProcess("sam2")))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        server.detector_writer = stack.enter_context(closing(ImageWriter("detector", timestamp)))
+        server.tracker_writer = stack.enter_context(closing(ImageWriter("tracker", timestamp)))
+        print(f"Ready: http://{SERVER_HOST}:{SERVER_PORT}", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

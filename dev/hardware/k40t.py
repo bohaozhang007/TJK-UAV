@@ -1,5 +1,9 @@
 import atexit
 import json
+import math
+import secrets
+import socket
+import struct
 import threading
 import time
 import urllib.request
@@ -15,6 +19,9 @@ STREAM_OPEN_TIMEOUT_S = 3.0
 STREAM_READ_TIMEOUT_S = 1.0
 FIRST_FRAME_TIMEOUT_S = 5.0
 FRAME_WAIT_TIMEOUT_S = 0.5
+CAMERA_ADDRESS = ("192.168.144.64", 1030)
+GIMBAL_TIMEOUT_S = 5.0
+GIMBAL_TOLERANCE_DEG = 0.5
 
 
 _worker = None
@@ -107,7 +114,7 @@ def encode_img(img):
     return encoded.tobytes()
 
 
-def send_img(img, pose):
+def detect_img(img, pose):
     """Send a JPEG image and its paired pose; return detections with 3D positions."""
     request = urllib.request.Request(
         f"http://{WINDOWS_IP}:{DETECTOR_PORT}/detect",
@@ -117,3 +124,226 @@ def send_img(img, pose):
     http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with http.open(request, timeout=120) as response:
         return json.load(response)
+
+
+def track_img(img, box=None):
+    """Initialize with a current-image box, or track the next BGR frame."""
+    headers = {"Content-Type": "image/jpeg"}
+    path = "/track"
+    if box is not None:
+        headers["X-Box"] = json.dumps(box, allow_nan=False)
+        path = "/track/init"
+    request = urllib.request.Request(
+        f"http://{WINDOWS_IP}:{DETECTOR_PORT}{path}",
+        encode_img(img),
+        headers,
+    )
+    http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with http.open(request, timeout=120) as response:
+        return json.load(response)
+
+
+def crc16(data):
+    crc = 0xFFFF
+    for byte in data:
+        value = byte ^ (crc & 0xFF)
+        value = (value ^ (value << 4)) & 0xFF
+        crc = ((crc >> 8) ^ (value << 8) ^ (value << 3) ^ (value >> 4)) & 0xFFFF
+    return crc
+
+
+def camera_request(
+    message_id,
+    payload,
+    target=None,
+    guard=None,
+    mount=None,
+    kind="gimbal",
+):
+    sequence = secrets.randbelow(256)
+    body = bytes((len(payload), 4, 1, sequence, 1, 1))
+    body += message_id.to_bytes(3, "little") + payload
+    packet = b"\xfd" + body + struct.pack("<H", crc16(body))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect(CAMERA_ADDRESS)
+        sock.settimeout(0.2)
+        if guard is not None:
+            guard()
+        sock.send(packet)
+        deadline = time.monotonic() + GIMBAL_TIMEOUT_S
+        acknowledged = False
+        stable = 0
+        while time.monotonic() < deadline:
+            if guard is not None:
+                guard()
+            try:
+                raw = sock.recv(4096)
+            except socket.timeout:
+                continue
+            if (
+                len(raw) < 12
+                or raw[0] != 0xFD
+                or len(raw) != raw[1] + 12
+                or raw[2:4] != b"\x01\x01"
+                or raw[5:7] != b"\x04\x01"
+                or crc16(raw[1:-2]) != int.from_bytes(raw[-2:], "little")
+            ):
+                continue
+            reply_id = int.from_bytes(raw[7:10], "little")
+            data = raw[10:-2]
+            if (
+                reply_id == message_id | 0x010000
+                and raw[4] == sequence
+                and len(data) >= 2
+            ):
+                if data[:2] != b"\x00\x00":
+                    raise RuntimeError("K40T rejected camera command")
+                acknowledged = True
+            elif (
+                acknowledged
+                and kind == "zoom"
+                and reply_id in (0x000005, 0x020005)
+                and len(data) >= 15
+            ):
+                moving, _, tenths = struct.unpack_from("<BHH", data)
+                if (
+                    moving not in (0, 1)
+                    or not 10 <= tenths <= 1600
+                ):
+                    raise RuntimeError("Invalid K40T zoom status")
+                if target is None:
+                    return tenths / 10.0
+                if (
+                    moving == 0
+                    and tenths == target
+                ):
+                    return tenths / 10.0
+            elif (
+                acknowledged
+                and kind == "gimbal"
+                and reply_id in (1, 0x020001)
+                and len(data) >= 7
+            ):
+                if (
+                    data[0] & 0x0F
+                    or data[4] not in (0, 1)
+                ):
+                    raise RuntimeError("Invalid K40T gimbal status")
+                if (
+                    mount is not None
+                    and mount != data[4]
+                ):
+                    raise RuntimeError("K40T mounting orientation changed")
+                mount = data[4]
+            elif (
+                acknowledged
+                and kind == "gimbal"
+                and mount is not None
+                and reply_id in (2, 0x020002)
+                and len(data) >= 20
+            ):
+                yaw, _, pitch = struct.unpack_from("<hhh", data)
+                if (
+                    abs(yaw) > 18000
+                    or abs(pitch) > 18000
+                ):
+                    raise RuntimeError("Invalid K40T joint angles")
+                yaw, pitch = yaw / 100.0, pitch / 100.0
+                if mount == 1:
+                    pitch = 180 - pitch if pitch > 0 else -180 - pitch
+                status = {"pitch_deg": pitch, "yaw_deg": yaw, "mount": mount}
+                if target is None:
+                    return status
+                reached = all(abs(status[key] - target[key]) <= GIMBAL_TOLERANCE_DEG for key in target)
+                stable = stable + 1 if reached else 0
+                if stable >= 3:
+                    return status
+        # Never resend a movement whose outcome is unknown.
+        raise RuntimeError(f"K40T {kind} confirmation timed out")
+
+
+def get_gimbal(guard=None):
+    return camera_request(
+        0x000200,
+        b"\x01\x00",
+        guard=guard,
+    )
+
+
+def set_gimbal(
+    pitch_deg,
+    yaw_deg,
+    guard=None,
+):
+    """Set absolute joint angles: pitch positive up, yaw positive right."""
+    if (
+        not math.isfinite(pitch_deg)
+        or not math.isfinite(yaw_deg)
+        or not -90 <= pitch_deg <= 30
+        or not -180 <= yaw_deg <= 180
+    ):
+        raise ValueError("Gimbal target is outside its angular limits")
+    status = get_gimbal(guard)
+    payload = struct.pack(
+        "<BHBHB",
+        0 if pitch_deg >= 0 else 1,
+        round(abs(pitch_deg) * 100),
+        1 if yaw_deg >= 0 else 0,
+        round(abs(yaw_deg) * 100),
+        0,
+    )
+    return camera_request(
+        0x12,
+        payload,
+        {"pitch_deg": pitch_deg, "yaw_deg": yaw_deg},
+        guard,
+        status["mount"],
+    )
+
+
+def gimbal_pitch(delta_deg, guard=None):
+    status = get_gimbal(guard)
+    return set_gimbal(
+        status["pitch_deg"] + delta_deg,
+        status["yaw_deg"],
+        guard,
+    )
+
+
+def gimbal_yaw(delta_deg, guard=None):
+    status = get_gimbal(guard)
+    return set_gimbal(
+        status["pitch_deg"],
+        status["yaw_deg"] + delta_deg,
+        guard,
+    )
+
+
+def get_zoom(guard=None):
+    return camera_request(
+        0x000200,
+        b"\x01\x00",
+        guard=guard,
+        kind="zoom",
+    )
+
+
+def set_zoom(ratio, guard=None):
+    """Set absolute zoom; wait for measured magnification and motor completion."""
+    if (
+        not math.isfinite(ratio)
+        or not 1 <= ratio <= 160
+    ):
+        raise ValueError("Zoom must be between 1 and 160")
+    tenths = round(ratio * 10)
+    return camera_request(
+        0x000304,
+        struct.pack(
+            "<BH",
+            0,
+            tenths,
+        ),
+        target=tenths,
+        guard=guard,
+        kind="zoom",
+    )

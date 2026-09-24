@@ -42,7 +42,7 @@ def make_pose(current_pose, target):
 
 
 def prepare(targets):
-    # Compute every goal from the same measured pose after returning to the exposure point.
+    # Compute every goal from the same measured pose before visiting any target.
     try:
         current_pose, _ = get_pose()
     finally:
@@ -50,17 +50,17 @@ def prepare(targets):
     goals = []
     for target in targets:
         goal = make_pose(current_pose, target)
-        if goal is not None:
-            goals.append(goal)
-    # Visit fixed approach points from nearest to farthest relative to the exposure point.
+        goals.append({"target": target, "pose": goal, "hold_pose": current_pose})
+    # Visit fixed approach points from nearest to farthest relative to the planning pose.
     position = np.asarray(current_pose["position_m"])
-    return sorted(goals, key=lambda goal: np.linalg.norm(np.asarray(goal["position_m"]) - position))
+    return sorted(goals, key=lambda item: np.linalg.norm(
+        np.asarray(item["pose"]["position_m"]) - position) if item["pose"] is not None else 0.0)
 
 
-def run(flight, goals):
-    for goal in goals:
-        if not flight.is_offboard():
-            return False
-        if not flight.go_to_pose(goal):
-            return False
-    return flight.is_offboard()
+def run(flight, plan):
+    if not flight.is_offboard():
+        return False
+    if plan["pose"] is None:
+        # Acquire control without approaching when the target is already close.
+        return flight.go_to_pose(plan["hold_pose"])
+    return flight.go_to_pose(plan["pose"])

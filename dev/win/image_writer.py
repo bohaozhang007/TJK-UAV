@@ -6,13 +6,19 @@ from pathlib import Path
 import cv2
 
 
-SAVE_DIR = Path(__file__).resolve().parents[2] / "logs" / "received_images"
+SAVE_DIR = Path(__file__).resolve().parents[2] / "logs"
 JPEG_QUALITY = 95
 
 
 class ImageWriter:
-    def __init__(self):
-        self.save_dir = SAVE_DIR / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    def __init__(
+        self,
+        kind="detector",
+        timestamp=None,
+    ):
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.save_dir = SAVE_DIR / kind / timestamp
         self.save_dir.mkdir(parents=True, exist_ok=True)
         # Keep every decoded image without blocking requests on disk writes.
         self.queue = queue.Queue()
@@ -35,7 +41,12 @@ class ImageWriter:
             try:
                 img, detections, timestamp = item
                 img = img.copy()
-                for box, confidence in detections:
+                for detection in detections:
+                    box = detection["box"]
+                    mask = detection.get("mask")
+                    if mask is not None:
+                        img[mask] = img[mask] * 0.6 + (0, 100, 0)
+                    confidence = detection.get("confidence")
                     x1, y1, x2, y2 = [round(value) for value in box]
                     cv2.rectangle(
                         img,
@@ -46,7 +57,7 @@ class ImageWriter:
                     )
                     cv2.putText(
                         img,
-                        f"{confidence:.3f}",
+                        "target" if confidence is None else f"{confidence:.3f}",
                         (x1, max(20, y1 - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 import rospy
 
 from util.dedup import select_new_targets
-from hardware.k40t import close_camera, get_img, send_img
+from hardware.k40t import close_camera, get_img, detect_img
 from hardware.pose import close_pose, get_pose
 
 
@@ -112,7 +112,7 @@ class Detection:
                     self.pause()
                     return None
                 try:
-                    detections = send_img(img, pose)
+                    detections = detect_img(img, pose)
                     break
                 except Exception as exc:
                     rospy.logwarn(f"Frame {frame_id}, attempt {attempt + 1}/{SEND_ATTEMPTS}: {exc}")
