@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import rospy
 
-from hardware.k40t import close_camera, get_img, detect_img, track_img, set_gimbal, gimbal_pitch, gimbal_yaw
+from hardware.k40t import close_camera, get_img, detect_img, track_img, get_gimbal, set_gimbal
 from hardware.k40t import get_zoom, set_zoom, check_tracker
 from hardware.pose import close_pose, get_pose
 from task.detection import sample_is_fresh
@@ -21,7 +21,6 @@ STABLE_FRAMES = 2
 
 # Timing and iteration limits
 MAX_STEPS = 30
-TIMEOUT_S = 180.0
 SETTLE_S = 0.5
 FRAME_MAX_AGE_S = 0.5
 
@@ -70,26 +69,16 @@ def center_error(box, shape):
 def run(flight, plan):
     # Recheck before any camera movement in case the tracker exited after startup.
     check_tracker()
-    deadline = time.monotonic() + TIMEOUT_S
     interrupted = False
 
-    def guard():
-        if not flight.is_offboard():
-            raise RuntimeError("Autofocus interrupted: OFFBOARD is unavailable")
-        if time.monotonic() >= deadline:
-            raise RuntimeError("Autofocus timed out")
-
     try:
-        guard()
-        set_zoom(BASELINE_ZOOM, guard)
+        set_zoom(BASELINE_ZOOM)
         # DA3 assumes the forward camera mounting; reacquire before moving the gimbal.
         set_gimbal(
             0.0,
             0.0,
-            guard,
         )
         time.sleep(SETTLE_S)
-        guard()
         with ThreadPoolExecutor(max_workers=2) as readers:
             img_future = readers.submit(get_img)
             pose_future = readers.submit(get_pose)
@@ -99,20 +88,17 @@ def run(flight, plan):
         img, _ = img_sample
         pose, _ = pose_sample
         detections = detect_img(img, pose)
-        guard()
         box = match_target(detections, plan["target"])
         result = track_img(img, box)
         if result["box"] is None:
             raise RuntimeError("SAM2 could not initialize the autofocus target")
         stable = 0
         for _ in range(MAX_STEPS):
-            guard()
             time.sleep(SETTLE_S)
             img, received = get_img()
             if time.monotonic() - received > FRAME_MAX_AGE_S:
                 raise RuntimeError("Autofocus image is stale")
             result = track_img(img)
-            guard()
             if result["box"] is None:
                 raise RuntimeError("SAM2 lost the autofocus target")
             error = center_error(result["box"], img.shape)
@@ -130,7 +116,7 @@ def run(flight, plan):
                 return True
             if framed:
                 continue
-            zoom = get_zoom(guard)
+            zoom = get_zoom()
             if centered:
                 desired = float(np.clip(
                     zoom * TARGET_RATIO / ratio,
@@ -140,7 +126,7 @@ def run(flight, plan):
                 desired = round(min(MAX_ZOOM, max(BASELINE_ZOOM, desired)), 1)
                 if abs(desired - zoom) < 0.05:
                     raise RuntimeError("Target size cannot be reached within the available zoom range")
-                set_zoom(desired, guard)
+                set_zoom(desired)
                 continue
             # Match v22's reference-resolution gains; move one axis per fresh frame.
             axis = int(abs(error[1]) > abs(error[0]))
@@ -150,24 +136,25 @@ def run(flight, plan):
                 -MAX_STEP_DEG,
                 MAX_STEP_DEG,
             )), 2)
-            move = gimbal_pitch if axis else gimbal_yaw
-            move(delta, guard)
+            status = get_gimbal()
+            pitch_deg, yaw_deg = status["pitch_deg"], status["yaw_deg"]
+            if axis:
+                pitch_deg += delta
+            else:
+                yaw_deg += delta
+            set_gimbal(pitch_deg, yaw_deg)
         raise RuntimeError("Autofocus reached its step limit")
     except KeyboardInterrupt:
         interrupted = True
         raise
     finally:
         try:
-            # Do not move the gimbal after manual takeover or ROS shutdown.
-            if (
-                not interrupted
-                and flight.is_offboard()
-            ):
-                set_zoom(BASELINE_ZOOM, lambda: require_offboard(flight))
+            # Do not move the gimbal after a keyboard interruption.
+            if not interrupted:
+                set_zoom(BASELINE_ZOOM)
                 set_gimbal(
                     0.0,
                     0.0,
-                    lambda: require_offboard(flight),
                 )
                 time.sleep(SETTLE_S)
         finally:
@@ -175,8 +162,3 @@ def run(flight, plan):
                 close_camera()
             finally:
                 close_pose()
-
-
-def require_offboard(flight):
-    if not flight.is_offboard():
-        raise RuntimeError("Gimbal restore interrupted: OFFBOARD is unavailable")

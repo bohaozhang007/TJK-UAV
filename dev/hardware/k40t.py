@@ -7,12 +7,15 @@ import struct
 import threading
 import time
 import urllib.request
+import warnings
 
 import cv2
 
 
 # Video stream and frame read timeouts.
 RTSP_URL = "rtsp://192.168.144.64:558/live/single"
+
+# Image read timeout.
 STREAM_OPEN_TIMEOUT_S = 3.0
 STREAM_READ_TIMEOUT_S = 1.0
 FIRST_FRAME_TIMEOUT_S = 5.0
@@ -23,11 +26,17 @@ WINDOWS_IP = "192.168.31.66"
 DETECTOR_PORT = 8790
 JPEG_QUALITY = 95
 
-# Gimbal control and position tolerance.
+# Gimbal control IP.
 CAMERA_ADDRESS = ("192.168.144.64", 1030)
-GIMBAL_TIMEOUT_S = 5.0
+CAMERA_RECV_TIMEOUT_S = 0.2
+CAMERA_EXECUTE_TIMEOUT_S = 5.0
+
+# Gimbal tolerance and timeout.
 GIMBAL_TOLERANCE_DEG = 0.5
 GIMBAL_STABLE_READINGS = 3
+
+# Zoom tolerance.
+ZOOM_TOLERANCE_TENTHS = 1
 
 
 _worker = None
@@ -174,7 +183,6 @@ def camera_request(
     message_id,
     payload,
     target=None,
-    guard=None,
     mount=None,
     kind="gimbal",
 ):
@@ -184,16 +192,12 @@ def camera_request(
     packet = b"\xfd" + body + struct.pack("<H", crc16(body))
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.connect(CAMERA_ADDRESS)
-        sock.settimeout(0.2)
-        if guard is not None:
-            guard()
+        sock.settimeout(CAMERA_RECV_TIMEOUT_S)
         sock.send(packet)
-        deadline = time.monotonic() + GIMBAL_TIMEOUT_S
+        deadline = time.monotonic() + CAMERA_EXECUTE_TIMEOUT_S
         acknowledged = False
         stable = 0
         while time.monotonic() < deadline:
-            if guard is not None:
-                guard()
             try:
                 raw = sock.recv(4096)
             except socket.timeout:
@@ -233,7 +237,7 @@ def camera_request(
                     return tenths / 10.0
                 if (
                     moving == 0
-                    and tenths == target
+                    and abs(tenths - target) <= ZOOM_TOLERANCE_TENTHS
                 ):
                     return tenths / 10.0
             elif (
@@ -280,32 +284,35 @@ def camera_request(
         raise RuntimeError(f"K40T {kind} confirmation timed out")
 
 
-def get_gimbal(guard=None):
+def get_gimbal():
     return camera_request(
         0x000200,
         b"\x01\x00",
-        guard=guard,
     )
 
 
 def set_gimbal(
     pitch_deg,
     yaw_deg,
-    guard=None,
-    *,
-    mount=None,
 ):
     """Set absolute joint angles: pitch positive up, yaw positive right."""
     if (
         not math.isfinite(pitch_deg)
         or not math.isfinite(yaw_deg)
-        or not -90 <= pitch_deg <= 30
-        or not -180 <= yaw_deg <= 180
     ):
-        raise ValueError("Gimbal target is outside its angular limits")
-    # Relative moves reuse the mounting status from their fresh angle query.
-    if mount is None:
-        mount = get_gimbal(guard)["mount"]
+        raise ValueError("Gimbal target angles must be finite")
+    if not -90 <= pitch_deg <= 30:
+        warnings.warn(
+            f"K40T pitch target {pitch_deg:g}° is outside [-90°, 30°]; clamping",
+            stacklevel=2,
+        )
+        pitch_deg = max(-90, min(pitch_deg, 30))
+    if not -120 <= yaw_deg <= 120:
+        warnings.warn(
+            f"K40T yaw target {yaw_deg:g}° is outside [-120°, 120°]; clamping",
+            stacklevel=2,
+        )
+        yaw_deg = max(-120, min(yaw_deg, 120))
     payload = struct.pack(
         "<BHBHB",
         0 if pitch_deg >= 0 else 1,
@@ -318,47 +325,27 @@ def set_gimbal(
         0x12,
         payload,
         {"pitch_deg": pitch_deg, "yaw_deg": yaw_deg},
-        guard,
-        mount,
     )
 
 
-def gimbal_pitch(delta_deg, guard=None):
-    status = get_gimbal(guard)
-    return set_gimbal(
-        status["pitch_deg"] + delta_deg,
-        status["yaw_deg"],
-        guard,
-        mount=status["mount"],
-    )
-
-
-def gimbal_yaw(delta_deg, guard=None):
-    status = get_gimbal(guard)
-    return set_gimbal(
-        status["pitch_deg"],
-        status["yaw_deg"] + delta_deg,
-        guard,
-        mount=status["mount"],
-    )
-
-
-def get_zoom(guard=None):
+def get_zoom():
     return camera_request(
         0x000200,
         b"\x01\x00",
-        guard=guard,
         kind="zoom",
     )
 
 
-def set_zoom(ratio, guard=None):
+def set_zoom(ratio):
     """Set absolute zoom; wait for measured magnification and motor completion."""
-    if (
-        not math.isfinite(ratio)
-        or not 1 <= ratio <= 160
-    ):
-        raise ValueError("Zoom must be between 1 and 160")
+    if not math.isfinite(ratio):
+        raise ValueError("Zoom ratio must be finite")
+    if not 1 <= ratio <= 160:
+        warnings.warn(
+            f"K40T zoom target {ratio:g}x is outside [1x, 160x]; clamping",
+            stacklevel=2,
+        )
+        ratio = max(1, min(ratio, 160))
     tenths = round(ratio * 10)
     return camera_request(
         0x000304,
@@ -368,6 +355,5 @@ def set_zoom(ratio, guard=None):
             tenths,
         ),
         target=tenths,
-        guard=guard,
         kind="zoom",
     )
