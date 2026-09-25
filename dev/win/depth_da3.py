@@ -1,4 +1,5 @@
 import pickle
+from model_ipc import reply
 import os
 from pathlib import Path
 import sys
@@ -19,6 +20,7 @@ from depth_anything_3.api import DepthAnything3
 
 
 CHECKPOINT = MODEL_ROOT / "checkpoints/DA3NESTED-GIANT-LARGE"
+WARMUP_SHAPE = (1080, 1920, 3)
 
 # Optical right/down/forward -> body forward/left/up; no mounting offset or gimbal rotation.
 BODY_FROM_OPTICAL = np.array([[0., 0., 1.], [-1., 0., 0.], [0., -1., 0.]])
@@ -87,6 +89,10 @@ class Da3Depth:
             results.append(result)
         return results
 
+    def warmup(self):
+        img = np.zeros(WARMUP_SHAPE, dtype=np.uint8)
+        self.estimate(img)
+
 
 def world_from_camera(pose):
     position = np.asarray(pose["position_m"], dtype=float)
@@ -132,35 +138,30 @@ def mask_points(
 
 
 def main(output):
-    def reply(result, error=None):
-        pickle.dump((result, error), output)
-        output.flush()
-
     try:
-        args = pickle.load(sys.stdin.buffer)
-        img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        pickle.load(sys.stdin.buffer)
         print("[da3] Loading model...", flush=True)
-        model = Da3Depth(*args)
+        model = Da3Depth()
         print("[da3] Model loaded.", flush=True)
         print("[da3] Warming up at 1920 x 1080...", flush=True)
-        model.estimate(img)
+        model.warmup()
         print("[da3] Warmup complete.", flush=True)
     except Exception as exc:
-        reply(None, str(exc))
+        reply(output, None, str(exc))
         return
-    reply(None)
+    reply(output, None)
 
     while True:
         try:
-            args = pickle.load(sys.stdin.buffer)
+            img, masks, pose = pickle.load(sys.stdin.buffer)
         except EOFError:
             return
         try:
-            result = model.locate(*args)
+            result = model.locate(img, masks, pose)
         except Exception as exc:
-            reply(None, str(exc))
+            reply(output, None, str(exc))
         else:
-            reply(result)
+            reply(output, result)
 
 
 main(output)

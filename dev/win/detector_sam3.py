@@ -1,7 +1,11 @@
 import pickle
-from contextlib import redirect_stdout
+from model_ipc import reply
 import sys
 from pathlib import Path
+
+# Reserve the binary reply pipe before any third-party imports emit logs.
+output = sys.stdout.buffer
+sys.stdout = sys.stderr
 
 import cv2
 import numpy as np
@@ -11,9 +15,8 @@ from PIL import Image
 
 MODEL_ROOT = Path(__file__).resolve().parents[3] / "sam3"
 sys.path.insert(0, str(MODEL_ROOT))
-with redirect_stdout(sys.stderr):
-    from sam3.model.sam3_image_processor import Sam3Processor
-    from sam3.model_builder import build_sam3_image_model
+from sam3.model.sam3_image_processor import Sam3Processor
+from sam3.model_builder import build_sam3_image_model
 
 
 CHECKPOINT = MODEL_ROOT / "sam3.pt"
@@ -143,28 +146,20 @@ class Sam3Detector:
         return detections
 
 
-def main():
-    # Reserve stdout for binary replies; model logs go to stderr.
-    output = sys.stdout.buffer
-    sys.stdout = sys.stderr
-
-    def reply(result, error=None):
-        pickle.dump((result, error), output)
-        output.flush()
-
+def main(output):
     try:
-        args = pickle.load(sys.stdin.buffer)
+        reference_img, reference_box, target_shape = pickle.load(sys.stdin.buffer)
         img = np.zeros((1080, 1920, 3), dtype=np.uint8)
         print("[sam3] Loading model...", flush=True)
-        model = Sam3Detector(*args)
+        model = Sam3Detector(reference_img, reference_box, target_shape)
         print("[sam3] Model loaded.", flush=True)
         print("[sam3] Warming up at 1920 x 1080...", flush=True)
         model.detect(img)
         print("[sam3] Warmup complete.", flush=True)
     except Exception as exc:
-        reply(None, str(exc))
+        reply(output, None, str(exc))
         return
-    reply(None)
+    reply(output, None)
 
     while True:
         try:
@@ -174,10 +169,9 @@ def main():
         try:
             result = model.detect(*args)
         except Exception as exc:
-            reply(None, str(exc))
+            reply(output, None, str(exc))
         else:
-            reply(result)
+            reply(output, result)
 
 
-if __name__ == "__main__":
-    main()
+main(output)

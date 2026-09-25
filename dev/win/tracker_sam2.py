@@ -1,4 +1,5 @@
 import pickle
+from model_ipc import reply
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -124,15 +125,6 @@ def mask_result(masks):
     return {"box": box, "mask": mask}
 
 
-def reply(
-    output,
-    result,
-    error=None,
-):
-    pickle.dump((result, error), output)
-    output.flush()
-
-
 def main(output):
     try:
         pickle.load(sys.stdin.buffer)
@@ -143,13 +135,10 @@ def main(output):
         model.warmup()
         print("[sam2] Warmup complete.", flush=True)
     except Exception as exc:
-        reply(
-            output,
-            None,
-            str(exc),
-        )
+        reply(output, None, str(exc))
         return
     reply(output, None)
+
     while True:
         try:
             img, box = pickle.load(sys.stdin.buffer)
@@ -159,11 +148,7 @@ def main(output):
             result = model.track(img) if box is None else model.init(img, box)
         except Exception as exc:
             model.reset()
-            reply(
-                output,
-                None,
-                str(exc),
-            )
+            reply(output, None, str(exc))
         else:
             reply(output, result)
 
