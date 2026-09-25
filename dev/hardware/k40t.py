@@ -11,17 +11,23 @@ import urllib.request
 import cv2
 
 
+# Video stream and frame read timeouts.
 RTSP_URL = "rtsp://192.168.144.64:558/live/single"
-JPEG_QUALITY = 95
-WINDOWS_IP = "192.168.31.66"
-DETECTOR_PORT = 8790
 STREAM_OPEN_TIMEOUT_S = 3.0
 STREAM_READ_TIMEOUT_S = 1.0
 FIRST_FRAME_TIMEOUT_S = 5.0
 FRAME_WAIT_TIMEOUT_S = 0.5
+
+# Windows inference server and JPEG quality.
+WINDOWS_IP = "192.168.31.66"
+DETECTOR_PORT = 8790
+JPEG_QUALITY = 95
+
+# Gimbal control and position tolerance.
 CAMERA_ADDRESS = ("192.168.144.64", 1030)
 GIMBAL_TIMEOUT_S = 5.0
 GIMBAL_TOLERANCE_DEG = 0.5
+GIMBAL_STABLE_READINGS = 3
 
 
 _worker = None
@@ -268,7 +274,7 @@ def camera_request(
                     return status
                 reached = all(abs(status[key] - target[key]) <= GIMBAL_TOLERANCE_DEG for key in target)
                 stable = stable + 1 if reached else 0
-                if stable >= 3:
+                if stable >= GIMBAL_STABLE_READINGS:
                     return status
         # Never resend a movement whose outcome is unknown.
         raise RuntimeError(f"K40T {kind} confirmation timed out")
