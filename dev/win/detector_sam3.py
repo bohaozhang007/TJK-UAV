@@ -1,5 +1,4 @@
 import pickle
-from model_ipc import reply
 import sys
 from pathlib import Path
 
@@ -18,50 +17,8 @@ sys.path.insert(0, str(MODEL_ROOT))
 from sam3.model.sam3_image_processor import Sam3Processor
 from sam3.model_builder import build_sam3_image_model
 
-
 CHECKPOINT = MODEL_ROOT / "sam3.pt"
-
-
-def box_iou(a, b):
-    overlap = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(
-        0, min(a[3], b[3]) - max(a[1], b[1]))
-    union = ((a[2] - a[0]) * (a[3] - a[1])
-             + (b[2] - b[0]) * (b[3] - b[1]) - overlap)
-    return overlap / union if union > 0 else 0.0
-
-
-def select_boxes(
-    boxes,
-    scores,
-    target_rect,
-    confidence_threshold,
-    iou_threshold,
-):
-    """Apply target-region filtering and NMS while retaining source mask indices."""
-    left, top, right, bottom = target_rect
-    selected = []
-    for index in np.argsort(-scores, kind="stable"):
-        x1, y1, x2, y2 = boxes[index]
-        if scores[index] <= confidence_threshold:
-            continue
-        if not (
-            left <= (x1 + x2) / 2 < right
-            and top <= (y1 + y2) / 2 < bottom
-        ):
-            continue
-        box = np.clip(
-            boxes[index],
-            [left, top, left, top],
-            [right, bottom, right, bottom],
-        ) - [left, top, left, top]
-        if (
-            box[2] <= box[0]
-            or box[3] <= box[1]
-        ):
-            continue
-        if not any(box_iou(box, kept["box"]) >= iou_threshold for kept in selected):
-            selected.append({"box": box.tolist(), "confidence": float(scores[index]), "index": int(index)})
-    return selected
+WARMUP_SHAPE = (1080, 1920, 3)
 
 
 class Sam3Detector:
@@ -145,33 +102,79 @@ class Sam3Detector:
             item["mask"] = mask.detach().cpu().numpy().astype(bool)
         return detections
 
+    def warmup(self):
+        img = np.zeros(WARMUP_SHAPE, dtype=np.uint8)
+        self.detect(img)
+
+
+def box_iou(a, b):
+    overlap = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(
+        0, min(a[3], b[3]) - max(a[1], b[1]))
+    union = ((a[2] - a[0]) * (a[3] - a[1])
+             + (b[2] - b[0]) * (b[3] - b[1]) - overlap)
+    return overlap / union if union > 0 else 0.0
+
+
+def select_boxes(
+    boxes,
+    scores,
+    target_rect,
+    confidence_threshold,
+    iou_threshold,
+):
+    """Apply target-region filtering and NMS while retaining source mask indices."""
+    left, top, right, bottom = target_rect
+    selected = []
+    for index in np.argsort(-scores, kind="stable"):
+        x1, y1, x2, y2 = boxes[index]
+        if x2 <= x1 or y2 <= y1:
+            continue
+        if scores[index] <= confidence_threshold:
+            break
+        if not (
+            left <= (x1 + x2) / 2 < right
+            and top <= (y1 + y2) / 2 < bottom
+        ):
+            continue
+        box = np.clip(
+            boxes[index],
+            [left, top, left, top],
+            [right, bottom, right, bottom],
+        )
+        if not any(box_iou(box, kept["box"]) >= iou_threshold for kept in selected):
+            selected.append({"box": box.tolist(), "confidence": float(scores[index]), "index": int(index)})
+    return selected
+
 
 def main(output):
     try:
         reference_img, reference_box, target_shape = pickle.load(sys.stdin.buffer)
-        img = np.zeros((1080, 1920, 3), dtype=np.uint8)
         print("[sam3] Loading model...", flush=True)
         model = Sam3Detector(reference_img, reference_box, target_shape)
         print("[sam3] Model loaded.", flush=True)
         print("[sam3] Warming up at 1920 x 1080...", flush=True)
-        model.detect(img)
+        model.warmup()
         print("[sam3] Warmup complete.", flush=True)
     except Exception as exc:
-        reply(output, None, str(exc))
+        pickle.dump((None, str(exc)), output)
+        output.flush()
         return
-    reply(output, None)
+    pickle.dump((None, None), output)
+    output.flush()
 
     while True:
         try:
-            args = pickle.load(sys.stdin.buffer)
+            img, = pickle.load(sys.stdin.buffer)
         except EOFError:
             return
         try:
-            result = model.detect(*args)
+            result = model.detect(img)
         except Exception as exc:
-            reply(output, None, str(exc))
+            pickle.dump((None, str(exc)), output)
+            output.flush()
         else:
-            reply(output, result)
+            pickle.dump((result, None), output)
+            output.flush()
 
 
 main(output)

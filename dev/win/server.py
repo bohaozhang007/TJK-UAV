@@ -18,6 +18,11 @@ from image_writer import ImageWriter
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 8790
 CONDA_ENVS = Path.home() / "anaconda3/envs"
+MODEL_SCRIPTS = {
+    "sam3": "detector_sam3.py",
+    "da3": "depth_da3.py",
+    "sam2": "tracker_sam2.py",
+}
 
 
 class ModelProcess:
@@ -29,7 +34,7 @@ class ModelProcess:
         init_args=(),
     ):
         python = CONDA_ENVS / name / "python.exe"
-        script = {"sam3": "detector_sam3.py", "da3": "depth_da3.py", "sam2": "tracker_sam2.py"}[name]
+        script = MODEL_SCRIPTS[name]
         env = os.environ.copy()
         env["CONDA_PREFIX"] = str(python.parent)
         env["PYTHONIOENCODING"] = "utf-8"
@@ -89,31 +94,6 @@ class ModelProcess:
         self.process.stdout.close()
         self.log_worker.join()
         self.process.stderr.close()
-
-
-def decode_img(encoded):
-    data = np.frombuffer(encoded, dtype=np.uint8)
-    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Failed to decode image")
-    return img
-
-
-def load_reference(img_path, box_path):
-    img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Failed to read reference image")
-    box = np.array([float(v) for v in box_path.read_text(encoding="utf-8-sig").split()])
-    h, w = img.shape[:2]
-    if (
-        box.shape != (4,)
-        or not np.isfinite(box).all()
-        or not 0 <= box[0] < box[2] <= w
-        or not 0 <= box[1] < box[3] <= h
-    ):
-        raise ValueError("Reference box file must contain x1 y1 x2 y2 within the image")
-    return img, box
-
 
 class Handler(BaseHTTPRequestHandler):
     def reply(
@@ -193,8 +173,32 @@ class Handler(BaseHTTPRequestHandler):
                 writer.submit(img, annotations)
 
 
+def decode_img(encoded):
+    data = np.frombuffer(encoded, dtype=np.uint8)
+    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Failed to decode image")
+    return img
+
+
+def load_reference(img_path, box_path):
+    img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Failed to read reference image")
+    box = np.array([float(v) for v in box_path.read_text(encoding="utf-8-sig").split()])
+    h, w = img.shape[:2]
+    if (
+        box.shape != (4,)
+        or not np.isfinite(box).all()
+        or not 0 <= box[0] < box[2] <= w
+        or not 0 <= box[1] < box[3] <= h
+    ):
+        raise ValueError("Reference box file must contain x1 y1 x2 y2 within the image")
+    return img, box
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--ref-img",
         type=Path,

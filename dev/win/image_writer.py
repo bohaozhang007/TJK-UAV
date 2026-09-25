@@ -18,7 +18,7 @@ class ImageWriter:
     ):
         if timestamp is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        self.save_dir = SAVE_DIR / kind / timestamp
+        self.save_dir = SAVE_DIR / timestamp / kind
         self.save_dir.mkdir(parents=True, exist_ok=True)
         # Keep every decoded image without blocking requests on disk writes.
         self.queue = queue.Queue()

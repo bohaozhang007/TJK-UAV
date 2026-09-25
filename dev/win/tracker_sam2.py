@@ -1,5 +1,4 @@
 import pickle
-from model_ipc import reply
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -17,7 +16,6 @@ from PIL import Image
 MODEL_ROOT = Path(__file__).resolve().parents[3] / "sam2"
 sys.path.insert(0, str(MODEL_ROOT))
 from sam2.build_sam import build_sam2_video_predictor
-
 
 CHECKPOINT = MODEL_ROOT / "checkpoints/sam2.1_hiera_small.pt"
 MODEL_CONFIG = "configs/sam2.1/sam2.1_hiera_s.yaml"
@@ -135,9 +133,11 @@ def main(output):
         model.warmup()
         print("[sam2] Warmup complete.", flush=True)
     except Exception as exc:
-        reply(output, None, str(exc))
+        pickle.dump((None, str(exc)), output)
+        output.flush()
         return
-    reply(output, None)
+    pickle.dump((None, None), output)
+    output.flush()
 
     while True:
         try:
@@ -148,9 +148,11 @@ def main(output):
             result = model.track(img) if box is None else model.init(img, box)
         except Exception as exc:
             model.reset()
-            reply(output, None, str(exc))
+            pickle.dump((None, str(exc)), output)
+            output.flush()
         else:
-            reply(output, result)
+            pickle.dump((result, None), output)
+            output.flush()
 
 
 main(output)
