@@ -1,55 +1,30 @@
-import time
-from concurrent.futures import ThreadPoolExecutor
-
 import numpy as np
 import rospy
 
-from hardware.k40t import get_img, detect_img, track_img, get_gimbal, set_gimbal
+from hardware.k40t import get_img, track_img, get_gimbal, set_gimbal
 from hardware.k40t import get_zoom, set_zoom, check_tracker
-from hardware.pose import get_pose
-from task.detect_thread import sample_is_fresh
 
-
-# Target matching
-MATCH_DISTANCE_M = 1.0
 
 # Framing completion
-CENTER_TOLERANCE = 0.06
 TARGET_RATIO = 0.4
+CENTER_TOLERANCE = 0.06
 SIZE_TOLERANCE = 0.08
 STABLE_FRAMES = 2
 
-# Timing and iteration limits
-MAX_STEPS = 30
-SETTLE_S = 0.5
+# Iteration limit
+MAX_STEPS = 50
 
 # Gimbal control
-YAW_GAIN_DEG = 64.0
-PITCH_GAIN_DEG = 36.0
-DAMPING = 0.7
-MAX_STEP_DEG = 3.0
+REFERENCE_WIDTH_PX = 640
+REFERENCE_HEIGHT_PX = 360
+ROTATE_DEG_PER_PIXEL = 0.1
+MAX_ROTATE_DEG = 30.0
 
 # Zoom control
 BASELINE_ZOOM = 1.0
-ZOOM_STEP_UP = 1.25
-ZOOM_STEP_DOWN = 0.8
+ZOOM_STEP_UP = 1.5
+ZOOM_STEP_DOWN = 0.5
 MAX_ZOOM = 160.0
-
-
-def match_target(detections, target):
-    matches = []
-    for item in detections:
-        if (
-            item["position_world_m"] is None
-            or item["world_frame"] != target["world_frame"]
-        ):
-            continue
-        distance = np.linalg.norm(np.asarray(item["position_world_m"]) - target["position_world_m"])
-        if distance <= MATCH_DISTANCE_M:
-            matches.append(item)
-    if len(matches) != 1:
-        raise RuntimeError("Autofocus target is missing or ambiguous in the current image")
-    return matches[0]["box"]
 
 
 def center_error(box, shape):
@@ -70,29 +45,18 @@ def run(flight, plan):
     interrupted = False
 
     try:
+        # Initialize with the exact frame and box used to detect this target.
+        target = plan["target"]
+        result = track_img(target["exposure_img"], target["box"])
+        if result["box"] is None:
+            raise RuntimeError("SAM2 could not initialize the autofocus target")
         set_zoom(BASELINE_ZOOM)
-        # DA3 assumes the forward camera mounting; reacquire before moving the gimbal.
         set_gimbal(
             0.0,
             0.0,
         )
-        time.sleep(SETTLE_S)
-        with ThreadPoolExecutor(max_workers=2) as readers:
-            img_future = readers.submit(get_img)
-            pose_future = readers.submit(get_pose)
-            img_sample, pose_sample = img_future.result(), pose_future.result()
-        if not sample_is_fresh(img_sample, pose_sample):
-            raise RuntimeError("Autofocus image or pose is stale")
-        img, _ = img_sample
-        pose, _ = pose_sample
-        detections = detect_img(img, pose)
-        box = match_target(detections, plan["target"])
-        result = track_img(img, box)
-        if result["box"] is None:
-            raise RuntimeError("SAM2 could not initialize the autofocus target")
         stable = 0
         for _ in range(MAX_STEPS):
-            time.sleep(SETTLE_S)
             img, _ = get_img()
             result = track_img(img)
             if result["box"] is None:
@@ -124,13 +88,13 @@ def run(flight, plan):
                     raise RuntimeError("Target size cannot be reached within the available zoom range")
                 set_zoom(desired)
                 continue
-            # Match v22's reference-resolution gains; move one axis per fresh frame.
+            # Scale normalized errors to v20 reference pixels; move one axis per frame.
             axis = int(abs(error[1]) > abs(error[0]))
-            gain = -PITCH_GAIN_DEG if axis else YAW_GAIN_DEG
+            reference_pixels = -REFERENCE_HEIGHT_PX if axis else REFERENCE_WIDTH_PX
             delta = round(float(np.clip(
-                error[axis] * gain * DAMPING * BASELINE_ZOOM / zoom,
-                -MAX_STEP_DEG,
-                MAX_STEP_DEG,
+                error[axis] * reference_pixels * ROTATE_DEG_PER_PIXEL * BASELINE_ZOOM / zoom,
+                -MAX_ROTATE_DEG,
+                MAX_ROTATE_DEG,
             )), 2)
             status = get_gimbal()
             pitch_deg, yaw_deg = status["pitch_deg"], status["yaw_deg"]
@@ -151,4 +115,3 @@ def run(flight, plan):
                 0.0,
                 0.0,
             )
-            time.sleep(SETTLE_S)

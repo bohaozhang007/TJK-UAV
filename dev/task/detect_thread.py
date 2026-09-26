@@ -71,6 +71,9 @@ class DetectThread:
             print(json.dumps({"frame_id": frame_id, "pose": pose, "detections": detections}), flush=True)
             targets = select_new_targets(detections, self.seen_positions)
             if targets:
+                # Keep the detection frame paired with its boxes for tracker initialization.
+                for target in targets:
+                    target["exposure_img"] = img
                 self.pause()
                 return pose, targets
         return None
