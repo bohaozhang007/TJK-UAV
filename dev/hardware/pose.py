@@ -10,6 +10,7 @@ from nav_msgs.msg import Odometry
 # Read FAST-LIO directly in the SLAM map frame.
 POSE_TOPIC = "/laserMapping/odometry"
 POSE_WAIT_TIMEOUT_S = 0.5
+POSE_MAX_AGE_S = 0.5
 
 
 _pose = None
@@ -35,7 +36,7 @@ def _update_pose(message):
 
 
 def get_pose():
-    """Wait for a new message; return its pose and monotonic receipt time."""
+    """Wait for a fresh pose; return it with its monotonic receipt time."""
     global _subscriber
     with _lock:
         _ready.clear()
@@ -48,7 +49,10 @@ def get_pose():
             )
         if not _ready.wait(timeout=POSE_WAIT_TIMEOUT_S):
             raise RuntimeError("Timed out waiting for a pose message")
-        return _pose
+        pose, received = _pose
+        if not 0 <= rospy.Time.now().to_sec() - pose["stamp_s"] <= POSE_MAX_AGE_S:
+            raise RuntimeError("Pose is stale or has an invalid timestamp")
+        return pose, received
 
 
 def close_pose():

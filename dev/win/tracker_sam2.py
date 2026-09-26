@@ -60,7 +60,6 @@ class Sam2Tracker:
         height, width = img.shape[:2]
         if (
             box.shape != (4,)
-            or not np.isfinite(box).all()
             or not 0 <= box[0] < box[2] <= width
             or not 0 <= box[1] < box[3] <= height
         ):

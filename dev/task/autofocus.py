@@ -22,7 +22,6 @@ STABLE_FRAMES = 2
 # Timing and iteration limits
 MAX_STEPS = 30
 SETTLE_S = 0.5
-FRAME_MAX_AGE_S = 0.5
 
 # Gimbal control
 YAW_GAIN_DEG = 64.0
@@ -58,7 +57,6 @@ def center_error(box, shape):
     height, width = shape[:2]
     if (
         box.shape != (4,)
-        or not np.isfinite(box).all()
         or not 0 <= box[0] < box[2] <= width
         or not 0 <= box[1] < box[3] <= height
     ):
@@ -95,9 +93,7 @@ def run(flight, plan):
         stable = 0
         for _ in range(MAX_STEPS):
             time.sleep(SETTLE_S)
-            img, received = get_img()
-            if time.monotonic() - received > FRAME_MAX_AGE_S:
-                raise RuntimeError("Autofocus image is stale")
+            img, _ = get_img()
             result = track_img(img)
             if result["box"] is None:
                 raise RuntimeError("SAM2 lost the autofocus target")
