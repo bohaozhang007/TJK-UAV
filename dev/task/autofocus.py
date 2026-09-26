@@ -42,7 +42,6 @@ def center_error(box, shape):
 def run(exposure_img, box):
     # Recheck before any camera movement in case the tracker exited after startup.
     check_tracker()
-    interrupted = False
 
     try:
         # Initialize with the exact frame and box used to detect this target.
@@ -103,13 +102,11 @@ def run(exposure_img, box):
                 yaw_deg += delta
             set_gimbal(pitch_deg, yaw_deg)
         raise RuntimeError("Autofocus reached its step limit")
-    except KeyboardInterrupt:
-        interrupted = True
-        raise
     finally:
-        # Do not move the gimbal after a keyboard interruption.
-        if not interrupted:
+        # Restore the camera even after a keyboard interruption.
+        try:
             set_zoom(BASELINE_ZOOM)
+        finally:
             set_gimbal(
                 0.0,
                 0.0,
