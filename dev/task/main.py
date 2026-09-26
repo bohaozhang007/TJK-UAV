@@ -65,11 +65,19 @@ def main():
     finally:
         if state is not None:
             state.unregister()
-        detect_thread.pause()
-        close_camera()
-        close_pose()
-        flight.close()
-        rospy.signal_shutdown("Detection task stopped")
+        try:
+            detect_thread.pause()
+        finally:
+            try:
+                close_camera()
+            finally:
+                try:
+                    close_pose()
+                finally:
+                    try:
+                        flight.close()
+                    finally:
+                        rospy.signal_shutdown("Detection task stopped")
 
 
 if __name__ == "__main__":
