@@ -48,7 +48,7 @@ def get_pose():
                 queue_size=1,
             )
         if not _ready.wait(timeout=POSE_WAIT_TIMEOUT_S):
-            raise RuntimeError("Timed out waiting for a pose message")
+            raise RuntimeError(f"Pose message timeout of {POSE_WAIT_TIMEOUT_S:g} s exceeded")
         pose, received = _pose
         if not 0 <= rospy.Time.now().to_sec() - pose["stamp_s"] <= POSE_MAX_AGE_S:
             raise RuntimeError("Pose is stale or has an invalid timestamp")

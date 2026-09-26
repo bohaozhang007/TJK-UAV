@@ -20,6 +20,7 @@ STREAM_OPEN_TIMEOUT_S = 3.0
 STREAM_READ_TIMEOUT_S = 1.0
 FIRST_FRAME_TIMEOUT_S = 5.0
 FRAME_WAIT_TIMEOUT_S = 0.5
+STREAM_CLOSE_TIMEOUT_S = 5.0
 
 # Windows inference server and JPEG quality.
 WINDOWS_IP = "192.168.31.66"
@@ -93,7 +94,7 @@ def get_img():
             _error is None
             and not _ready.wait(timeout=timeout)
         ):
-            raise RuntimeError("Timed out waiting for K40T image")
+            raise RuntimeError(f"K40T image timeout of {timeout:g} s exceeded")
         if _error is not None:
             raise RuntimeError("K40T stream failed") from _error
         if _stop.is_set():
@@ -108,9 +109,9 @@ def close_camera():
     with _lock:
         if _worker is not None:
             _stop.set()
-            _worker.join(timeout=5)
+            _worker.join(timeout=STREAM_CLOSE_TIMEOUT_S)
             if _worker.is_alive():
-                raise RuntimeError("K40T stream did not close in time")
+                raise RuntimeError(f"K40T stream close timeout of {STREAM_CLOSE_TIMEOUT_S:g} s exceeded")
             _worker = _frame = None
 
 
@@ -283,7 +284,7 @@ def camera_request(
                 if stable >= GIMBAL_STABLE_READINGS:
                     return status
         # Never resend a movement whose outcome is unknown.
-        raise RuntimeError(f"K40T {kind} confirmation timed out")
+        raise RuntimeError(f"K40T {kind} confirmation timeout of {CAMERA_EXECUTE_TIMEOUT_S:g} s exceeded")
 
 
 def get_gimbal():

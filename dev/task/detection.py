@@ -99,16 +99,16 @@ class Detection:
                 except queue.Empty:
                     break
 
-    def find_targets(self, flight):
+    def find_targets(self):
         self.start()
-        while flight.is_offboard():
+        while not rospy.is_shutdown():
             try:
                 frame = self.frames.get(timeout=SAMPLE_INTERVAL_S)
             except queue.Empty:
                 continue
             frame_id, img, pose = frame
             for attempt in range(SEND_ATTEMPTS):
-                if not flight.is_offboard():
+                if rospy.is_shutdown():
                     self.pause()
                     return None
                 try:
@@ -121,7 +121,7 @@ class Detection:
             else:
                 rospy.logwarn(f"Dropping frame {frame_id} after {SEND_ATTEMPTS} failed attempts")
                 continue
-            if not flight.is_offboard():
+            if rospy.is_shutdown():
                 break
             print(json.dumps({"frame_id": frame_id, "pose": pose, "detections": detections}), flush=True)
             targets = select_new_targets(detections, self.seen_positions)

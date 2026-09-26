@@ -58,8 +58,6 @@ def prepare(targets):
 
 
 def run(flight, plan):
-    if not flight.is_offboard():
-        return False
     if plan["pose"] is None:
         # Acquire control without approaching when the target is already close.
         return flight.go_to_pose(plan["hold_pose"])

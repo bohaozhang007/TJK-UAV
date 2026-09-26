@@ -1,8 +1,11 @@
 import sys
+import os
+import threading
 from pathlib import Path
 from itertools import groupby
 
 import rospy
+from mavros_msgs.msg import State
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -17,6 +20,8 @@ from task.return_and_resume import run as return_and_resume
 
 
 POLL_INTERVAL_S = 0.1
+STATE_TOPIC = "/mavros/state"
+CONTROL_MODE = "OFFBOARD"
 
 
 def run_tasks(
@@ -45,19 +50,31 @@ def run_tasks(
 
 
 def main():
-    if autofocus in TASKS:
-        check_tracker()
     rospy.init_node("i7_detection_main", disable_signals=True)
+    # ROS shutdown terminates this UAV process and all its threads immediately.
+    rospy.on_shutdown(lambda: os._exit(0))
     flight = FlightControl()
     detection = Detection()
+    state = None
+    ready = threading.Event()
+
+    def update_state(message):
+        if message.mode != CONTROL_MODE:
+            # Terminate this UAV process and every thread without further commands.
+            os._exit(0)
+        ready.set()
+
     try:
+        state = rospy.Subscriber(STATE_TOPIC, State, update_state, queue_size=1)
         while not rospy.is_shutdown():
-            if flight.interrupted.is_set():
+            if ready.wait(POLL_INTERVAL_S):
                 break
-            if not flight.is_offboard():
-                rospy.sleep(POLL_INTERVAL_S)
-                continue
-            result = detection.find_targets(flight)
+        if rospy.is_shutdown():
+            return
+        if autofocus in TASKS:
+            check_tracker()
+        while not rospy.is_shutdown():
+            result = detection.find_targets()
             if result is None:
                 break
             exposure_pose, targets = result
@@ -70,6 +87,8 @@ def main():
     except (KeyboardInterrupt, rospy.ROSInterruptException):
         pass
     finally:
+        if state is not None:
+            state.unregister()
         try:
             detection.pause()
         finally:

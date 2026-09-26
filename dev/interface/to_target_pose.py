@@ -72,7 +72,7 @@ def test(pose=None):
             if rospy.is_shutdown():
                 return
             if time.monotonic() >= deadline:
-                raise RuntimeError("Target pose topic has no subscriber")
+                raise RuntimeError(f"Target pose connection timeout of {CONNECTION_TIMEOUT_S:g} s exceeded")
             rospy.sleep(POLL_INTERVAL_S)
         if not rospy.is_shutdown():
             target.send(pose)

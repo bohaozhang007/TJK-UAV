@@ -37,7 +37,7 @@ def test():
             if rospy.is_shutdown():
                 return
             if time.monotonic() >= deadline:
-                raise RuntimeError("Control release topic has no subscriber")
+                raise RuntimeError(f"Control release connection timeout of {CONNECTION_TIMEOUT_S:g} s exceeded")
             rospy.sleep(POLL_INTERVAL_S)
         if not rospy.is_shutdown():
             release.send()

@@ -49,7 +49,7 @@ def test(timeout=ARRIVAL_TIMEOUT_S):
         deadline = time.monotonic() + timeout
         while not rospy.is_shutdown():
             if time.monotonic() >= deadline:
-                raise RuntimeError("Timed out waiting for goal arrival feedback")
+                raise RuntimeError(f"Goal arrival feedback timeout of {timeout:g} s exceeded")
             if feedback.wait(POLL_INTERVAL_S):
                 print("Goal reached.", flush=True)
                 return True
