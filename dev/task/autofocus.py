@@ -7,7 +7,7 @@ import rospy
 from hardware.k40t import get_img, detect_img, track_img, get_gimbal, set_gimbal
 from hardware.k40t import get_zoom, set_zoom, check_tracker
 from hardware.pose import get_pose
-from task.detection import sample_is_fresh
+from task.detect_thread import sample_is_fresh
 
 
 # Target matching

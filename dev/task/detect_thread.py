@@ -27,7 +27,7 @@ SEND_ATTEMPTS = 2
 SEND_RETRY_S = 0.1
 
 
-class Detection:
+class DetectThread:
     def __init__(self):
         self.frames = queue.Queue(maxsize=QUEUE_SIZE)
         self.stop = threading.Event()
@@ -35,8 +35,6 @@ class Detection:
         self.seen_positions = {}
 
     def start(self):
-        if self.worker is not None:
-            return
         self.stop.clear()
         self.worker = threading.Thread(
             target=capture_loop,

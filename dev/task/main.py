@@ -12,7 +12,7 @@ from util.flight import FlightControl
 from hardware.k40t import close_camera
 from hardware.pose import close_pose
 from task.approach_target import prepare as prepare_approaches
-from task.detection import Detection
+from task.detect_thread import DetectThread
 
 
 POLL_INTERVAL_S = 0.1
@@ -25,7 +25,7 @@ def main():
     # ROS shutdown terminates this UAV process and all its threads immediately.
     rospy.on_shutdown(lambda: os._exit(0))
     flight = FlightControl()
-    detection = Detection()
+    detect_thread = DetectThread()
     state = None
     ready = threading.Event()
 
@@ -43,7 +43,7 @@ def main():
         if rospy.is_shutdown():
             return
         while not rospy.is_shutdown():
-            result = detection.find_targets()
+            result = detect_thread.find_targets()
             if result is None:
                 break
             exposure_pose, targets = result
@@ -60,7 +60,7 @@ def main():
         if state is not None:
             state.unregister()
         try:
-            detection.pause()
+            detect_thread.pause()
         finally:
             try:
                 close_camera()
