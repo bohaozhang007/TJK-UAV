@@ -16,7 +16,6 @@ from task.approach_target import run as approach
 from task.autofocus import run as autofocus
 from task.config import TASKS
 from task.detection import Detection
-from task.return_and_resume import run as return_and_resume
 
 
 POLL_INTERVAL_S = 0.1
@@ -29,7 +28,6 @@ def run_tasks(
     exposure_pose,
     targets,
 ):
-    released = False
     for per_target, group in groupby(TASKS, key=lambda task: task in (approach, autofocus)):
         tasks = tuple(group)
         if per_target:
@@ -39,14 +37,11 @@ def run_tasks(
                 for task in tasks:
                     if not task(flight, plan):
                         return False
-            released = False
         else:
             for task in tasks:
                 if not task(flight, exposure_pose):
                     return False
-                released = task is return_and_resume
-    # Resume detection only after a configured task releases mission control.
-    return released
+    return True
 
 
 def main():
@@ -83,6 +78,9 @@ def main():
                 exposure_pose,
                 targets,
             ):
+                break
+            # Release mission control after every successful task batch.
+            if not flight.release_control():
                 break
     except (KeyboardInterrupt, rospy.ROSInterruptException):
         pass
