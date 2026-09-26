@@ -28,12 +28,34 @@ def main():
     detect_thread = DetectThread()
     state = None
     ready = threading.Event()
+    close_lock = threading.Lock()
+
+    def close():
+        # Serialize cleanup if both the callback and main thread enter here.
+        with close_lock:
+            try:
+                if state is not None:
+                    state.unregister()
+            finally:
+                try:
+                    detect_thread.pause()
+                finally:
+                    try:
+                        close_camera()
+                    finally:
+                        try:
+                            close_pose()
+                        finally:
+                            try:
+                                flight.close()
+                            finally:
+                                rospy.signal_shutdown("Detection task stopped")
 
     def update_state(message):
         if message.mode != CONTROL_MODE:
-            # Terminate this UAV process and every thread without further commands.
-            os._exit(0)
-        ready.set()
+            close()
+        else:
+            ready.set()
 
     try:
         state = rospy.Subscriber(STATE_TOPIC, State, update_state, queue_size=1)
@@ -63,21 +85,7 @@ def main():
     except (KeyboardInterrupt, rospy.ROSInterruptException):
         pass
     finally:
-        if state is not None:
-            state.unregister()
-        try:
-            detect_thread.pause()
-        finally:
-            try:
-                close_camera()
-            finally:
-                try:
-                    close_pose()
-                finally:
-                    try:
-                        flight.close()
-                    finally:
-                        rospy.signal_shutdown("Detection task stopped")
+        close()
 
 
 if __name__ == "__main__":
