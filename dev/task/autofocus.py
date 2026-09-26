@@ -39,15 +39,14 @@ def center_error(box, shape):
     return (box[:2] + box[2:]) / (2 * np.array([width, height])) - 0.5
 
 
-def run(flight, plan):
+def run(exposure_img, box):
     # Recheck before any camera movement in case the tracker exited after startup.
     check_tracker()
     interrupted = False
 
     try:
         # Initialize with the exact frame and box used to detect this target.
-        target = plan["target"]
-        result = track_img(target["exposure_img"], target["box"])
+        result = track_img(exposure_img, box)
         if result["box"] is None:
             raise RuntimeError("SAM2 could not initialize the autofocus target")
         set_zoom(BASELINE_ZOOM)
