@@ -21,7 +21,7 @@ CONTROL_MODE = "OFFBOARD"
 
 
 def main():
-    rospy.init_node("buaa_vla", disable_signals=True)
+    rospy.init_node("buaa_vln", disable_signals=True)
     # ROS shutdown terminates this UAV process and all its threads immediately.
     rospy.on_shutdown(lambda: os._exit(0))
     flight = FlightControl()
@@ -40,36 +40,36 @@ def main():
         while not rospy.is_shutdown():
             if ready.wait(POLL_INTERVAL_S):
                 break
-        if rospy.is_shutdown():
-            return
         while not rospy.is_shutdown():
+            # Stage 1: Detect new targets and pause detection when found.
             result = detect_thread.find_targets()
             if result is None:
                 break
             exposure_pose, targets = result
+
+            # Stage 2: Return to the pose recorded with the detection image.
             flight.go_to_pose(exposure_pose)
+
+            # Stage 3: Plan observation poses and visit each one.
             plans = prepare_observation_points(targets)
             for plan in plans:
                 flight.go_to_pose(plan["pose"])
+
+            # Stage 4: Return to the recorded pose after all visits.
             flight.go_to_pose(exposure_pose)
-            # Release mission control after every successful task batch.
+
+            # Stage 5: Release mission control, then restart detection.
             flight.release_control()
     except (KeyboardInterrupt, rospy.ROSInterruptException):
         pass
     finally:
         if state is not None:
             state.unregister()
-        try:
-            detect_thread.pause()
-        finally:
-            try:
-                close_camera()
-            finally:
-                try:
-                    close_pose()
-                finally:
-                    flight.close()
-                    rospy.signal_shutdown("Detection task stopped")
+        detect_thread.pause()
+        close_camera()
+        close_pose()
+        flight.close()
+        rospy.signal_shutdown("Detection task stopped")
 
 
 if __name__ == "__main__":
