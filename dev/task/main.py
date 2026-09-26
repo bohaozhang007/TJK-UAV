@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from util.flight import FlightControl
 from hardware.k40t import close_camera
 from hardware.pose import close_pose
-from task.approach_target import prepare as prepare_approaches
+from task.approach_target import prepare as prepare_observation_points
 from task.detect_thread import DetectThread
 
 
@@ -21,7 +21,7 @@ CONTROL_MODE = "OFFBOARD"
 
 
 def main():
-    rospy.init_node("i7_detection_main", disable_signals=True)
+    rospy.init_node("buaa_vla", disable_signals=True)
     # ROS shutdown terminates this UAV process and all its threads immediately.
     rospy.on_shutdown(lambda: os._exit(0))
     flight = FlightControl()
@@ -48,7 +48,7 @@ def main():
                 break
             exposure_pose, targets = result
             flight.go_to_pose(exposure_pose)
-            plans = prepare_approaches(targets)
+            plans = prepare_observation_points(targets)
             for plan in plans:
                 flight.go_to_pose(plan["pose"])
             flight.go_to_pose(exposure_pose)
