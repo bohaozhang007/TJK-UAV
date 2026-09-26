@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor, wait
 import rospy
 
 from util.dedup import select_new_targets
-from hardware.k40t import close_camera, get_img, detect_img
-from hardware.pose import close_pose, get_pose
+from hardware.k40t import get_img, detect_img
+from hardware.pose import get_pose
 
 
 SAMPLE_INTERVAL_S = 0.1
@@ -89,15 +89,11 @@ class Detection:
         if self.worker is not None:
             self.worker.join()
             self.worker = None
-        try:
-            close_camera()
-        finally:
-            close_pose()
-            while True:
-                try:
-                    self.frames.get_nowait()
-                except queue.Empty:
-                    break
+        while True:
+            try:
+                self.frames.get_nowait()
+            except queue.Empty:
+                break
 
     def find_targets(self):
         self.start()

@@ -4,9 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import rospy
 
-from hardware.k40t import close_camera, get_img, detect_img, track_img, get_gimbal, set_gimbal
+from hardware.k40t import get_img, detect_img, track_img, get_gimbal, set_gimbal
 from hardware.k40t import get_zoom, set_zoom, check_tracker
-from hardware.pose import close_pose, get_pose
+from hardware.pose import get_pose
 from task.detection import sample_is_fresh
 
 
@@ -144,17 +144,11 @@ def run(flight, plan):
         interrupted = True
         raise
     finally:
-        try:
-            # Do not move the gimbal after a keyboard interruption.
-            if not interrupted:
-                set_zoom(BASELINE_ZOOM)
-                set_gimbal(
-                    0.0,
-                    0.0,
-                )
-                time.sleep(SETTLE_S)
-        finally:
-            try:
-                close_camera()
-            finally:
-                close_pose()
+        # Do not move the gimbal after a keyboard interruption.
+        if not interrupted:
+            set_zoom(BASELINE_ZOOM)
+            set_gimbal(
+                0.0,
+                0.0,
+            )
+            time.sleep(SETTLE_S)
