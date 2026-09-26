@@ -4,9 +4,9 @@ import time
 import rospy
 from mavros_msgs.msg import State
 
-from to_B.check_goal_reached import GoalReached
-from to_B.release_control import ControlRelease
-from to_B.to_target_pose import TargetPose
+from interface.check_goal_reached import GoalReached
+from interface.release_control import ControlRelease
+from interface.to_target_pose import TargetPose
 
 
 STATE_TOPIC = "/mavros/state"
@@ -83,7 +83,7 @@ class FlightControl:
                     return True
             return False
         finally:
-            self.feedback.reset(waiting=False)
+            self.feedback.reset()
 
     def release_control(self):
         # Stage 4: After all extra operations, return control without changing modes.

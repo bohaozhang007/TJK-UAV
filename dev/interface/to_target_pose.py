@@ -1,4 +1,5 @@
 import argparse
+import math
 import time
 from contextlib import closing
 
@@ -23,13 +24,17 @@ class TargetPose:
         return self.publisher.get_num_connections() > 0
 
     def send(self, pose):
+        x, y, z = pose["position_m"]
+        yaw_deg = pose["yaw_deg"]
+        if not all(math.isfinite(value) for value in (x, y, z, yaw_deg)):
+            raise ValueError("Target position and yaw must be finite")
         goal = PoseWithCovarianceStamped()
         goal.header.frame_id = pose["frame_id"]
         goal.header.stamp = rospy.Time.now()
         p = goal.pose.pose.position
-        p.x, p.y, p.z = pose["position_m"]
+        p.x, p.y, p.z = x, y, z
         # Custom mission protocol: orientation.w carries yaw in degrees, not quaternion w.
-        goal.pose.pose.orientation.w = pose["yaw_deg"]
+        goal.pose.pose.orientation.w = yaw_deg
         self.publisher.publish(goal)
 
     def close(self):

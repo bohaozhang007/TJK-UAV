@@ -9,6 +9,6 @@ cd ~/TJK-UAV/dev
 python3 task/main.py
 
 # test
-python3 to_B/check_goal_reached.py
-python3 to_B/to_target_pose.py --position 1 1 1.5 --yaw 90 --frame world
-python3 to_B/release_control.py
+python3 interface/check_goal_reached.py
+python3 interface/to_target_pose.py --position 1 1 1.5 --yaw 90 --frame world
+python3 interface/release_control.py

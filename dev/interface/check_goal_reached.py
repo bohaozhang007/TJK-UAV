@@ -14,9 +14,7 @@ POLL_INTERVAL_S = 0.1
 
 class GoalReached:
     def __init__(self):
-        self.waiting = False
         self.arrived = threading.Event()
-        self.lock = threading.Lock()
         self.subscriber = rospy.Subscriber(
             GOAL_REACHED_TOPIC,
             Bool,
@@ -27,25 +25,19 @@ class GoalReached:
     def connected(self):
         return self.subscriber.get_num_connections() > 0
 
-    def reset(self, waiting=True):
-        with self.lock:
-            self.waiting = waiting
-            self.arrived.clear()
+    def reset(self):
+        self.arrived.clear()
 
     def update(self, message):
-        with self.lock:
-            if (
-                self.waiting
-                and message.data
-            ):
-                self.arrived.set()
+        if message.data:
+            self.arrived.set()
 
     def wait(self, timeout):
         return self.arrived.wait(timeout)
 
     def close(self):
-        self.reset(waiting=False)
         self.subscriber.unregister()
+        self.reset()
 
 
 def test(timeout=ARRIVAL_TIMEOUT_S):
@@ -56,10 +48,9 @@ def test(timeout=ARRIVAL_TIMEOUT_S):
         print("Waiting for goal arrival feedback: True...", flush=True)
         deadline = time.monotonic() + timeout
         while not rospy.is_shutdown():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if time.monotonic() >= deadline:
                 raise RuntimeError("Timed out waiting for goal arrival feedback")
-            if feedback.wait(min(POLL_INTERVAL_S, remaining)):
+            if feedback.wait(POLL_INTERVAL_S):
                 print("Goal reached.", flush=True)
                 return True
         return False

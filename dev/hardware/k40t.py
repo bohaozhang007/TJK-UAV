@@ -197,7 +197,9 @@ def camera_request(
         deadline = time.monotonic() + CAMERA_EXECUTE_TIMEOUT_S
         acknowledged = False
         stable = 0
-        while time.monotonic() < deadline:
+        while True:
+            if time.monotonic() >= deadline:
+                break
             try:
                 raw = sock.recv(4096)
             except socket.timeout:
