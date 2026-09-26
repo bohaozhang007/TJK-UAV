@@ -18,32 +18,42 @@ from image_writer import ImageWriter
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 8790
 CONDA_ENVS = Path.home() / "anaconda3/envs"
+MOGE_ENV = Path(__file__).resolve().parents[3] / "MoGe/.venv"
 MODEL_SCRIPTS = {
     "sam3": "detector_sam3.py",
     "da3": "depth_da3.py",
+    "moge3": "depth_moge3.py",
     "sam2": "tracker_sam2.py",
 }
 
 
 class ModelProcess:
-    """Run a model server in its conda environment over local binary pipes."""
+    """Run a model server in its own Python environment over local binary pipes."""
 
     def __init__(
         self,
         name,
         init_args=(),
     ):
-        python = CONDA_ENVS / name / "python.exe"
         script = MODEL_SCRIPTS[name]
         env = os.environ.copy()
-        env["CONDA_PREFIX"] = str(python.parent)
+        if name == "moge3":
+            # uv has already created this environment; do not sync it on server startup.
+            python = MOGE_ENV / "Scripts/python.exe"
+            for key in ("CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL", "PYTHONHOME"):
+                env.pop(key, None)
+            env["VIRTUAL_ENV"] = str(MOGE_ENV)
+            paths = [str(python.parent)]
+        else:
+            python = CONDA_ENVS / name / "python.exe"
+            env.pop("VIRTUAL_ENV", None)
+            env["CONDA_PREFIX"] = str(python.parent)
+            paths = [str(python.parent), str(python.parent / "Library/bin"),
+                     str(python.parent / "Scripts")]
+        if not python.is_file():
+            raise FileNotFoundError(f"Python environment for {name} not found: {python}")
         env["PYTHONIOENCODING"] = "utf-8"
-        env["PATH"] = os.pathsep.join([
-            str(python.parent),
-            str(python.parent / "Library/bin"),
-            str(python.parent / "Scripts"),
-            env["PATH"],
-        ])
+        env["PATH"] = os.pathsep.join([*paths, env.get("PATH", "")])
         print(f"[{name}] Starting model process: {python}", flush=True)
         self.process = subprocess.Popen(
             [str(python), "-u", str(Path(__file__).with_name(script))],
@@ -196,26 +206,43 @@ def load_reference(img_path, box_path):
     return img, box
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--det",
+        choices=("sam3",),
+        required=True,
+        help="Detection model",
+    )
+    parser.add_argument(
+        "--depth",
+        choices=("moge3", "da3"),
+        required=True,
+        help="Depth model (moge3 uses its uv environment; da3 uses conda)",
+    )
     parser.add_argument(
         "--ref-img",
         type=Path,
-        required=True,
-        help="Local reference image path",
+        help="Local reference image path (required for sam3)",
     )
     parser.add_argument(
         "--ref-box",
         type=Path,
-        required=True,
-        help="Text file containing pixel x1 y1 x2 y2",
+        help="Text file containing pixel x1 y1 x2 y2 (required for sam3)",
     )
     parser.add_argument(
         "--autofocus",
         action="store_true",
         help="Load and warm up SAM2 to enable autofocus tracking",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.det == "sam3" and (args.ref_img is None or args.ref_box is None):
+        parser.error("--ref-img and --ref-box are required for --det sam3")
+    return parser, args
+
+
+def main():
+    parser, args = parse_args()
     try:
         reference_img, reference_box = load_reference(args.ref_img, args.ref_box)
     except Exception as exc:
@@ -224,8 +251,8 @@ def main():
     # Each child loads and warms up its model before accepting requests.
     with ExitStack() as stack:
         server = stack.enter_context(HTTPServer((SERVER_HOST, SERVER_PORT), Handler))
-        server.detector = stack.enter_context(closing(ModelProcess("sam3", (reference_img, reference_box, (1080, 1920)))))
-        server.depth = stack.enter_context(closing(ModelProcess("da3")))
+        server.detector = stack.enter_context(closing(ModelProcess(args.det, (reference_img, reference_box, (1080, 1920)))))
+        server.depth = stack.enter_context(closing(ModelProcess(args.depth)))
         server.tracker = None
         if args.autofocus:
             server.tracker = stack.enter_context(closing(ModelProcess("sam2")))
