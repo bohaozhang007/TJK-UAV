@@ -11,11 +11,18 @@ from hardware.k40t import get_img, detect_img
 from hardware.pose import get_pose
 
 
+# Sampling and buffering.
 SAMPLE_INTERVAL_S = 0.1
-QUEUE_SIZE = 10  # FIFO; discard the oldest queued frame when full.
+QUEUE_SIZE = 10
+
+# Sample freshness.
 IMG_MAX_AGE_S = 0.5
 POSE_MAX_AGE_S = 0.5
+
+# Capture retries.
 CAPTURE_RETRY_S = 0.1
+
+# Inference request retries.
 SEND_ATTEMPTS = 2
 SEND_RETRY_S = 0.1
 
@@ -43,11 +50,7 @@ class Detection:
         if self.worker is not None:
             self.worker.join()
             self.worker = None
-        while True:
-            try:
-                self.frames.get_nowait()
-            except queue.Empty:
-                break
+        self.frames = queue.Queue(maxsize=QUEUE_SIZE)
 
     def find_targets(self):
         self.start()
@@ -58,27 +61,20 @@ class Detection:
                 continue
             frame_id, img, pose = frame
             for attempt in range(SEND_ATTEMPTS):
-                if rospy.is_shutdown():
-                    self.pause()
-                    return None
                 try:
                     detections = detect_img(img, pose)
                     break
                 except Exception as exc:
                     rospy.logwarn(f"Frame {frame_id}, attempt {attempt + 1}/{SEND_ATTEMPTS}: {exc}")
-                    if attempt + 1 < SEND_ATTEMPTS:
-                        self.stop.wait(SEND_RETRY_S)
+                    self.stop.wait(SEND_RETRY_S)
             else:
                 rospy.logwarn(f"Dropping frame {frame_id} after {SEND_ATTEMPTS} failed attempts")
                 continue
-            if rospy.is_shutdown():
-                break
             print(json.dumps({"frame_id": frame_id, "pose": pose, "detections": detections}), flush=True)
             targets = select_new_targets(detections, self.seen_positions)
             if targets:
                 self.pause()
                 return pose, targets
-        self.pause()
         return None
 
 
@@ -116,13 +112,10 @@ def capture_loop(frames, stop):
                 pose, _ = pose_sample
                 frame_id += 1
                 # Pair at sampling time, not at the camera exposure time.
-                while not stop.is_set():
+                if frames.full():
                     try:
-                        frames.put_nowait((frame_id, img, pose))
-                        break
-                    except queue.Full:
-                        try:
-                            frames.get_nowait()
-                        except queue.Empty:
-                            pass
+                        frames.get_nowait()
+                    except queue.Empty:
+                        pass
+                frames.put_nowait((frame_id, img, pose))
             stop.wait(max(0.0, SAMPLE_INTERVAL_S - (time.monotonic() - started)))
