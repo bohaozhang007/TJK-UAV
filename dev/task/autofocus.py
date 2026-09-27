@@ -7,9 +7,9 @@ from hardware.k40t import get_zoom, set_zoom, check_tracker
 
 # Framing completion
 TARGET_RATIO = 0.4
-CENTER_TOLERANCE = 0.06
-SIZE_TOLERANCE = 0.08
-STABLE_FRAMES = 2
+CENTER_TOLERANCE = 0.1
+SIZE_TOLERANCE = 0.1
+STABLE_FRAMES = 1
 
 # Iteration limit
 MAX_STEPS = 50
@@ -22,7 +22,7 @@ MAX_ROTATE_DEG = 30.0
 
 # Zoom control
 BASELINE_ZOOM = 1.0
-ZOOM_STEP_UP = 1.5
+ZOOM_STEP_UP = 2
 ZOOM_STEP_DOWN = 0.5
 MAX_ZOOM = 160.0
 
@@ -83,7 +83,8 @@ def run(exposure_img, box):
                 ))
                 desired = round(min(MAX_ZOOM, max(BASELINE_ZOOM, desired)), 1)
                 if abs(desired - zoom) < 0.05:
-                    raise RuntimeError("Target size cannot be reached within the available zoom range")
+                    rospy.loginfo(f"Skipping zoom adjustment: current={zoom:.1f}x, desired={desired:.1f}x")
+                    continue
                 set_zoom(desired)
                 continue
             # Scale normalized errors to v20 reference pixels; move one axis per frame.
