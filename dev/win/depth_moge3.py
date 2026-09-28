@@ -27,7 +27,7 @@ class Moge3Depth(DepthEstimator):
     def estimate(self, img):
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         image = torch.from_numpy(rgb).permute(2, 0, 1).to("cuda").float() / 255.0
-        prediction = self.model.infer(image)
+        prediction = self.model.infer(image, use_fp16=True)
         depth = prediction["depth"].cpu().numpy().astype(np.float32, copy=True)
         intrinsics = prediction["intrinsics"].cpu().numpy().astype(float, copy=True)
         valid = prediction["mask"].cpu().numpy().astype(bool, copy=False)
