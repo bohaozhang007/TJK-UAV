@@ -21,6 +21,7 @@ CONDA_ENVS = Path.home() / "anaconda3/envs"
 MOGE_ENV = Path(__file__).resolve().parents[3] / "MoGe/.venv"
 MODEL_SCRIPTS = {
     "sam3": "detector_sam3.py",
+    "yolo": "detector_yolo.py",
     "da3": "depth_da3.py",
     "moge3": "depth_moge3.py",
     "sam2": "tracker_sam2.py",
@@ -45,7 +46,8 @@ class ModelProcess:
             env["VIRTUAL_ENV"] = str(MOGE_ENV)
             paths = [str(python.parent)]
         else:
-            python = CONDA_ENVS / name / "python.exe"
+            env_name = "yolo11" if name == "yolo" else name
+            python = CONDA_ENVS / env_name / "python.exe"
             env.pop("VIRTUAL_ENV", None)
             env["CONDA_PREFIX"] = str(python.parent)
             paths = [str(python.parent), str(python.parent / "Library/bin"),
@@ -210,7 +212,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--det",
-        choices=("sam3",),
+        choices=("sam3", "yolo"),
         required=True,
         help="Detection model",
     )
@@ -236,22 +238,31 @@ def parse_args(argv=None):
         help="Load and warm up SAM2 to enable autofocus tracking",
     )
     args = parser.parse_args(argv)
-    if args.det == "sam3" and (args.ref_img is None or args.ref_box is None):
+    if (
+        args.det == "sam3"
+        and (
+            args.ref_img is None
+            or args.ref_box is None
+        )
+    ):
         parser.error("--ref-img and --ref-box are required for --det sam3")
     return parser, args
 
 
 def main():
     parser, args = parse_args()
-    try:
-        reference_img, reference_box = load_reference(args.ref_img, args.ref_box)
-    except Exception as exc:
-        parser.error(str(exc))
+    detector_args = ()
+    if args.det == "sam3":
+        try:
+            reference_img, reference_box = load_reference(args.ref_img, args.ref_box)
+        except Exception as exc:
+            parser.error(str(exc))
+        detector_args = (reference_img, reference_box, (1080, 1920))
 
     # Each child loads and warms up its model before accepting requests.
     with ExitStack() as stack:
         server = stack.enter_context(HTTPServer((SERVER_HOST, SERVER_PORT), Handler))
-        server.detector = stack.enter_context(closing(ModelProcess(args.det, (reference_img, reference_box, (1080, 1920)))))
+        server.detector = stack.enter_context(closing(ModelProcess(args.det, detector_args)))
         server.depth = stack.enter_context(closing(ModelProcess(args.depth)))
         server.tracker = None
         if args.autofocus:

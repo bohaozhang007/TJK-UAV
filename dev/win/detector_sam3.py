@@ -1,4 +1,3 @@
-import pickle
 import sys
 from pathlib import Path
 
@@ -11,6 +10,8 @@ import numpy as np
 import torch
 from PIL import Image
 
+from detector_base import Detector, run_detector
+
 
 MODEL_ROOT = Path(__file__).resolve().parents[3] / "sam3"
 sys.path.insert(0, str(MODEL_ROOT))
@@ -18,10 +19,9 @@ from sam3.model.sam3_image_processor import Sam3Processor
 from sam3.model_builder import build_sam3_image_model
 
 CHECKPOINT = MODEL_ROOT / "sam3.pt"
-WARMUP_SHAPE = (1080, 1920, 3)
 
 
-class Sam3Detector:
+class Sam3Detector(Detector):
     def __init__(
         self,
         reference_img,
@@ -102,11 +102,6 @@ class Sam3Detector:
             item["mask"] = mask.detach().cpu().numpy().astype(bool)
         return detections
 
-    def warmup(self):
-        img = np.zeros(WARMUP_SHAPE, dtype=np.uint8)
-        self.detect(img)
-
-
 def box_iou(a, b):
     overlap = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(
         0, min(a[3], b[3]) - max(a[1], b[1]))
@@ -127,7 +122,10 @@ def select_boxes(
     selected = []
     for index in np.argsort(-scores, kind="stable"):
         x1, y1, x2, y2 = boxes[index]
-        if x2 <= x1 or y2 <= y1:
+        if (
+            x2 <= x1
+            or y2 <= y1
+        ):
             continue
         if scores[index] <= confidence_threshold:
             break
@@ -146,35 +144,8 @@ def select_boxes(
     return selected
 
 
-def main(output):
-    try:
-        reference_img, reference_box, target_shape = pickle.load(sys.stdin.buffer)
-        print("[sam3] Loading model...", flush=True)
-        model = Sam3Detector(reference_img, reference_box, target_shape)
-        print("[sam3] Model loaded.", flush=True)
-        print("[sam3] Warming up at 1920 x 1080...", flush=True)
-        model.warmup()
-        print("[sam3] Warmup complete.", flush=True)
-    except Exception as exc:
-        pickle.dump((None, str(exc)), output)
-        output.flush()
-        return
-    pickle.dump((None, None), output)
-    output.flush()
-
-    while True:
-        try:
-            img, = pickle.load(sys.stdin.buffer)
-        except EOFError:
-            return
-        try:
-            result = model.detect(img)
-        except Exception as exc:
-            pickle.dump((None, str(exc)), output)
-            output.flush()
-        else:
-            pickle.dump((result, None), output)
-            output.flush()
-
-
-main(output)
+run_detector(
+    Sam3Detector,
+    "sam3",
+    output,
+)

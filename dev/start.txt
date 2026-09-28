@@ -1,6 +1,8 @@
 ﻿win:
 cd ~\Desktop\project\TJK-UAV\dev
-python win/server.py --ref-img "C:\Users\colab999\Desktop\project\TJK-UAV\assets\red.jpg" --ref-box "C:\Users\colab999\Desktop\project\TJK-UAV\assets\red.txt"
+python win/server.py --det sam3 --depth moge3 --ref-img "C:\Users\colab999\Desktop\project\TJK-UAV\assets\red.jpg" --ref-box "C:\Users\colab999\Desktop\project\TJK-UAV\assets\red.txt"
+# YOLO alternative; append --autofocus when needed.
+# python win/server.py --det yolo --depth moge3
 
 uav:
 roslaunch /home/jkhk/jkhk_robot/release/mission/share/uav_nav/launch/mission.launch
