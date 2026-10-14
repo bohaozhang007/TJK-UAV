@@ -1,3 +1,4 @@
+import argparse
 import sys
 import os
 import threading
@@ -22,7 +23,7 @@ STATE_TOPIC = "/mavros/state"
 CONTROL_MODE = "OFFBOARD"
 
 
-def main(run_dir):
+def main(run_dir, skip_exposure_point=False):
     rospy.init_node("buaa_vln", disable_signals=True)
     # ROS shutdown terminates this UAV process and all its threads immediately.
     rospy.on_shutdown(lambda: os._exit(0))
@@ -80,8 +81,9 @@ def main(run_dir):
                 next_target_id += 1
                 rospy.loginfo(f"Target {target['target_id']} detected: position={target['position_world_m']}")
 
-            # Stage 2: Return to the pose recorded with the detection image.
-            flight.go_to_pose(exposure_pose)
+            # Stage 2: Optionally return to the pose recorded with the detection image.
+            if not skip_exposure_point:
+                flight.go_to_pose(exposure_pose)
 
             # Stage 3: Plan observation poses and visit each one.
             plans = prepare_observation_points(
@@ -98,7 +100,8 @@ def main(run_dir):
                 )
 
             # Stage 4: Return to the recorded pose after all visits.
-            flight.go_to_pose(exposure_pose)
+            if not skip_exposure_point:
+                flight.go_to_pose(exposure_pose)
 
             # Stage 5: Release mission control, then restart detection.
             flight.release_control()
@@ -109,5 +112,12 @@ def main(run_dir):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--skip-exposure-point",
+        action="store_true",
+        help="Visit planned observation points directly after detection",
+    )
+    args = parser.parse_args(rospy.myargv()[1:])
     with save_terminal_output() as log_path:
-        main(log_path.parent)
+        main(log_path.parent, args.skip_exposure_point)
