@@ -2,6 +2,7 @@ import argparse
 import sys
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import rospy
@@ -11,8 +12,7 @@ from mavros_msgs.msg import State
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from util.flight import FlightControl
 from util.terminal_log import save_terminal_output
-from util.arrival_image_writer import ArrivalImageWriter
-from hardware.k40t import close_camera, get_img
+from hardware.k40t import close_camera, get_img, detect_img
 from hardware.pose import close_pose
 from task.approach_target import prepare as prepare_observation_points
 from task.detect_thread import DetectThread
@@ -23,13 +23,13 @@ STATE_TOPIC = "/mavros/state"
 CONTROL_MODE = "OFFBOARD"
 
 
-def main(run_dir, skip_exposure_point=False):
+def main(skip_exposure_point=False):
     rospy.init_node("buaa_vln", disable_signals=True)
     # ROS shutdown terminates this UAV process and all its threads immediately.
     rospy.on_shutdown(lambda: os._exit(0))
     flight = FlightControl()
     detect_thread = DetectThread()
-    image_writer = ArrivalImageWriter(run_dir)
+    image_worker = ThreadPoolExecutor(max_workers=1)
     next_target_id = 1
     state = None
     ready = threading.Event()
@@ -55,7 +55,7 @@ def main(run_dir, skip_exposure_point=False):
                                 flight.close()
                             finally:
                                 try:
-                                    image_writer.close()
+                                    image_worker.shutdown()
                                 finally:
                                     rospy.signal_shutdown("Detection task stopped")
 
@@ -94,9 +94,12 @@ def main(run_dir, skip_exposure_point=False):
             for plan in plans:
                 flight.go_to_pose(plan["pose"])
                 img, _ = get_img()
-                image_writer.save(
-                    plan["target"]["target_id"],
+                target_id = plan["target"]["target_id"]
+                image_worker.submit(
+                    detect_img,
                     img,
+                    calculate_depth=False,
+                    target_id=target_id,
                 )
 
             # Stage 4: Return to the recorded pose after all visits.
@@ -119,5 +122,5 @@ if __name__ == "__main__":
         help="Visit planned observation points directly after detection",
     )
     args = parser.parse_args(rospy.myargv()[1:])
-    with save_terminal_output() as log_path:
-        main(log_path.parent, args.skip_exposure_point)
+    with save_terminal_output():
+        main(args.skip_exposure_point)

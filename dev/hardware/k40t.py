@@ -130,12 +130,24 @@ def encode_img(img):
     return encoded.tobytes()
 
 
-def detect_img(img, pose):
-    """Send a JPEG image and its paired pose; return detections with 3D positions."""
+def detect_img(
+    img,
+    pose=None,
+    calculate_depth=True,
+    target_id=None,
+):
+    """Detect a JPEG image, optionally localizing targets with its paired pose."""
+    headers = {"Content-Type": "image/jpeg"}
+    if calculate_depth:
+        headers["X-Pose"] = json.dumps(pose, allow_nan=False)
+    else:
+        headers["X-Calculate-Depth"] = "false"
+    if target_id is not None:
+        headers["X-Target-ID"] = str(target_id)
     request = urllib.request.Request(
         f"http://{WINDOWS_IP}:{DETECTOR_PORT}/detect",
         encode_img(img),
-        {"Content-Type": "image/jpeg", "X-Pose": json.dumps(pose, allow_nan=False)},
+        headers,
     )
     http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with http.open(request, timeout=120) as response:

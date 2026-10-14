@@ -157,6 +157,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         img = None
         annotations = []
+        target_id = None
         try:
             self.connection.settimeout(30)
             length = int(self.headers.get("Content-Length", "0"))
@@ -164,13 +165,23 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Request size must be between 1 byte and 64 MiB")
             img = decode_img(self.rfile.read(length))
             if self.path == "/detect":
-                pose = json.loads(self.headers["X-Pose"])
+                depth_flag = self.headers.get("X-Calculate-Depth", "true").lower()
+                if depth_flag not in ("true", "false"):
+                    raise ValueError("X-Calculate-Depth must be true or false")
+                calculate_depth = depth_flag == "true"
+                if self.headers.get("X-Target-ID") is not None:
+                    target_id = int(self.headers["X-Target-ID"])
+                pose = json.loads(self.headers["X-Pose"]) if calculate_depth else None
                 result = self.server.detector.request((img,))
                 annotations = [item.copy() for item in result]
-                if result:
+                masks = [item.pop("mask") for item in result]
+                if (
+                    calculate_depth
+                    and result
+                ):
                     locations = self.server.depth.request((
                         img,
-                        [item.pop("mask") for item in result],
+                        masks,
                         pose,
                     ))
                     result = [{**item, **location, "world_frame": pose["frame_id"]}
@@ -194,7 +205,11 @@ class Handler(BaseHTTPRequestHandler):
             # Queue after replying; the worker owns drawing, encoding and disk I/O.
             if img is not None:
                 writer = self.server.detector_writer if self.path == "/detect" else self.server.tracker_writer
-                writer.submit(img, annotations)
+                writer.submit(
+                    img,
+                    annotations,
+                    target_id=target_id,
+                )
 
 
 def decode_img(encoded):

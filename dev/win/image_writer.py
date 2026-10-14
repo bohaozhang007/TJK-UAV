@@ -30,9 +30,11 @@ class ImageWriter:
         self,
         img,
         detections,
+        target_id=None,
     ):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        self.queue.put((img, detections, timestamp))
+        filename = f"img_{timestamp}.jpg" if target_id is None else f"target_{target_id}_{timestamp}.jpg"
+        self.queue.put((img, detections, filename))
 
     def run(self):
         while True:
@@ -40,7 +42,7 @@ class ImageWriter:
             if item is None:
                 return
             try:
-                img, detections, timestamp = item
+                img, detections, filename = item
                 img = img.copy()
                 for detection in detections:
                     box = detection["box"]
@@ -73,7 +75,7 @@ class ImageWriter:
                 )
                 if not ok:
                     raise RuntimeError("Failed to encode saved image")
-                encoded.tofile(self.save_dir / f"img_{timestamp}.jpg")
+                encoded.tofile(self.save_dir / filename)
             except Exception as exc:
                 print(f"Image save failed: {exc}", flush=True)
 
