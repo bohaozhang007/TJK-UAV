@@ -25,9 +25,15 @@ def make_pose(
         or not np.isfinite(target_position).all()
     ):
         raise ValueError("Drone, waypoint and target positions must contain three finite coordinates")
-    direction = waypoint_position - position
-    ratio = np.dot(target_position - position, direction) / np.dot(direction, direction)
-    goal_position = position + ratio * direction
+    pairs = [(position, waypoint_position)]
+    previous = next_waypoint.get("previous_position_m")
+    if previous is not None:
+        previous_position = np.asarray(previous, dtype=float)
+        pairs.extend([(previous_position, position), (previous_position, waypoint_position)])
+    start, end = max(pairs, key=lambda pair: np.linalg.norm(pair[1][:2] - pair[0][:2]))
+    direction = end - start
+    ratio = np.dot(target_position - start, direction) / np.dot(direction, direction)
+    goal_position = start + ratio * direction
     goal_position[2] = max(MIN_HEIGHT_M, target_position[2])
     toward_target = target_position - goal_position
     yaw_deg = math.degrees(math.atan2(toward_target[1], toward_target[0]))
