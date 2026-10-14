@@ -1,8 +1,11 @@
+from contextlib import closing
+
 import rospy
 from geometry_msgs.msg import PoseStamped
 
 
 WAYPOINT_TOPIC = "/buaa_goal"
+POLL_INTERVAL_S = 0.1
 
 
 class NextWaypoint:
@@ -38,3 +41,29 @@ class NextWaypoint:
     def close(self):
         self.subscriber.unregister()
         self.positions = (None, None)
+
+
+def test():
+    """Print previous and next route waypoints whenever the cache changes."""
+    rospy.init_node("test_next_waypoint")
+    with closing(NextWaypoint()) as waypoint:
+        print(f"Waiting for waypoints from {WAYPOINT_TOPIC}...", flush=True)
+        previous_sample = None
+        while not rospy.is_shutdown():
+            if waypoint.positions[1] is not None:
+                sample = waypoint.get()
+                if sample != previous_sample:
+                    print(
+                        f"Previous waypoint: {sample['previous_position_m']}; "
+                        f"next waypoint: {sample['position_m']}",
+                        flush=True,
+                    )
+                    previous_sample = sample
+            rospy.sleep(POLL_INTERVAL_S)
+
+
+if __name__ == "__main__":
+    try:
+        test()
+    except (KeyboardInterrupt, rospy.ROSInterruptException):
+        pass
