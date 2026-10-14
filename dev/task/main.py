@@ -9,6 +9,7 @@ from mavros_msgs.msg import State
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from util.flight import FlightControl
+from util.terminal_log import save_terminal_output
 from hardware.k40t import close_camera
 from hardware.pose import close_pose
 from task.approach_target import prepare as prepare_observation_points
@@ -68,6 +69,8 @@ def main():
             if result is None:
                 break
             exposure_pose, targets = result
+            for index, target in enumerate(targets, start=1):
+                rospy.loginfo(f"Target {index} detected: position={target['position_world_m']}")
 
             # Stage 2: Return to the pose recorded with the detection image.
             flight.go_to_pose(exposure_pose)
@@ -89,4 +92,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with save_terminal_output():
+        main()

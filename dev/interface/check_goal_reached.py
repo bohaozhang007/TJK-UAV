@@ -8,13 +8,14 @@ from std_msgs.msg import Bool
 
 # The mission controller publishes True once per reached pose; it does not publish False.
 GOAL_REACHED_TOPIC = "/vln_point_reached"
-ARRIVAL_TIMEOUT_S = 120.0
+ARRIVAL_TIMEOUT_S = 30.0
 POLL_INTERVAL_S = 0.1
 
 
 class GoalReached:
     def __init__(self):
         self.arrived = threading.Event()
+        self.received_at = None
         self.subscriber = rospy.Subscriber(
             GOAL_REACHED_TOPIC,
             Bool,
@@ -27,9 +28,11 @@ class GoalReached:
 
     def reset(self):
         self.arrived.clear()
+        self.received_at = None
 
     def update(self, message):
         if message.data:
+            self.received_at = time.monotonic()
             self.arrived.set()
 
     def wait(self, timeout):

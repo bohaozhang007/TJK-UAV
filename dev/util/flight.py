@@ -1,5 +1,9 @@
 import time
+from datetime import datetime
 
+import rospy
+
+from hardware.pose import get_pose
 from interface.check_goal_reached import GoalReached
 from interface.release_control import ControlRelease
 from interface.to_target_pose import TargetPose
@@ -8,6 +12,7 @@ from interface.to_target_pose import TargetPose
 CONNECTION_TIMEOUT_S = 5.0
 ARRIVAL_TIMEOUT_S = 120.0
 POLL_INTERVAL_S = 0.1
+TIME_FORMAT = "%H:%M:%S.%f"
 
 
 class FlightControl:
@@ -32,19 +37,38 @@ class FlightControl:
         # Clear before sending so even an immediate True response is captured.
         self.feedback.reset()
         try:
+            sent_time = datetime.now().strftime(TIME_FORMAT)[:-3]
+            sent_at = time.monotonic()
             self.goal.send(pose)
-            print("Target pose sent; waiting for arrival feedback...", flush=True)
+            rospy.loginfo(f"Goal sent: time={sent_time}")
 
             # Stage 3: Wait for position and yaw feedback.
-            deadline = time.monotonic() + ARRIVAL_TIMEOUT_S
+            deadline = sent_at + ARRIVAL_TIMEOUT_S
             while True:
                 if time.monotonic() >= deadline:
+                    self.log_result(
+                        "timeout",
+                        time.monotonic() - sent_at,
+                    )
                     raise RuntimeError(f"Goal arrival feedback timeout of {ARRIVAL_TIMEOUT_S:g} s exceeded")
                 if self.feedback.wait(POLL_INTERVAL_S):
-                    print("Goal reached.", flush=True)
+                    self.log_result(
+                        "reached",
+                        self.feedback.received_at - sent_at,
+                    )
                     return True
         finally:
             self.feedback.reset()
+
+    def log_result(
+        self,
+        status,
+        elapsed,
+    ):
+        actual, _ = get_pose()
+        position = actual["position_m"]
+        message = f"Goal {status}: elapsed={elapsed:.2f}s, actual={position}"
+        rospy.loginfo(message)
 
     def release_control(self):
         # Stage 4: After all extra operations, return control without changing modes.

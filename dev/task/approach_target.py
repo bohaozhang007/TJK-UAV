@@ -42,8 +42,9 @@ def prepare(targets):
     # Compute every goal from the same measured pose before visiting any target.
     current_pose, _ = get_pose()
     goals = []
-    for target in targets:
+    for index, target in enumerate(targets, start=1):
         goal = make_pose(current_pose, target)
+        rospy.loginfo(f"Target {index} planned: position={goal['position_m']}, yaw={goal['yaw_deg']:.2f}")
         goals.append({"target": target, "pose": goal})
     # Visit fixed approach points from nearest to farthest relative to the planning pose.
     position = np.asarray(current_pose["position_m"])
