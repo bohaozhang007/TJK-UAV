@@ -57,7 +57,8 @@ def prepare(
             next_waypoint,
             target,
         )
-        rospy.loginfo(f"Target {index} planned: position={goal['position_m']}, yaw={goal['yaw_deg']:.2f}")
+        target_id = target.get("target_id", index)
+        rospy.loginfo(f"Target {target_id} planned: position={goal['position_m']}, yaw={goal['yaw_deg']:.2f}")
         goals.append({"target": target, "pose": goal})
     # Visit fixed approach points from nearest to farthest relative to the exposure pose.
     position = np.asarray(exposure_pose["position_m"])

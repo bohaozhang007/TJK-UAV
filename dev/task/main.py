@@ -10,7 +10,8 @@ from mavros_msgs.msg import State
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from util.flight import FlightControl
 from util.terminal_log import save_terminal_output
-from hardware.k40t import close_camera
+from util.arrival_image_writer import ArrivalImageWriter
+from hardware.k40t import close_camera, get_img
 from hardware.pose import close_pose
 from task.approach_target import prepare as prepare_observation_points
 from task.detect_thread import DetectThread
@@ -21,12 +22,14 @@ STATE_TOPIC = "/mavros/state"
 CONTROL_MODE = "OFFBOARD"
 
 
-def main():
+def main(run_dir):
     rospy.init_node("buaa_vln", disable_signals=True)
     # ROS shutdown terminates this UAV process and all its threads immediately.
     rospy.on_shutdown(lambda: os._exit(0))
     flight = FlightControl()
     detect_thread = DetectThread()
+    image_writer = ArrivalImageWriter(run_dir)
+    next_target_id = 1
     state = None
     ready = threading.Event()
     close_lock = threading.Lock()
@@ -50,7 +53,10 @@ def main():
                             try:
                                 flight.close()
                             finally:
-                                rospy.signal_shutdown("Detection task stopped")
+                                try:
+                                    image_writer.close()
+                                finally:
+                                    rospy.signal_shutdown("Detection task stopped")
 
     def update_state(message):
         if message.mode != CONTROL_MODE:
@@ -69,8 +75,10 @@ def main():
             if result is None:
                 break
             exposure_pose, next_waypoint, targets = result
-            for index, target in enumerate(targets, start=1):
-                rospy.loginfo(f"Target {index} detected: position={target['position_world_m']}")
+            for target in targets:
+                target["target_id"] = next_target_id
+                next_target_id += 1
+                rospy.loginfo(f"Target {target['target_id']} detected: position={target['position_world_m']}")
 
             # Stage 2: Return to the pose recorded with the detection image.
             flight.go_to_pose(exposure_pose)
@@ -83,6 +91,11 @@ def main():
             )
             for plan in plans:
                 flight.go_to_pose(plan["pose"])
+                img, _ = get_img()
+                image_writer.save(
+                    plan["target"]["target_id"],
+                    img,
+                )
 
             # Stage 4: Return to the recorded pose after all visits.
             flight.go_to_pose(exposure_pose)
@@ -96,5 +109,5 @@ def main():
 
 
 if __name__ == "__main__":
-    with save_terminal_output():
-        main()
+    with save_terminal_output() as log_path:
+        main(log_path.parent)
