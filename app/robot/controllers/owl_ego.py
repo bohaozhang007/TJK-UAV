@@ -124,6 +124,7 @@ class OwlEgoController:
             if path == '/v21/capabilities':
                 return dict(ok=True,backend=self.backend,protocol_version=1,async_navigation=True,
                             cancel_and_hold=True,synchronized_observation=True,
+                            px4_takeoff_land=self.hw.snapshot()['health'].get('px4_takeoff_land') is True,
                             control_lease=True,relative_xyz_yaw=True,software_takeoff=True,operator_override=True,operator_stop=True,
                             sensor_geometry=True,map_query=True,preview_only=True,stop_at_goal=True)
             if path == '/v21/observation':

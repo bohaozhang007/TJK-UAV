@@ -6,6 +6,9 @@ camera:
   observation_settle_s: 2.0
 
 control:
+  # false: existing OFFBOARD ascent; true: PX4 AUTO.TAKEOFF using MIS_TAKEOFF_ALT.
+  # Both modes land via AUTO.LAND. Restart bridge/server after changing.
+  px4_takeoff_land: false
   # Shared odometry/cloud age, missing-update timeout, and map query age limit.
   sensor_timeout_s: 1.5
   takeoff_height_m: 1.0

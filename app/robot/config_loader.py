@@ -31,10 +31,14 @@ def load_robot_config(
         raise ValueError(f"Robot config must be a mapping: {path}")
     if name == 'i7':
         from .i7.defaults import DEFAULTS
-        return _merge(DEFAULTS, config)
+        merged = _merge(DEFAULTS, config)
+        required_bool(merged['control'], 'px4_takeoff_land')
+        return merged
     if name == 'owl_ego':
         from .owl_ego.defaults import DEFAULTS
-        return _merge(DEFAULTS, config)
+        merged = _merge(DEFAULTS, config)
+        required_bool(merged['control'], 'px4_takeoff_land')
+        return merged
     return config
 
 

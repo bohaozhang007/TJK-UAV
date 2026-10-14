@@ -35,6 +35,7 @@ class Console:
         self.operator_land_request=None
         self.operator_stop_request=None
         self.manual_offboard_takeoff=False
+        self.px4_takeoff_land=False
 
     def initialize(self):
         r=self.r
@@ -42,11 +43,12 @@ class Console:
         if c.get('backend') not in ('owl_ego', 'i7') or c.get('software_takeoff') is not True:
             raise Failure('Robot 缺少 software_takeoff 能力，请更新并重启 bridge/server')
         self.manual_offboard_takeoff=c.get('manual_offboard_takeoff') is True
-        if c.get('backend') == 'i7' and not self.manual_offboard_takeoff:
-            raise Failure('请更新并重启 i7 bridge/server，当前未启用遥控器 OFFBOARD 起飞流程')
+        self.px4_takeoff_land=c.get('px4_takeoff_land') is True
+        if c.get('backend') == 'i7' and not (self.manual_offboard_takeoff or self.px4_takeoff_land):
+            raise Failure('请更新并重启 i7 bridge/server，当前未报告受支持的起飞流程')
         r.abort=threading.Event()
-        h=r.health(flight=False,allow_manual=self.manual_offboard_takeoff)
-        if self.manual_offboard_takeoff:
+        h=r.health(flight=False,allow_manual=(self.manual_offboard_takeoff or self.px4_takeoff_land))
+        if self.manual_offboard_takeoff or self.px4_takeoff_land:
             if not h.get('airborne') and h.get('mode') != 'POSCTL':
                 raise Failure('请先用遥控器切到 POSITION，再输入 init；不要提前切 OFFBOARD。')
             if h.get('manual_takeover') and (h.get('airborne') or h.get('armed') is not False
@@ -56,15 +58,15 @@ class Console:
         while (not h.get('stopped') and not h.get('active_task_id') and not h.get('airborne')
                and h.get('landed_state')==1 and h.get('landed_state_fresh') and time.monotonic()<deadline):
             time.sleep(.1)
-            h=r.health(flight=False,allow_manual=self.manual_offboard_takeoff)
+            h=r.health(flight=False,allow_manual=(self.manual_offboard_takeoff or self.px4_takeoff_land))
         if not h.get('stopped') or h.get('active_task_id'):
             raise Failure('需要静止且无活动任务')
         if r.sid:
             if r.delegated or h.get('control_owner') == 'agent' and self.operator_token:
                 raise Failure('Agent正在控制；本窗口可直接stop悬停或land降落抢占，无需重复init。')
-            if h.get('manual_takeover') and self.manual_offboard_takeoff:
+            if h.get('manual_takeover') and (self.manual_offboard_takeoff or self.px4_takeoff_land):
                 r.post('/init')
-                print('地面接管锁定已通过本次 init 清除。保持 POSITION，输入 takeoff 后等待 WAIT_OFFBOARD 提示。',flush=True)
+                print('地面接管锁定已清除。保持 POSITION，输入 takeoff。'+('PX4 将自主起飞。' if self.px4_takeoff_land else '等待 WAIT_OFFBOARD 提示后切 OFFBOARD。'),flush=True)
                 return
             if h.get('initialized') and not h.get('manual_takeover'):
                 print('已经初始化，当前会话继续保持。',flush=True)
@@ -92,7 +94,7 @@ class Console:
             r.cleanup();r.sid=None
             raise
         print('初始化完成，心跳持续。'+('保持 POSITION，输入 takeoff 后等待提示，再用遥控器切 OFFBOARD。'
-              if self.manual_offboard_takeoff else '输入 takeoff 请求 OFFBOARD、解锁和起飞。'),flush=True)
+              if self.manual_offboard_takeoff else ('输入 takeoff 请求 PX4 自主起飞，停稳后自动交回 OFFBOARD；无需手动切换。' if self.px4_takeoff_land else '输入 takeoff 请求 OFFBOARD、解锁和起飞。')),flush=True)
         if self.operator_token:
             print('起飞停稳后Agent可直接接入；保持本窗口，stop悬停、land降落均可抢占Agent运动。',flush=True)
 
@@ -107,13 +109,17 @@ class Console:
                         previous=phase
                         if phase == 'WAIT_OFFBOARD':
                             print('\nWAIT_OFFBOARD：请用遥控器切到 OFFBOARD，程序随后解锁并起飞。',flush=True)
+                        elif phase == 'PX4_TAKEOFF':
+                            print('PX4 正在自主起飞，等待飞控悬停并停稳；期间需要中止请用 land 或遥控器接管。',flush=True)
+                        elif phase == 'HANDOFF':
+                            print('PX4 起飞已停稳，正在交回 OFFBOARD。',flush=True)
                         elif phase == 'TAKEOFF':
                             print('\nTAKEOFF：正在上升，等待到达目标高度并停稳。',flush=True)
                 except Exception:
                     pass
         worker=None
-        if self.manual_offboard_takeoff:
-            print('正在准备起飞，请保持 POSITION，等待 WAIT_OFFBOARD 提示。',flush=True)
+        if self.manual_offboard_takeoff or self.px4_takeoff_land:
+            print('正在请求 PX4 自主起飞，无需手动切 OFFBOARD。' if self.px4_takeoff_land else '正在准备起飞，请保持 POSITION，等待 WAIT_OFFBOARD 提示。',flush=True)
             worker=threading.Thread(target=monitor,daemon=True)
             worker.start()
         try:

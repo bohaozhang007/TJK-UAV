@@ -57,9 +57,10 @@ def validate_terminal_stop(trajectory, goal):
 class FlightCore:
     def __init__(self, config, *, manual_offboard_takeoff=False):
         self.manual_offboard_takeoff = manual_offboard_takeoff
+        self.px4_takeoff_land = config.get("px4_takeoff_land", False)
         config = dict(config)
         for key,value in config.items():
-            if key in ('flight_enabled','failsafe_validated','sensors_validated'):
+            if key in ('flight_enabled','failsafe_validated','sensors_validated','px4_takeoff_land'):
                 if type(value) is not bool:
                     raise ValueError(key+' must be boolean')
             elif key == 'mavros_frame_profile':
@@ -164,9 +165,20 @@ class FlightCore:
                         required_duration_s=self.c['stable_duration_s']))
 
     def update_state(self, connected, armed, airborne, mode, now):
+        task = self.tasks.get(self.active, {})
+        if task.get('px4_takeoff') and task.get('auto_start_pending'):
+            phase = task.get('takeoff_phase')
+            allowed = ({'POSCTL', 'AUTO.TAKEOFF'} if phase == 'PREPARING' else
+                       {'AUTO.LOITER', 'OFFBOARD'} if phase == 'HANDOFF' else
+                       {'AUTO.TAKEOFF', 'AUTO.LOITER'})
+            if mode not in allowed:
+                self.manual = True
+                self.enabled = False
+                self.fail('manual takeover or unexpected mode during PX4 takeoff')
         incoming_ground = (connected and not armed and self.landed_state == 1
                            and now-self.ext_at <= self.c['state_timeout_s'])
-        if self.landing and not incoming_ground and (mode not in ('OFFBOARD','AUTO.LAND')
+        landing_modes = ('OFFBOARD', 'AUTO.LAND', 'AUTO.TAKEOFF', 'AUTO.LOITER') if self.px4_takeoff_land else ('OFFBOARD', 'AUTO.LAND')
+        if self.landing and not incoming_ground and (mode not in landing_modes
                 or (self.mode == 'AUTO.LAND' and mode != 'AUTO.LAND')):
             self.manual = True
             self.landing = False
@@ -269,7 +281,7 @@ class FlightCore:
             if self.stopped and self.generation is None and self.enabled and self.mode == 'OFFBOARD':
                 self.finish('cancelled', True)
             return
-        if t['kind'] == 'land':
+        if t['kind'] == 'land' or t.get('auto_start_pending'):
             return
         good = (self.enabled and self.mode == 'OFFBOARD' and self.armed and self.airborne and self.stopped and np.linalg.norm(self.pose[:3]-np.array(t['goal'][:3])) <= self.c['position_tolerance_m']
                 and abs(wrap(yaw-t['goal'][3])) <= self.c['yaw_tolerance_rad'])
@@ -438,10 +450,10 @@ class FlightCore:
                 raise Rejected('cannot initialize during active flight task')
             if not self.fresh(now) or not data.get('flight_authorized'):
                 raise Rejected('preflight not ready or manual takeover latched')
-            if self.manual_offboard_takeoff and not self.airborne and self.mode != 'POSCTL':
+            if (self.manual_offboard_takeoff or self.px4_takeoff_land) and not self.airborne and self.mode != 'POSCTL':
                 raise Rejected('select POSITION on RC before init')
             if self.manual:
-                if (not self.manual_offboard_takeoff or not self.operator_token
+                if (not (self.manual_offboard_takeoff or self.px4_takeoff_land) or not self.operator_token
                         or self.session != self.operator_session or not self.ground_confirmed(now)
                         or self.airborne or not self.stopped or self.mode != 'POSCTL'):
                     raise Rejected('manual takeover requires local operator init on disarmed, stopped POSITION ground state')
@@ -506,7 +518,7 @@ class FlightCore:
         tid = data['task_id']
         if op == 'takeoff':
             goal = self.pose.tolist()
-            goal[2] += self.c['takeoff_height_m']
+            goal[2] += (data['px4_takeoff_height_m'] if self.px4_takeoff_land else self.c['takeoff_height_m'])
         else:
             goal = data.get('goal', self.pose.tolist())
         if len(goal)!=4 or not finite(goal) or (op!='land' and max(abs(v) for v in goal[:3]) > self.c['world_limit_m']):
@@ -528,6 +540,7 @@ class FlightCore:
                                started_wall_s=time.time(), before_pose=self.pose.tolist(), before_epoch=self.epoch,
                                relative_command=data.get('relative'),
                                source='console' if self.session == self.operator_session else 'agent',
+                               px4_takeoff=op == 'takeoff' and self.px4_takeoff_land,
                                auto_start_pending=op == 'takeoff' and data.get('auto_arm',False),
                                planner_required=bool(op == 'navigate' and np.linalg.norm(np.array(goal[:3])-self.hold[:3]) >= 1e-5))
         if op == 'land':
@@ -574,6 +587,17 @@ class FlightCore:
             if self.mode == 'OFFBOARD':
                 return (self.hold[:3].copy(),np.zeros(3),np.zeros(3),float(self.hold[3]))
             return None
+        task = self.tasks.get(self.active, {})
+        if task.get('px4_takeoff') and task.get('auto_start_pending'):
+            if now-task['started'] > self.c['task_timeout_s']:
+                self.fail('PX4 takeoff timed out')
+                self.enabled = False
+                return None
+            # PX4 owns ascent. Stream the measured pose only to prepare handoff;
+            # do not apply OFFBOARD ascent or its tracking-error limits.
+            self.hold = self.pose.copy()
+            self.yaw = float(self.pose[3])
+            return (self.hold[:3].copy(), np.zeros(3), np.zeros(3), self.yaw)
         if self.pending_trajectory is not None and stamp >= self.pending_trajectory.start:
             self.trajectory = self.pending_trajectory
             self.pending_trajectory = None

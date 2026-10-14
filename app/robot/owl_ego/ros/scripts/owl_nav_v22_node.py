@@ -11,7 +11,7 @@ import rospy
 import rosgraph
 import yaml
 from mavros_msgs.msg import State, ExtendedState, PositionTarget
-from mavros_msgs.srv import SetMode, CommandBool
+from mavros_msgs.srv import SetMode, CommandBool, ParamGet
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import PointCloud2, Image, Imu
@@ -30,8 +30,9 @@ from owl_nav_v22.cloud import validate as validate_cloud
 class Node:
     def __init__(self):
         robot = rospy.get_param('~robot', 'owl_ego')
-        self.manual_offboard_takeoff = robot == 'i7'
         self.c = load_robot_config(robot, rospy.get_param('~config'))
+        self.px4_takeoff_land = self.c['control']['px4_takeoff_land']
+        self.manual_offboard_takeoff = robot == 'i7' and not self.px4_takeoff_land
         self.check_mapping = lambda: None
         if robot == 'i7':
             from app.robot.i7.mapping import require_running
@@ -232,11 +233,22 @@ class Node:
             data = json.loads(req.json)
             if not isinstance(data,dict) or not math.isfinite(data.get('deadline',math.nan)):
                 raise Rejected('invalid command deadline')
+            if data.get('op') == 'takeoff' and self.px4_takeoff_land:
+                rospy.wait_for_service('/mavros/param/get', timeout=1)
+                result = self.bounded_fcu('/mavros/param/get', ParamGet, mutation=False, param_id='MIS_TAKEOFF_ALT')
+                height = float(result.value.real)
+                if not math.isfinite(height) or height <= 0:
+                    raise Rejected('invalid PX4 MIS_TAKEOFF_ALT')
+                data['px4_takeoff_height_m'] = height
+                data['auto_arm'] = True
             with self.lock:
                 if rospy.Time.now().to_sec() > data['deadline']:
                     raise Rejected('command deadline expired')
                 now = time.monotonic()
                 op = data.pop('op')
+                if op == 'takeoff' and self.px4_takeoff_land:
+                    if self.core.mode != 'POSCTL' or not self.core.ground_confirmed(now):
+                        raise Rejected('PX4 takeoff requires fresh disarmed POSITION ground state')
                 if op == 'takeoff' and self.manual_offboard_takeoff:
                     if self.core.mode == 'OFFBOARD':
                         raise Rejected('select POSITION first, request takeoff, then select OFFBOARD on RC')
@@ -258,7 +270,7 @@ class Node:
                     raise Rejected('not confirmed on ground or FCU service busy')
                 if op in ('navigate','relative','takeoff') and self.core.pose is not None:
                     z = (data['goal'][2] if op=='navigate' else self.core.pose[2]+
-                         (data['relative'][2] if op=='relative' else self.c['control']['takeoff_height_m']))
+                         (data['relative'][2] if op=='relative' else data.get('px4_takeoff_height_m', self.c['control']['takeoff_height_m'])))
                     if not (op=='takeoff' and self.core.airborne) and not 0 <= z < self.ceiling:
                         raise Rejected('target altitude outside planner ground/ceiling bounds')
                 was_landing = self.core.landing
@@ -288,6 +300,7 @@ class Node:
         h['frame_alignment_error'] = self.alignment.error if self.frames.vendor else None
         h['takeoff_phase'] = c.tasks.get(c.active, {}).get('takeoff_phase')
         h['manual_offboard_takeoff'] = self.manual_offboard_takeoff
+        h['px4_takeoff_land'] = self.px4_takeoff_land
         h['stream_diagnostics'] = dict(self.control_timing,
             odometry=dict(self.odom_timing),
             odom_receipt_age_s=now-c.odom_at if math.isfinite(c.odom_at) else None,
@@ -343,7 +356,7 @@ class Node:
                         m.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
                         m.type_mask = PositionTarget.IGNORE_YAW_RATE
                         task = c.tasks.get(c.active, {})
-                        if self.manual_offboard_takeoff and not task.get('planner_required'):
+                        if (self.manual_offboard_takeoff or self.px4_takeoff_land) and not task.get('planner_required'):
                             m.type_mask |= (PositionTarget.IGNORE_VX | PositionTarget.IGNORE_VY | PositionTarget.IGNORE_VZ
                                             | PositionTarget.IGNORE_AFX | PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ)
                         m.position.x,m.position.y,m.position.z = p
@@ -576,7 +589,7 @@ class Node:
                 pass  # a stale audit revokes authority in the independent loop
             self.stop.wait(.5)
 
-    def bounded_fcu(self, service, cls, **kwargs):
+    def bounded_fcu(self, service, cls, *, mutation=True, **kwargs):
         # Requests cannot be recalled once sent to MAVROS. Unknown outcome
         # latches this bridge against another software arm attempt.
         done = threading.Event()
@@ -591,15 +604,16 @@ class Node:
         threading.Thread(target=call,daemon=True).start()
         if not done.wait(1.5):
             with self.lock:
-                self.fcu_uncertain = True
+                self.fcu_uncertain = self.fcu_uncertain or mutation
             raise RuntimeError('FCU service timed out; outcome uncertain')
         if 'error' in result:
             with self.lock:
-                self.fcu_uncertain = True
+                self.fcu_uncertain = self.fcu_uncertain or mutation
             raise result['error']
         response = result['response']
         if not getattr(response,'mode_sent',getattr(response,'success',False)):
             raise RuntimeError('FCU rejected '+service)
+        return response
 
     def software_takeoff(self, tid):
         with self.lock:
@@ -616,7 +630,8 @@ class Node:
                         or task.get('status') not in ('planning','executing')
                         or not task.get('auto_start_pending') or self.fcu_uncertain):
                     raise RuntimeError('software takeoff ownership/authority invalidated')
-                return dict(mode=c.mode,armed=c.armed)
+                return dict(mode=c.mode, armed=c.armed, airborne=c.airborne, stopped=c.stopped,
+                            height_ok=abs(c.pose[2]-task['goal'][2]) <= self.c['control']['position_tolerance_m'])
         def warm():
             with self.lock:
                 now = time.monotonic()
@@ -634,7 +649,30 @@ class Node:
                 if state['mode']!='OFFBOARD' or self.landed != ExtendedState.LANDED_STATE_ON_GROUND:
                     raise RuntimeError('not confirmed OFFBOARD/on ground before arm')
             self.bounded_fcu('/mavros/cmd/arming',CommandBool,value=True)
-        if self.manual_offboard_takeoff:
+        if self.px4_takeoff_land:
+            from owl_nav_v22.px4_takeoff import prepare_px4
+            def phase(value):
+                with self.lock:
+                    guard()
+                    self.core.tasks[tid]['takeoff_phase'] = value
+            def native_mode(mode):
+                rospy.wait_for_service('/mavros/set_mode', timeout=1)
+                guard()
+                self.bounded_fcu('/mavros/set_mode', SetMode, custom_mode=mode)
+            def native_arm():
+                rospy.wait_for_service('/mavros/cmd/arming', timeout=1)
+                state = guard()
+                if state['mode'] != 'AUTO.TAKEOFF' or self.landed != ExtendedState.LANDED_STATE_ON_GROUND:
+                    raise RuntimeError('PX4 takeoff mode/on-ground confirmation required before arm')
+                self.bounded_fcu('/mavros/cmd/arming', CommandBool, value=True)
+            prepare_px4(guard, native_mode, native_arm, warm, phase,
+                        timeout=self.c['controller']['takeoff_timeout_s']-5.)
+            with self.lock:
+                guard()
+                # Adopt the measured hover position; do not pull back to launch XY.
+                self.core.tasks[tid]['goal'] = self.core.pose.tolist()
+                self.core.hold = self.core.pose.copy()
+        elif self.manual_offboard_takeoff:
             from app.robot.i7.takeoff import prepare_manual
             def phase(value):
                 with self.lock:
@@ -677,7 +715,10 @@ class Node:
                     if op == 'takeoff' and not self.core.landing and (owns_task or self.fcu_uncertain):
                         # No ascent/retry after an uncertain or cancelled arm request.
                         self.core.enabled = False
-                        self.core.manual = True
+                        # A native mode keeps flying under PX4. Preserve the
+                        # explicit land path unless the pilot took control.
+                        if not self.px4_takeoff_land:
+                            self.core.manual = True
             finally:
                 with self.lock:
                     self.fcu_busy = False

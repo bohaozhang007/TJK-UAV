@@ -19,6 +19,7 @@ DEFAULTS = {
         "extrinsics_mode": "sensor_geometry"
     },
     "control": {
+        "px4_takeoff_land": False,
         "mavros_frame_profile": "owl_vendor_world",
         "control_hz": 50,
         "sensor_timeout_s": 1.5,

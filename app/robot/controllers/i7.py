@@ -234,9 +234,9 @@ class I7Controller(OwlEgoController):
             return self.diagnostic_cloud(data)
         if path == '/v21/capabilities' and method == 'GET':
             return dict(super().handle_http(method, path, data, local_operator=local_operator),
-                        autofocus=True, manual_offboard_takeoff=self.hw.snapshot()['health'].get('manual_offboard_takeoff') is True)
+                        autofocus=True, px4_takeoff_land=self.hw.snapshot()['health'].get('px4_takeoff_land') is True, manual_offboard_takeoff=self.hw.snapshot()['health'].get('manual_offboard_takeoff') is True)
         if path == '/takeoff' and method == 'POST':
-            if self.hw.snapshot()['health'].get('manual_offboard_takeoff') is not True:
+            if not any(self.hw.snapshot()['health'].get(k) is True for k in ('manual_offboard_takeoff', 'px4_takeoff_land')):
                 raise ApiError('restart the i7 bridge to enable manual OFFBOARD takeoff')
         if path == '/v22/autofocus' and method == 'POST':
             return self._idempotent(path, data, lambda: self.start_photo(data))
