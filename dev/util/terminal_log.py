@@ -42,7 +42,9 @@ class TeeStream:
 def save_terminal_output():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime(TIMESTAMP_FORMAT)
-    path = LOG_DIR / f"{timestamp}.txt"
+    run_dir = LOG_DIR / timestamp
+    run_dir.mkdir()
+    path = run_dir / "log.txt"
     stdout, stderr = sys.stdout, sys.stderr
     lock = threading.RLock()
     with path.open("x", encoding="utf-8") as logfile:
