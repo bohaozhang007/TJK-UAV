@@ -103,8 +103,7 @@ def main(skip_exposure_point=False):
                 )
 
             # Stage 4: Return to the recorded pose after all visits.
-            if not skip_exposure_point:
-                flight.go_to_pose(exposure_pose)
+            flight.go_to_pose(exposure_pose)
 
             # Stage 5: Release mission control, then restart detection.
             flight.release_control()
@@ -119,7 +118,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--skip-exposure-point",
         action="store_true",
-        help="Visit planned observation points directly after detection",
+        help="Skip the initial return to the exposure pose; always return after all visits",
     )
     args = parser.parse_args(rospy.myargv()[1:])
     with save_terminal_output():
