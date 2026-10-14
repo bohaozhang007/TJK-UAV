@@ -39,7 +39,7 @@ def main():
                     state.unregister()
             finally:
                 try:
-                    detect_thread.pause()
+                    detect_thread.close()
                 finally:
                     try:
                         close_camera()
@@ -68,7 +68,7 @@ def main():
             result = detect_thread.find_targets()
             if result is None:
                 break
-            exposure_pose, targets = result
+            exposure_pose, next_waypoint, targets = result
             for index, target in enumerate(targets, start=1):
                 rospy.loginfo(f"Target {index} detected: position={target['position_world_m']}")
 
@@ -76,7 +76,11 @@ def main():
             flight.go_to_pose(exposure_pose)
 
             # Stage 3: Plan observation poses and visit each one.
-            plans = prepare_observation_points(targets)
+            plans = prepare_observation_points(
+                exposure_pose,
+                next_waypoint,
+                targets,
+            )
             for plan in plans:
                 flight.go_to_pose(plan["pose"])
 

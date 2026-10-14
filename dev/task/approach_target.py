@@ -3,50 +3,57 @@ import math
 import numpy as np
 import rospy
 
-from hardware.pose import get_pose
-
-
-TARGET_DISTANCE_M = 2.0
 MIN_HEIGHT_M = 0.5
 
 
-def make_pose(current_pose, target):
-    if current_pose["frame_id"] != target["world_frame"]:
+def make_pose(
+    exposure_pose,
+    next_waypoint,
+    target,
+):
+    if exposure_pose["frame_id"] != target["world_frame"]:
         raise ValueError("Drone and target positions must use the same SLAM frame")
-    position = np.asarray(current_pose["position_m"], dtype=float)
+    position = np.asarray(exposure_pose["position_m"], dtype=float)
+    waypoint_position = np.asarray(next_waypoint["position_m"], dtype=float)
     target_position = np.asarray(target["position_world_m"], dtype=float)
     if (
         position.shape != (3,)
+        or waypoint_position.shape != (3,)
         or target_position.shape != (3,)
         or not np.isfinite(position).all()
+        or not np.isfinite(waypoint_position).all()
         or not np.isfinite(target_position).all()
     ):
-        raise ValueError("Drone and target positions must contain three finite coordinates")
-    direction = target_position - position
-    distance = np.linalg.norm(direction)
-    yaw_deg = math.degrees(math.atan2(direction[1], direction[0]))
-    if distance <= TARGET_DISTANCE_M:
-        rospy.logwarn(f"Target is within {TARGET_DISTANCE_M:g} m; keeping position and aligning yaw")
-        goal_position = position
-    else:
-        goal_position = target_position - direction * (TARGET_DISTANCE_M / distance)
-        goal_position[2] = max(MIN_HEIGHT_M, goal_position[2])
+        raise ValueError("Drone, waypoint and target positions must contain three finite coordinates")
+    direction = waypoint_position - position
+    ratio = np.dot(target_position - position, direction) / np.dot(direction, direction)
+    goal_position = position + ratio * direction
+    goal_position[2] = max(MIN_HEIGHT_M, target_position[2])
+    toward_target = target_position - goal_position
+    yaw_deg = math.degrees(math.atan2(toward_target[1], toward_target[0]))
     return {
-        "frame_id": current_pose["frame_id"],
+        "frame_id": exposure_pose["frame_id"],
         "position_m": goal_position.tolist(),
         "yaw_deg": yaw_deg,
     }
 
 
-def prepare(targets):
-    # Compute every goal from the same measured pose before visiting any target.
-    current_pose, _ = get_pose()
+def prepare(
+    exposure_pose,
+    next_waypoint,
+    targets,
+):
+    # Use the exposure pose and route waypoint paired with the detection image.
     goals = []
     for index, target in enumerate(targets, start=1):
-        goal = make_pose(current_pose, target)
+        goal = make_pose(
+            exposure_pose,
+            next_waypoint,
+            target,
+        )
         rospy.loginfo(f"Target {index} planned: position={goal['position_m']}, yaw={goal['yaw_deg']:.2f}")
         goals.append({"target": target, "pose": goal})
-    # Visit fixed approach points from nearest to farthest relative to the planning pose.
-    position = np.asarray(current_pose["position_m"])
+    # Visit fixed approach points from nearest to farthest relative to the exposure pose.
+    position = np.asarray(exposure_pose["position_m"])
     return sorted(goals, key=lambda item: np.linalg.norm(
         np.asarray(item["pose"]["position_m"]) - position))

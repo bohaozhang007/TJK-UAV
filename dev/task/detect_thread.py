@@ -9,6 +9,7 @@ import rospy
 from util.dedup import select_new_targets
 from hardware.k40t import get_img, detect_img
 from hardware.pose import get_pose
+from interface.next_waypoint import NextWaypoint
 
 
 # Sampling and buffering.
@@ -33,12 +34,13 @@ class DetectThread:
         self.stop = threading.Event()
         self.worker = None
         self.seen_positions = {}
+        self.waypoint = NextWaypoint()
 
     def start(self):
         self.stop.clear()
         self.worker = threading.Thread(
             target=capture_loop,
-            args=(self.frames, self.stop),
+            args=(self.frames, self.stop, self.waypoint),
             daemon=True,
         )
         self.worker.start()
@@ -50,6 +52,12 @@ class DetectThread:
             self.worker = None
         self.frames = queue.Queue(maxsize=QUEUE_SIZE)
 
+    def close(self):
+        try:
+            self.pause()
+        finally:
+            self.waypoint.close()
+
     def find_targets(self):
         self.start()
         while not rospy.is_shutdown():
@@ -57,7 +65,7 @@ class DetectThread:
                 frame = self.frames.get(timeout=SAMPLE_INTERVAL_S)
             except queue.Empty:
                 continue
-            frame_id, img, pose = frame
+            frame_id, img, pose, waypoint = frame
             for attempt in range(SEND_ATTEMPTS):
                 try:
                     detections = detect_img(img, pose)
@@ -68,14 +76,14 @@ class DetectThread:
             else:
                 rospy.logwarn(f"Dropping frame {frame_id} after {SEND_ATTEMPTS} failed attempts")
                 continue
-            print(json.dumps({"frame_id": frame_id, "pose": pose, "detections": detections}), flush=True)
+            print(json.dumps({"frame_id": frame_id, "pose": pose, "waypoint": waypoint, "detections": detections}), flush=True)
             targets = select_new_targets(detections, self.seen_positions)
             if targets:
                 # Keep the detection frame paired with its boxes for tracker initialization.
                 for target in targets:
                     target["exposure_img"] = img
                 self.pause()
-                return pose, targets
+                return pose, waypoint, targets
         return None
 
 
@@ -92,7 +100,11 @@ def sample_is_fresh(img_sample, pose_sample):
     )
 
 
-def capture_loop(frames, stop):
+def capture_loop(
+    frames,
+    stop,
+    waypoint,
+):
     frame_id = 0
     with ThreadPoolExecutor(max_workers=2) as readers:
         while not stop.is_set():
@@ -104,6 +116,7 @@ def capture_loop(frames, stop):
                 wait((img_future, pose_future))
                 img_sample = img_future.result()
                 pose_sample = pose_future.result()
+                waypoint_sample = waypoint.get()
             except Exception as exc:
                 rospy.logwarn(f"Capture failed; retrying: {exc}")
                 stop.wait(CAPTURE_RETRY_S)
@@ -118,5 +131,5 @@ def capture_loop(frames, stop):
                         frames.get_nowait()
                     except queue.Empty:
                         pass
-                frames.put_nowait((frame_id, img, pose))
+                frames.put_nowait((frame_id, img, pose, waypoint_sample))
             stop.wait(max(0.0, SAMPLE_INTERVAL_S - (time.monotonic() - started)))
