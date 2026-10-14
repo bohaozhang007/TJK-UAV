@@ -1,3 +1,4 @@
+import math
 from contextlib import closing
 
 import rospy
@@ -53,9 +54,12 @@ def test():
             if waypoint.positions[1] is not None:
                 sample = waypoint.get()
                 if sample != previous_sample:
+                    previous = sample["previous_position_m"]
+                    current = sample["position_m"]
+                    distance = "unavailable" if previous is None else f"{math.dist(previous, current):.3f} m"
                     print(
-                        f"Previous waypoint: {sample['previous_position_m']}; "
-                        f"next waypoint: {sample['position_m']}",
+                        f"Previous waypoint: {previous}; "
+                        f"next waypoint: {current}; 3D distance: {distance}",
                         flush=True,
                     )
                     previous_sample = sample

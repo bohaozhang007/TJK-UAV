@@ -1,7 +1,7 @@
 import numpy as np
 
 
-DEDUP_DISTANCE_M = 1.0
+DEDUP_DISTANCE_M = 1.2
 
 
 def select_new_targets(detections, seen_positions):
