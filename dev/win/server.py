@@ -124,7 +124,19 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/health":
             self.reply(404, {"error": "not found"})
             return
-        self.reply(200, {"ok": True, "tracker_ready": self.tracker_ready()})
+        
+        detector_ready = self.server.detector.process.poll() is None
+        depth_ready = self.server.depth.process.poll() is None
+        ok = detector_ready and depth_ready
+        self.reply(
+            200 if ok else 503,
+            {
+                "ok": ok, 
+                "detector_ready": detector_ready,
+                "depth_ready": depth_ready,
+                "tracker_ready": self.tracker_ready()
+            },
+        )
 
     def tracker_ready(self):
         # ModelProcess initialization returns only after successful warmup.

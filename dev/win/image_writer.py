@@ -8,6 +8,7 @@ import cv2
 
 SAVE_DIR = Path(__file__).resolve().parents[2] / "logs"
 JPEG_QUALITY = 95
+SAVE_QUEUE_SIZE = 10
 
 
 class ImageWriter:
@@ -20,8 +21,8 @@ class ImageWriter:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.save_dir = SAVE_DIR / timestamp / kind
         self.save_dir.mkdir(parents=True, exist_ok=True)
-        # Keep every decoded image without blocking requests on disk writes.
-        self.queue = queue.Queue()
+        # Block submission when full to bound buffered images without dropping them.
+        self.queue = queue.Queue(maxsize=SAVE_QUEUE_SIZE)
         self.worker = threading.Thread(target=self.run)
         self.worker.start()
 
