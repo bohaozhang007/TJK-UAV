@@ -235,6 +235,8 @@ def camera_request(
             ):
                 if data[:2] != b"\x00\x00":
                     raise RuntimeError("K40T rejected camera command")
+                if kind == "ack":
+                    return True
                 acknowledged = True
             elif (
                 acknowledged
@@ -297,6 +299,14 @@ def camera_request(
                     return status
         # Never resend a movement whose outcome is unknown.
         raise RuntimeError(f"K40T {kind} confirmation timeout of {CAMERA_EXECUTE_TIMEOUT_S:g} s exceeded")
+
+
+def disable_osd():
+    return camera_request(
+        0x000314,
+        b"\x00\x00\x00",
+        kind="ack",
+    )
 
 
 def get_gimbal():

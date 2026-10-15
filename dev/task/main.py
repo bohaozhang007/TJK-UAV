@@ -12,7 +12,7 @@ from mavros_msgs.msg import State
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from util.flight import FlightControl
 from util.terminal_log import save_terminal_output
-from hardware.k40t import close_camera, get_img, detect_img
+from hardware.k40t import close_camera, get_img, detect_img, disable_osd
 from hardware.pose import close_pose
 from task.approach_target import prepare as prepare_observation_points
 from task.detect_thread import DetectThread
@@ -25,6 +25,7 @@ CONTROL_MODE = "OFFBOARD"
 
 def main(skip_exposure_point=False):
     rospy.init_node("buaa_vln", disable_signals=True)
+    disable_osd()
     # ROS shutdown terminates this UAV process and all its threads immediately.
     rospy.on_shutdown(lambda: os._exit(0))
     flight = FlightControl()
