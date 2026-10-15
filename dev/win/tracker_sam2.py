@@ -17,8 +17,8 @@ MODEL_ROOT = Path(__file__).resolve().parents[3] / "sam2"
 sys.path.insert(0, str(MODEL_ROOT))
 from sam2.build_sam import build_sam2_video_predictor
 
-CHECKPOINT = MODEL_ROOT / "checkpoints/sam2.1_hiera_small.pt"
-MODEL_CONFIG = "configs/sam2.1/sam2.1_hiera_s.yaml"
+CHECKPOINT = MODEL_ROOT / "checkpoints/sam2.1_hiera_base_plus.pt"
+MODEL_CONFIG = "configs/sam2.1/sam2.1_hiera_b+.yaml"
 WARMUP_SHAPE = (1080, 1920, 3)
 
 
