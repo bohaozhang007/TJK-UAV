@@ -2,7 +2,6 @@ import argparse
 import sys
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import rospy
@@ -21,6 +20,17 @@ from task.detect_thread import DetectThread
 POLL_INTERVAL_S = 0.1
 STATE_TOPIC = "/mavros/state"
 CONTROL_MODE = "OFFBOARD"
+CAPTURE_COUNT = 5
+
+
+def capture_images(target_id):
+    for _ in range(CAPTURE_COUNT):
+        img, _ = get_img()
+        detect_img(
+            img,
+            calculate_depth=False,
+            target_id=target_id,
+        )
 
 
 def main(skip_exposure_point=False):
@@ -30,7 +40,6 @@ def main(skip_exposure_point=False):
     rospy.on_shutdown(lambda: os._exit(0))
     flight = FlightControl()
     detect_thread = DetectThread()
-    image_worker = ThreadPoolExecutor(max_workers=1)
     next_target_id = 1
     state = None
     ready = threading.Event()
@@ -55,10 +64,7 @@ def main(skip_exposure_point=False):
                             try:
                                 flight.close()
                             finally:
-                                try:
-                                    image_worker.shutdown()
-                                finally:
-                                    rospy.signal_shutdown("Detection task stopped")
+                                rospy.signal_shutdown("Detection task stopped")
 
     def update_state(message):
         if message.mode != CONTROL_MODE:
@@ -94,14 +100,8 @@ def main(skip_exposure_point=False):
             )
             for plan in plans:
                 flight.go_to_pose(plan["pose"])
-                img, _ = get_img()
                 target_id = plan["target"]["target_id"]
-                image_worker.submit(
-                    detect_img,
-                    img,
-                    calculate_depth=False,
-                    target_id=target_id,
-                )
+                capture_images(target_id)
 
             # Stage 4: Return to the recorded pose after all visits.
             flight.go_to_pose(exposure_pose)
