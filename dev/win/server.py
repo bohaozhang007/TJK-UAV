@@ -225,6 +225,7 @@ class Handler(BaseHTTPRequestHandler):
             if img is not None:
                 writer = self.server.detector_writer if self.path == "/detect" else self.server.tracker_writer
                 writer.submit(
+                    img,
                     save_img,
                     annotations,
                     target_id=target_id,
