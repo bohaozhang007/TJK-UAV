@@ -1,6 +1,6 @@
 ﻿win:
 cd ~\Desktop\project\TJK-UAV\dev
-python win/server.py --det yolo --depth moge3
+python win/server.py --det yolo --depth moge3 --autofocus
 # python win/server.py --det sam3 --depth moge3 --ref-img "C:\Users\colab999\Desktop\project\TJK-UAV\assets\red.jpg" --ref-box "C:\Users\colab999\Desktop\project\TJK-UAV\assets\red.txt"
 
 uav:
