@@ -80,7 +80,8 @@ class DetectThread:
             else:
                 rospy.logwarn(f"Dropping frame {frame_id} after {SEND_ATTEMPTS} failed attempts")
                 continue
-            print(json.dumps({"frame_id": frame_id, "pose": pose, "waypoint": waypoint, "detections": detections}), flush=True)
+            if detections:
+                print(json.dumps({"frame_id": frame_id, "pose": pose, "waypoint": waypoint, "detections": detections}), flush=True)
             detections = [
                 target
                 for target in detections
