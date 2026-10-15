@@ -17,6 +17,8 @@ from image_writer import ImageWriter
 
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 8790
+CLAHE_CLIP_LIMIT = 1.5
+CLAHE_TILE_GRID_SIZE = (8, 8)
 CONDA_ENVS = Path.home() / "anaconda3/envs"
 MOGE_ENV = Path(__file__).resolve().parents[3] / "MoGe/.venv"
 MODEL_SCRIPTS = {
@@ -156,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(503, {"error": "Tracker is unavailable; start the server with --autofocus"})
             return
         img = None
+        save_img = None
         annotations = []
         target_id = None
         try:
@@ -164,7 +167,12 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 64 * 1024 * 1024:
                 raise ValueError("Request size must be between 1 byte and 64 MiB")
             img = decode_img(self.rfile.read(length))
+            save_img = img
             if self.path == "/detect":
+                if self.server.clahe is not None:
+                    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                    lab[:, :, 0] = self.server.clahe.apply(lab[:, :, 0])
+                    save_img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
                 depth_flag = self.headers.get("X-Calculate-Depth", "true").lower()
                 if depth_flag not in ("true", "false"):
                     raise ValueError("X-Calculate-Depth must be true or false")
@@ -172,7 +180,7 @@ class Handler(BaseHTTPRequestHandler):
                 if self.headers.get("X-Target-ID") is not None:
                     target_id = int(self.headers["X-Target-ID"])
                 pose = json.loads(self.headers["X-Pose"]) if calculate_depth else None
-                result = self.server.detector.request((img,))
+                result = self.server.detector.request((save_img,))
                 annotations = [item.copy() for item in result]
                 masks = [item.pop("mask") for item in result]
                 if (
@@ -214,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             if img is not None:
                 writer = self.server.detector_writer if self.path == "/detect" else self.server.tracker_writer
                 writer.submit(
-                    img,
+                    save_img,
                     annotations,
                     target_id=target_id,
                 )
@@ -268,6 +276,11 @@ def parse_args(argv=None):
         help="Text file containing pixel x1 y1 x2 y2 (required for sam3)",
     )
     parser.add_argument(
+        "--clahe",
+        action="store_true",
+        help="Enhance detection images and saved visualizations with CLAHE",
+    )
+    parser.add_argument(
         "--autofocus",
         action="store_true",
         help="Load and warm up SAM2 to enable autofocus tracking",
@@ -297,6 +310,10 @@ def main():
     # Each child loads and warms up its model before accepting requests.
     with ExitStack() as stack:
         server = stack.enter_context(HTTPServer((SERVER_HOST, SERVER_PORT), Handler))
+        server.clahe = cv2.createCLAHE(
+            clipLimit=CLAHE_CLIP_LIMIT,
+            tileGridSize=CLAHE_TILE_GRID_SIZE,
+        ) if args.clahe else None
         server.detector = stack.enter_context(closing(ModelProcess(args.det, detector_args)))
         server.depth = stack.enter_context(closing(ModelProcess(args.depth)))
         server.tracker = None
