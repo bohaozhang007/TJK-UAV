@@ -147,7 +147,12 @@ def run(
             set_gimbal(pitch_deg, yaw_deg)
             time.sleep(SETTLE_TIME_S)
         return skip_autofocus(f"Reached the step limit ({MAX_STEPS}) without satisfying framing conditions")
-    except Exception:
+    except Exception as exc:
+        if (
+            isinstance(exc, RuntimeError)
+            and str(exc).startswith(("K40T gimbal confirmation timeout", "K40T zoom confirmation timeout"))
+        ):
+            return skip_autofocus(str(exc))
         rospy.logerr("Autofocus failed before camera restoration", exc_info=True)
         raise
     finally:
