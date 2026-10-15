@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import rospy
 
@@ -13,6 +15,7 @@ STABLE_FRAMES = 1
 
 # Iteration limit
 MAX_STEPS = 50
+SETTLE_TIME_S = 0.1
 
 # Gimbal control
 REFERENCE_WIDTH_PX = 640
@@ -68,11 +71,13 @@ def run(
             return skip_autofocus("SAM2 could not initialize the target")
         rospy.loginfo(f"Autofocus: setting baseline zoom to {BASELINE_ZOOM:g}x")
         set_zoom(BASELINE_ZOOM)
+        time.sleep(SETTLE_TIME_S)
         rospy.loginfo("Autofocus: setting gimbal to zero")
         set_gimbal(
             0.0,
             0.0,
         )
+        time.sleep(SETTLE_TIME_S)
         stable = 0
         for step in range(1, MAX_STEPS + 1):
             rospy.loginfo(f"Autofocus step {step}/{MAX_STEPS}: reading image")
@@ -121,6 +126,7 @@ def run(
                     continue
                 rospy.loginfo(f"Autofocus: setting zoom from {zoom:.1f}x to {desired:.1f}x")
                 set_zoom(desired)
+                time.sleep(SETTLE_TIME_S)
                 continue
             # Scale normalized errors to v20 reference pixels; move one axis per frame.
             axis = int(abs(error[1]) > abs(error[0]))
@@ -139,6 +145,7 @@ def run(
                 yaw_deg += delta
             rospy.loginfo(f"Autofocus: setting gimbal pitch={pitch_deg:.2f}, yaw={yaw_deg:.2f}")
             set_gimbal(pitch_deg, yaw_deg)
+            time.sleep(SETTLE_TIME_S)
         return skip_autofocus(f"Reached the step limit ({MAX_STEPS}) without satisfying framing conditions")
     except Exception:
         rospy.logerr("Autofocus failed before camera restoration", exc_info=True)
@@ -148,6 +155,7 @@ def run(
         try:
             rospy.loginfo(f"Autofocus: restoring zoom to {BASELINE_ZOOM:g}x")
             set_zoom(BASELINE_ZOOM)
+            time.sleep(SETTLE_TIME_S)
             rospy.loginfo("Autofocus: zoom restored")
         finally:
             rospy.loginfo("Autofocus: restoring gimbal to zero")
@@ -155,4 +163,5 @@ def run(
                 0.0,
                 0.0,
             )
+            time.sleep(SETTLE_TIME_S)
             rospy.loginfo("Autofocus: gimbal restored")
