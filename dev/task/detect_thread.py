@@ -4,6 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 
+import numpy as np
 import rospy
 
 from util.dedup import select_new_targets
@@ -26,6 +27,9 @@ CAPTURE_RETRY_S = 0.1
 # Inference request retries.
 SEND_ATTEMPTS = 2
 SEND_RETRY_S = 0.1
+
+# Target selection radius from the paired image pose, including height difference.
+MAX_TARGET_DISTANCE_M = 5.0
 
 
 class DetectThread:
@@ -77,6 +81,18 @@ class DetectThread:
                 rospy.logwarn(f"Dropping frame {frame_id} after {SEND_ATTEMPTS} failed attempts")
                 continue
             print(json.dumps({"frame_id": frame_id, "pose": pose, "waypoint": waypoint, "detections": detections}), flush=True)
+            detections = [
+                target
+                for target in detections
+                if (
+                    target["position_world_m"] is not None
+                    and target["world_frame"] == pose["frame_id"]
+                    and np.linalg.norm(
+                        np.asarray(target["position_world_m"])
+                        - np.asarray(pose["position_m"])
+                    ) <= MAX_TARGET_DISTANCE_M
+                )
+            ]
             targets = select_new_targets(detections, self.seen_positions)
             if targets:
                 # Keep the detection frame paired with its boxes for tracker initialization.
