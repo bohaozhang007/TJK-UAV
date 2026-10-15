@@ -4,6 +4,8 @@ import numpy as np
 import rospy
 
 MIN_HEIGHT_M = 0.5
+MIN_RADIUS_M = 1.5
+SIDE_ANGLE_DEG = 30
 
 
 def make_pose(
@@ -57,10 +59,36 @@ def prepare(
             next_waypoint,
             target,
         )
-        target_id = target.get("target_id", index)
-        rospy.loginfo(f"Target {target_id} planned: position={goal['position_m']}, yaw={goal['yaw_deg']:.2f}")
-        goals.append({"target": target, "pose": goal})
-    # Visit fixed approach points from nearest to farthest relative to the exposure pose.
+        goals.append({"target": target, "pose": goal, "target_id": target.get("target_id", index)})
+    # Sort targets by their foot points, keeping each target's three poses together.
     position = np.asarray(exposure_pose["position_m"])
-    return sorted(goals, key=lambda item: np.linalg.norm(
+    goals = sorted(goals, key=lambda item: np.linalg.norm(
         np.asarray(item["pose"]["position_m"]) - position))
+    plans = []
+    for item in goals:
+        target = item["target"]
+        goal = item["pose"]
+        target_position = np.asarray(target["position_world_m"], dtype=float)
+        offset = np.asarray(goal["position_m"])[:2] - target_position[:2]
+        radius = np.linalg.norm(offset)
+        if 0 < radius < MIN_RADIUS_M:
+            offset = offset * (MIN_RADIUS_M / radius)
+        for angle in (0, SIDE_ANGLE_DEG, -SIDE_ANGLE_DEG):
+            radians = math.radians(angle)
+            cosine, sine = math.cos(radians), math.sin(radians)
+            rotated = np.array([
+                cosine * offset[0] - sine * offset[1],
+                sine * offset[0] + cosine * offset[1],
+            ])
+            point = target_position[:2] + rotated
+            pose = {
+                "frame_id": goal["frame_id"],
+                "position_m": [float(point[0]), float(point[1]), goal["position_m"][2]],
+                "yaw_deg": math.degrees(math.atan2(-rotated[1], -rotated[0])),
+            }
+            rospy.loginfo(
+                f"Target {item['target_id']} planned: angle={angle:+g}, "
+                f"position={pose['position_m']}, yaw={pose['yaw_deg']:.2f}"
+            )
+            plans.append({"target": target, "pose": pose})
+    return plans
