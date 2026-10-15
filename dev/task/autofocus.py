@@ -6,7 +6,7 @@ from hardware.k40t import get_zoom, set_zoom, check_tracker
 
 
 # Framing completion
-TARGET_RATIO = 0.4
+TARGET_RATIO = 0.35
 CENTER_TOLERANCE = 0.1
 SIZE_TOLERANCE = 0.1
 STABLE_FRAMES = 1
@@ -45,21 +45,27 @@ def run(
     capture=None,
 ):
     # Recheck before any camera movement in case the tracker exited after startup.
+    rospy.loginfo("Autofocus: checking tracker readiness")
     check_tracker()
 
     try:
         # Initialize with the exact frame and box used to detect this target.
+        rospy.loginfo(f"Autofocus: initializing tracker with box={box}")
         result = track_img(exposure_img, box)
         if result["box"] is None:
             raise RuntimeError("SAM2 could not initialize the autofocus target")
+        rospy.loginfo(f"Autofocus: setting baseline zoom to {BASELINE_ZOOM:g}x")
         set_zoom(BASELINE_ZOOM)
+        rospy.loginfo("Autofocus: setting gimbal to zero")
         set_gimbal(
             0.0,
             0.0,
         )
         stable = 0
-        for _ in range(MAX_STEPS):
+        for step in range(1, MAX_STEPS + 1):
+            rospy.loginfo(f"Autofocus step {step}/{MAX_STEPS}: reading image")
             img, _ = get_img()
+            rospy.loginfo(f"Autofocus step {step}/{MAX_STEPS}: tracking")
             result = track_img(img)
             if result["box"] is None:
                 raise RuntimeError("SAM2 lost the autofocus target")
@@ -68,6 +74,10 @@ def run(
             x1, y1, x2, y2 = result["box"]
             ratio = max((x2 - x1) / img.shape[1], (y2 - y1) / img.shape[0])
             sized = abs(ratio - TARGET_RATIO) <= SIZE_TOLERANCE
+            rospy.loginfo(
+                f"Autofocus step {step}/{MAX_STEPS}: box={result['box']}, "
+                f"error={error.tolist()}, ratio={ratio:.3f}, centered={centered}, sized={sized}"
+            )
             framed = (
                 centered
                 and sized
@@ -76,10 +86,13 @@ def run(
             if stable >= STABLE_FRAMES:
                 rospy.loginfo("Autofocus complete: target centered and sized")
                 if capture is not None:
+                    rospy.loginfo("Autofocus: starting burst capture")
                     capture()
+                    rospy.loginfo("Autofocus: burst capture complete")
                 return True
             if framed:
                 continue
+            rospy.loginfo("Autofocus: reading zoom")
             zoom = get_zoom()
             if centered:
                 desired = float(np.clip(
@@ -91,6 +104,7 @@ def run(
                 if abs(desired - zoom) < 0.05:
                     rospy.loginfo(f"Skipping zoom adjustment: current={zoom:.1f}x, desired={desired:.1f}x")
                     continue
+                rospy.loginfo(f"Autofocus: setting zoom from {zoom:.1f}x to {desired:.1f}x")
                 set_zoom(desired)
                 continue
             # Scale normalized errors to v20 reference pixels; move one axis per frame.
@@ -101,20 +115,29 @@ def run(
                 -MAX_ROTATE_DEG,
                 MAX_ROTATE_DEG,
             )), 2)
+            rospy.loginfo("Autofocus: reading gimbal angles")
             status = get_gimbal()
             pitch_deg, yaw_deg = status["pitch_deg"], status["yaw_deg"]
             if axis:
                 pitch_deg += delta
             else:
                 yaw_deg += delta
+            rospy.loginfo(f"Autofocus: setting gimbal pitch={pitch_deg:.2f}, yaw={yaw_deg:.2f}")
             set_gimbal(pitch_deg, yaw_deg)
         raise RuntimeError("Autofocus reached its step limit")
+    except Exception:
+        rospy.logerr("Autofocus failed before camera restoration", exc_info=True)
+        raise
     finally:
         # Restore the camera even after a keyboard interruption.
         try:
+            rospy.loginfo(f"Autofocus: restoring zoom to {BASELINE_ZOOM:g}x")
             set_zoom(BASELINE_ZOOM)
+            rospy.loginfo("Autofocus: zoom restored")
         finally:
+            rospy.loginfo("Autofocus: restoring gimbal to zero")
             set_gimbal(
                 0.0,
                 0.0,
             )
+            rospy.loginfo("Autofocus: gimbal restored")

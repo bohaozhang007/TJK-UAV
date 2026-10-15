@@ -26,13 +26,16 @@ CAPTURE_COUNT = 3
 
 
 def capture_images(target_id):
-    for _ in range(CAPTURE_COUNT):
+    for index in range(CAPTURE_COUNT):
+        rospy.loginfo(f"Target {target_id} capture {index + 1}/{CAPTURE_COUNT}: reading image")
         img, _ = get_img()
+        rospy.loginfo(f"Target {target_id} capture {index + 1}/{CAPTURE_COUNT}: sending image")
         detect_img(
             img,
             calculate_depth=False,
             target_id=target_id,
         )
+        rospy.loginfo(f"Target {target_id} capture {index + 1}/{CAPTURE_COUNT}: complete")
 
 
 def main(skip_exposure_point=False, autofocus=False):
@@ -70,6 +73,7 @@ def main(skip_exposure_point=False, autofocus=False):
 
     def update_state(message):
         if message.mode != CONTROL_MODE:
+            rospy.loginfo(f"Stopping detection task: flight mode changed to {message.mode}")
             close()
         else:
             ready.set()
@@ -99,6 +103,7 @@ def main(skip_exposure_point=False, autofocus=False):
 
             if autofocus:
                 for target in targets:
+                    rospy.loginfo(f"Target {target['target_id']} autofocus starting: box={target['box']}")
                     run_autofocus(
                         target["exposure_img"],
                         target["box"],
@@ -126,6 +131,9 @@ def main(skip_exposure_point=False, autofocus=False):
             flight.release_control()
     except (KeyboardInterrupt, rospy.ROSInterruptException):
         pass
+    except Exception:
+        rospy.logerr("Detection task failed", exc_info=True)
+        raise
     finally:
         close()
 
