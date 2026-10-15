@@ -169,14 +169,17 @@ class Handler(BaseHTTPRequestHandler):
             img = decode_img(self.rfile.read(length))
             save_img = img
             if self.path == "/detect":
-                if self.server.clahe is not None:
-                    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-                    lab[:, :, 0] = self.server.clahe.apply(lab[:, :, 0])
-                    save_img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
                 depth_flag = self.headers.get("X-Calculate-Depth", "true").lower()
                 if depth_flag not in ("true", "false"):
                     raise ValueError("X-Calculate-Depth must be true or false")
                 calculate_depth = depth_flag == "true"
+                if (
+                    self.server.clahe is not None
+                    and calculate_depth
+                ):
+                    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                    lab[:, :, 0] = self.server.clahe.apply(lab[:, :, 0])
+                    save_img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
                 if self.headers.get("X-Target-ID") is not None:
                     target_id = int(self.headers["X-Target-ID"])
                 pose = json.loads(self.headers["X-Pose"]) if calculate_depth else None
