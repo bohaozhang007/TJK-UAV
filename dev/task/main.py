@@ -34,6 +34,7 @@ def capture_images(target_id):
             img,
             calculate_depth=False,
             target_id=target_id,
+            frame_id=index + 1,
         )
         rospy.loginfo(f"Target {target_id} capture {index + 1}/{CAPTURE_COUNT}: complete")
 
@@ -111,6 +112,7 @@ def main(skip_exposure_point=False, autofocus=False):
                             capture_images,
                             target["target_id"],
                         ),
+                        target_id=target["target_id"],
                     )
             else:
                 # Plan observation poses and visit each one.

@@ -50,6 +50,7 @@ def run(
     exposure_img,
     box,
     capture=None,
+    target_id=None,
 ):
     # Recheck before any camera movement in case the tracker exited after startup.
     rospy.loginfo("Autofocus: checking tracker readiness")
@@ -58,7 +59,11 @@ def run(
     try:
         # Initialize with the exact frame and box used to detect this target.
         rospy.loginfo(f"Autofocus: initializing tracker with box={box}")
-        result = track_img(exposure_img, box)
+        result = track_img(
+            exposure_img,
+            box,
+            target_id=target_id,
+        )
         if result["box"] is None:
             return skip_autofocus("SAM2 could not initialize the target")
         rospy.loginfo(f"Autofocus: setting baseline zoom to {BASELINE_ZOOM:g}x")
@@ -73,7 +78,7 @@ def run(
             rospy.loginfo(f"Autofocus step {step}/{MAX_STEPS}: reading image")
             img, _ = get_img()
             rospy.loginfo(f"Autofocus step {step}/{MAX_STEPS}: tracking")
-            result = track_img(img)
+            result = track_img(img, target_id=target_id)
             if result["box"] is None:
                 return skip_autofocus(f"SAM2 lost the target at step {step}/{MAX_STEPS}")
             try:

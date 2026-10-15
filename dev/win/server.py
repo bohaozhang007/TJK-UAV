@@ -161,6 +161,7 @@ class Handler(BaseHTTPRequestHandler):
         save_img = None
         annotations = []
         target_id = None
+        frame_id = None
         try:
             self.connection.settimeout(30)
             length = int(self.headers.get("Content-Length", "0"))
@@ -168,6 +169,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Request size must be between 1 byte and 64 MiB")
             img = decode_img(self.rfile.read(length))
             save_img = img
+            if self.headers.get("X-Target-ID") is not None:
+                target_id = int(self.headers["X-Target-ID"])
+            if self.headers.get("X-Frame-ID") is not None:
+                frame_id = int(self.headers["X-Frame-ID"])
             if self.path == "/detect":
                 depth_flag = self.headers.get("X-Calculate-Depth", "true").lower()
                 if depth_flag not in ("true", "false"):
@@ -180,8 +185,6 @@ class Handler(BaseHTTPRequestHandler):
                     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
                     lab[:, :, 0] = self.server.clahe.apply(lab[:, :, 0])
                     save_img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-                if self.headers.get("X-Target-ID") is not None:
-                    target_id = int(self.headers["X-Target-ID"])
                 pose = json.loads(self.headers["X-Pose"]) if calculate_depth else None
                 result = self.server.detector.request((save_img,))
                 annotations = [item.copy() for item in result]
@@ -229,6 +232,7 @@ class Handler(BaseHTTPRequestHandler):
                     save_img,
                     annotations,
                     target_id=target_id,
+                    frame_id=frame_id,
                 )
 
 

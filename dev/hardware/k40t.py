@@ -135,6 +135,7 @@ def detect_img(
     pose=None,
     calculate_depth=True,
     target_id=None,
+    frame_id=None,
 ):
     """Detect a JPEG image, optionally localizing targets with its paired pose."""
     headers = {"Content-Type": "image/jpeg"}
@@ -144,6 +145,8 @@ def detect_img(
         headers["X-Calculate-Depth"] = "false"
     if target_id is not None:
         headers["X-Target-ID"] = str(target_id)
+    if frame_id is not None:
+        headers["X-Frame-ID"] = str(frame_id)
     request = urllib.request.Request(
         f"http://{WINDOWS_IP}:{DETECTOR_PORT}/detect",
         encode_img(img),
@@ -166,9 +169,15 @@ def check_tracker():
         raise RuntimeError("Tracker is unavailable; start the Windows server with --autofocus and wait for Ready")
 
 
-def track_img(img, box=None):
+def track_img(
+    img,
+    box=None,
+    target_id=None,
+):
     """Initialize with a current-image box, or track the next BGR frame."""
     headers = {"Content-Type": "image/jpeg"}
+    if target_id is not None:
+        headers["X-Target-ID"] = str(target_id)
     path = "/track"
     if box is not None:
         headers["X-Box"] = json.dumps(box, allow_nan=False)

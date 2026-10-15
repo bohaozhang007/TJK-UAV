@@ -35,9 +35,15 @@ class ImageWriter:
         img,
         detections,
         target_id=None,
+        frame_id=None,
     ):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"img_{timestamp}.jpg" if target_id is None else f"target_{target_id}_{timestamp}.jpg"
+        if (
+            target_id is not None
+            and frame_id is not None
+        ):
+            filename = f"target_{target_id}_f_{frame_id}_{timestamp}.jpg"
         self.queue.put((original_img, img, detections, filename))
 
     def run(self):
