@@ -186,6 +186,14 @@ class Handler(BaseHTTPRequestHandler):
                     ))
                     result = [{**item, **location, "world_frame": pose["frame_id"]}
                               for item, location in zip(result, locations)]
+                    for annotation, item in zip(annotations, result):
+                        if item["position_world_m"] is not None:
+                            distance = np.linalg.norm(
+                                np.asarray(item["position_world_m"])
+                                - np.asarray(pose["position_m"])
+                            )
+                            if np.isfinite(distance):
+                                annotation["distance_m"] = float(distance)
             else:
                 box = json.loads(self.headers["X-Box"]) if self.path == "/track/init" else None
                 if (
