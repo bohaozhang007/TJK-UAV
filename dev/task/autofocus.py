@@ -27,6 +27,13 @@ ZOOM_STEP_DOWN = 0.5
 MAX_ZOOM = 160.0
 
 
+def skip_autofocus(reason):
+    message = f"Autofocus skipped: {reason}"
+    rospy.logwarn(message)
+    print(f"WARNING: {message}", flush=True)
+    return False
+
+
 def center_error(box, shape):
     box = np.asarray(box, dtype=float)
     height, width = shape[:2]
@@ -53,7 +60,7 @@ def run(
         rospy.loginfo(f"Autofocus: initializing tracker with box={box}")
         result = track_img(exposure_img, box)
         if result["box"] is None:
-            raise RuntimeError("SAM2 could not initialize the autofocus target")
+            return skip_autofocus("SAM2 could not initialize the target")
         rospy.loginfo(f"Autofocus: setting baseline zoom to {BASELINE_ZOOM:g}x")
         set_zoom(BASELINE_ZOOM)
         rospy.loginfo("Autofocus: setting gimbal to zero")
@@ -68,8 +75,11 @@ def run(
             rospy.loginfo(f"Autofocus step {step}/{MAX_STEPS}: tracking")
             result = track_img(img)
             if result["box"] is None:
-                raise RuntimeError("SAM2 lost the autofocus target")
-            error = center_error(result["box"], img.shape)
+                return skip_autofocus(f"SAM2 lost the target at step {step}/{MAX_STEPS}")
+            try:
+                error = center_error(result["box"], img.shape)
+            except (RuntimeError, ValueError) as exc:
+                return skip_autofocus(f"Invalid target box at step {step}/{MAX_STEPS}: {exc}")
             centered = np.max(np.abs(error)) <= CENTER_TOLERANCE
             x1, y1, x2, y2 = result["box"]
             ratio = max((x2 - x1) / img.shape[1], (y2 - y1) / img.shape[0])
@@ -124,7 +134,7 @@ def run(
                 yaw_deg += delta
             rospy.loginfo(f"Autofocus: setting gimbal pitch={pitch_deg:.2f}, yaw={yaw_deg:.2f}")
             set_gimbal(pitch_deg, yaw_deg)
-        raise RuntimeError("Autofocus reached its step limit")
+        return skip_autofocus(f"Reached the step limit ({MAX_STEPS}) without satisfying framing conditions")
     except Exception:
         rospy.logerr("Autofocus failed before camera restoration", exc_info=True)
         raise
