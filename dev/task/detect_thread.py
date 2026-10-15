@@ -14,8 +14,8 @@ from interface.next_waypoint import NextWaypoint
 
 
 # Sampling and buffering.
-SAMPLE_INTERVAL_S = 0.1
-QUEUE_SIZE = 10
+SAMPLE_INTERVAL_S = 0.05
+QUEUE_SIZE = 20
 
 # Sample freshness.
 IMG_MAX_AGE_S = 0.5
