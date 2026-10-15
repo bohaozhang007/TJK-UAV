@@ -314,6 +314,11 @@ def main():
             clipLimit=CLAHE_CLIP_LIMIT,
             tileGridSize=CLAHE_TILE_GRID_SIZE,
         ) if args.clahe else None
+        if args.clahe:
+            print(
+                f"CLAHE enabled: clipLimit={CLAHE_CLIP_LIMIT}, tileGridSize={CLAHE_TILE_GRID_SIZE}",
+                flush=True,
+            )
         server.detector = stack.enter_context(closing(ModelProcess(args.det, detector_args)))
         server.depth = stack.enter_context(closing(ModelProcess(args.depth)))
         server.tracker = None
