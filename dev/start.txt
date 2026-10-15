@@ -8,6 +8,7 @@ roslaunch /home/jkhk/jkhk_robot/release/mission/share/uav_nav/launch/mission.lau
 
 cd ~/TJK-UAV/dev
 python3 task/main.py --skip-exposure-point
+# python3 task/main.py --autofocus
 
 # test
 python3 interface/check_goal_reached.py

@@ -39,7 +39,11 @@ def center_error(box, shape):
     return (box[:2] + box[2:]) / (2 * np.array([width, height])) - 0.5
 
 
-def run(exposure_img, box):
+def run(
+    exposure_img,
+    box,
+    capture=None,
+):
     # Recheck before any camera movement in case the tracker exited after startup.
     check_tracker()
 
@@ -71,6 +75,8 @@ def run(exposure_img, box):
             stable = stable + 1 if framed else 0
             if stable >= STABLE_FRAMES:
                 rospy.loginfo("Autofocus complete: target centered and sized")
+                if capture is not None:
+                    capture()
                 return True
             if framed:
                 continue

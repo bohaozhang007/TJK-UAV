@@ -2,6 +2,7 @@ import argparse
 import sys
 import os
 import threading
+from functools import partial
 from pathlib import Path
 
 import rospy
@@ -15,6 +16,7 @@ from hardware.k40t import close_camera, get_img, detect_img, disable_osd
 from hardware.pose import close_pose
 from task.approach_target import prepare as prepare_observation_points
 from task.detect_thread import DetectThread
+from task.autofocus import run as run_autofocus
 
 
 POLL_INTERVAL_S = 0.1
@@ -33,7 +35,7 @@ def capture_images(target_id):
         )
 
 
-def main(skip_exposure_point=False):
+def main(skip_exposure_point=False, autofocus=False):
     rospy.init_node("buaa_vln", disable_signals=True)
     disable_osd()
     # ROS shutdown terminates this UAV process and all its threads immediately.
@@ -88,23 +90,37 @@ def main(skip_exposure_point=False):
                 next_target_id += 1
                 rospy.loginfo(f"Target {target['target_id']} detected: position={target['position_world_m']}")
 
-            # Stage 2: Optionally return to the pose recorded with the detection image.
-            if not skip_exposure_point:
+            # Autofocus always starts at the pose paired with the detection image.
+            if (
+                autofocus
+                or not skip_exposure_point
+            ):
                 flight.go_to_pose(exposure_pose)
 
-            # Stage 3: Plan observation poses and visit each one.
-            plans = prepare_observation_points(
-                exposure_pose,
-                next_waypoint,
-                targets,
-            )
-            for plan in plans:
-                flight.go_to_pose(plan["pose"])
-                target_id = plan["target"]["target_id"]
-                capture_images(target_id)
+            if autofocus:
+                for target in targets:
+                    run_autofocus(
+                        target["exposure_img"],
+                        target["box"],
+                        capture=partial(
+                            capture_images,
+                            target["target_id"],
+                        ),
+                    )
+            else:
+                # Plan observation poses and visit each one.
+                plans = prepare_observation_points(
+                    exposure_pose,
+                    next_waypoint,
+                    targets,
+                )
+                for plan in plans:
+                    flight.go_to_pose(plan["pose"])
+                    target_id = plan["target"]["target_id"]
+                    capture_images(target_id)
 
-            # Stage 4: Return to the recorded pose after all visits.
-            flight.go_to_pose(exposure_pose)
+                # Return to the recorded pose after all visits.
+                flight.go_to_pose(exposure_pose)
 
             # Stage 5: Release mission control, then restart detection.
             flight.release_control()
@@ -117,10 +133,18 @@ def main(skip_exposure_point=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--autofocus",
+        action="store_true",
+        help="Return to the exposure pose and use the existing burst capture after autofocus",
+    )
+    parser.add_argument(
         "--skip-exposure-point",
         action="store_true",
         help="Skip the initial return to the exposure pose; always return after all visits",
     )
     args = parser.parse_args(rospy.myargv()[1:])
     with save_terminal_output():
-        main(args.skip_exposure_point)
+        main(
+            skip_exposure_point=args.skip_exposure_point,
+            autofocus=args.autofocus,
+        )
