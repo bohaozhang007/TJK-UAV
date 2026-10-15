@@ -29,7 +29,7 @@ SEND_ATTEMPTS = 2
 SEND_RETRY_S = 0.1
 
 # Target selection radius from the paired image pose, including height difference.
-MAX_TARGET_DISTANCE_M = 5.0
+MAX_TARGET_DISTANCE_M = 15.0
 
 
 class DetectThread:
