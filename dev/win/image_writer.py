@@ -50,6 +50,10 @@ class ImageWriter:
                     if mask is not None:
                         img[mask] = img[mask] * 0.6 + (0, 100, 0)
                     confidence = detection.get("confidence")
+                    label = "target" if confidence is None else f"{confidence:.3f}"
+                    distance = detection.get("distance_m")
+                    if distance is not None:
+                        label += f"-{distance:.2f}m"
                     x1, y1, x2, y2 = [round(value) for value in box]
                     cv2.rectangle(
                         img,
@@ -60,7 +64,7 @@ class ImageWriter:
                     )
                     cv2.putText(
                         img,
-                        "target" if confidence is None else f"{confidence:.3f}",
+                        label,
                         (x1, max(20, y1 - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
