@@ -20,7 +20,7 @@ from task.detect_thread import DetectThread
 POLL_INTERVAL_S = 0.1
 STATE_TOPIC = "/mavros/state"
 CONTROL_MODE = "OFFBOARD"
-CAPTURE_COUNT = 5
+CAPTURE_COUNT = 2
 
 
 def capture_images(target_id):
