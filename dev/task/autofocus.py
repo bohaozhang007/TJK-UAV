@@ -12,7 +12,7 @@ SIZE_TOLERANCE = 0.12
 STABLE_FRAMES = 1
 
 # Iteration limit
-MAX_STEPS = 10
+MAX_STEPS = 20
 
 # Gimbal control
 REFERENCE_WIDTH_PX = 640
@@ -23,6 +23,7 @@ MAX_ROTATE_DEG = 20.0
 # Zoom control
 BASELINE_ZOOM = 1.0
 MAX_ZOOM = 16.0
+ZOOM_STEP = 2
 
 
 def skip_autofocus(reason):
@@ -111,10 +112,8 @@ def run(
             if framed:
                 continue
             if centered:
-                desired = zoom * TARGET_RATIO / ratio
-                zoom_step = 0.5 if zoom < 5 else 0.3 if zoom < 10 else 0.1
-                desired = np.clip(desired, zoom - zoom_step, zoom + zoom_step)
-                desired = round(float(np.clip(desired, BASELINE_ZOOM, MAX_ZOOM)), 1)
+                desired = zoom + ZOOM_STEP if ratio < TARGET_RATIO else zoom - ZOOM_STEP
+                desired = int(np.clip(desired, BASELINE_ZOOM, MAX_ZOOM))
                 if abs(desired - zoom) < 0.05:
                     rospy.loginfo(f"Skipping zoom adjustment: current={zoom:.1f}x, desired={desired:.1f}x")
                     continue
