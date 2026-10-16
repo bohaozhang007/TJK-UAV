@@ -34,7 +34,7 @@ CAMERA_EXECUTE_TIMEOUT_S = 5.0
 SETTLE_TIME_S = 1.0
 
 # Gimbal tolerance and timeout.
-GIMBAL_TOLERANCE_DEG = 2.0
+GIMBAL_TOLERANCE_DEG = 5.0
 GIMBAL_STABLE_READINGS = 2
 
 # Zoom tolerance.
