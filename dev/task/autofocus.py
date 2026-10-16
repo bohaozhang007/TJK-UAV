@@ -7,8 +7,8 @@ from hardware.k40t import get_zoom, set_zoom, check_tracker
 
 # Framing completion
 TARGET_RATIO = 0.3
-CENTER_TOLERANCE = 0.15
-SIZE_TOLERANCE = 0.15
+CENTER_TOLERANCE = 0.12
+SIZE_TOLERANCE = 0.12
 STABLE_FRAMES = 1
 
 # Iteration limit
