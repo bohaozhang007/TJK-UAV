@@ -23,6 +23,7 @@ POLL_INTERVAL_S = 0.1
 STATE_TOPIC = "/mavros/state"
 CONTROL_MODE = "OFFBOARD"
 CAPTURE_COUNT = 3
+RELEASE_COOLDOWN_S = 1.0
 
 
 def capture_images(target_id):
@@ -131,6 +132,7 @@ def main(skip_exposure_point=False, autofocus=False):
 
             # Stage 5: Release mission control, then restart detection.
             flight.release_control()
+            rospy.sleep(RELEASE_COOLDOWN_S)
     except (KeyboardInterrupt, rospy.ROSInterruptException):
         pass
     except Exception:
