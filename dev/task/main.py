@@ -47,7 +47,6 @@ def main(skip_exposure_point=False, autofocus=False):
     rospy.on_shutdown(lambda: os._exit(0))
     flight = FlightControl()
     detect_thread = DetectThread()
-    next_target_id = 1
     state = None
     ready = threading.Event()
     close_lock = threading.Lock()
@@ -92,8 +91,6 @@ def main(skip_exposure_point=False, autofocus=False):
                 break
             exposure_pose, next_waypoint, targets = result
             for target in targets:
-                target["target_id"] = next_target_id
-                next_target_id += 1
                 rospy.loginfo(f"Target {target['target_id']} detected: position={target['position_world_m']}")
 
             # Autofocus always starts at the pose paired with the detection image.
@@ -105,6 +102,7 @@ def main(skip_exposure_point=False, autofocus=False):
 
             if autofocus:
                 for target in targets:
+                    detect_thread.start_attempt(target)
                     rospy.loginfo(f"Target {target['target_id']} autofocus starting: box={target['box']}")
                     captured = run_autofocus(
                         target["exposure_img"],
@@ -125,6 +123,7 @@ def main(skip_exposure_point=False, autofocus=False):
                     targets,
                 )
                 for plan in plans:
+                    detect_thread.start_attempt(plan["target"])
                     flight.go_to_pose(plan["pose"])
                     target_id = plan["target"]["target_id"]
                     capture_images(target_id)

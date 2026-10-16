@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 import numpy as np
 import rospy
 
-from util.dedup import select_new_targets
+from util.dedup import MAX_CAPTURE_ATTEMPTS, select_new_targets
 from hardware.k40t import get_img, detect_img
 from hardware.pose import get_pose
 from interface.next_waypoint import NextWaypoint
@@ -37,7 +37,7 @@ class DetectThread:
         self.frames = queue.Queue(maxsize=QUEUE_SIZE)
         self.stop = threading.Event()
         self.worker = None
-        self.seen_positions = {}
+        self.target_records = {}
         self.waypoint = NextWaypoint()
 
     def start(self):
@@ -62,9 +62,13 @@ class DetectThread:
         finally:
             self.waypoint.close()
 
+    def start_attempt(self, target):
+        record = target["_record"]
+        record["attempts"] += 1
+        rospy.loginfo(f"Target {record['target_id']} attempt {record['attempts']}/{MAX_CAPTURE_ATTEMPTS}")
+
     def mark_observed(self, target):
-        position = np.asarray(target["position_world_m"], dtype=float)
-        self.seen_positions.setdefault(target["world_frame"], []).append(position.copy())
+        target["_record"]["observed"] = True
 
     def find_targets(self):
         self.start()
@@ -98,7 +102,7 @@ class DetectThread:
                     ) <= MAX_TARGET_DISTANCE_M
                 )
             ]
-            targets = select_new_targets(detections, self.seen_positions)
+            targets = select_new_targets(detections, self.target_records)
             if targets:
                 # Keep the detection frame paired with its boxes for tracker initialization.
                 for target in targets:
