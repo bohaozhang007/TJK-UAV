@@ -226,8 +226,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             # Queue after replying; the worker owns drawing, encoding and disk I/O.
             if img is not None:
-                writer = self.server.detector_writer if self.path == "/detect" else self.server.tracker_writer
-                writer.submit(
+                self.server.image_writer.submit(
                     img,
                     save_img,
                     annotations,
@@ -333,9 +332,7 @@ def main():
         if args.autofocus:
             server.tracker = stack.enter_context(closing(ModelProcess("sam2")))
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        server.detector_writer = stack.enter_context(closing(ImageWriter("detector", timestamp)))
-        if args.autofocus:
-            server.tracker_writer = stack.enter_context(closing(ImageWriter("tracker", timestamp)))
+        server.image_writer = stack.enter_context(closing(ImageWriter("all", timestamp)))
         print(f"Ready: http://{SERVER_HOST}:{SERVER_PORT}", flush=True)
         try:
             server.serve_forever()
