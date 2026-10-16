@@ -22,9 +22,7 @@ MAX_ROTATE_DEG = 20.0
 
 # Zoom control
 BASELINE_ZOOM = 1.0
-ZOOM_STEP_UP = 1.5
-ZOOM_STEP_DOWN = 0.8
-MAX_ZOOM = 160.0
+MAX_ZOOM = 16.0
 
 
 def skip_autofocus(reason):
@@ -88,7 +86,12 @@ def run(
             centered = np.max(np.abs(error)) <= CENTER_TOLERANCE
             x1, y1, x2, y2 = result["box"]
             ratio = max((x2 - x1) / img.shape[1], (y2 - y1) / img.shape[0])
-            sized = abs(ratio - TARGET_RATIO) <= SIZE_TOLERANCE
+            rospy.loginfo("Autofocus: reading zoom")
+            zoom = get_zoom()
+            sized = (
+                abs(ratio - TARGET_RATIO) <= SIZE_TOLERANCE
+                or zoom >= MAX_ZOOM
+            )
             rospy.loginfo(
                 f"Autofocus step {step}/{MAX_STEPS}: box={result['box']}, "
                 f"error={error.tolist()}, ratio={ratio:.3f}, centered={centered}, sized={sized}"
@@ -107,15 +110,11 @@ def run(
                 return True
             if framed:
                 continue
-            rospy.loginfo("Autofocus: reading zoom")
-            zoom = get_zoom()
             if centered:
-                desired = float(np.clip(
-                    zoom * TARGET_RATIO / ratio,
-                    zoom * ZOOM_STEP_DOWN,
-                    zoom * ZOOM_STEP_UP,
-                ))
-                desired = round(min(MAX_ZOOM, max(BASELINE_ZOOM, desired)), 1)
+                desired = zoom * TARGET_RATIO / ratio
+                zoom_step = 0.5 if zoom < 5 else 0.3 if zoom < 10 else 0.1
+                desired = np.clip(desired, zoom - zoom_step, zoom + zoom_step)
+                desired = round(float(np.clip(desired, BASELINE_ZOOM, MAX_ZOOM)), 1)
                 if abs(desired - zoom) < 0.05:
                     rospy.loginfo(f"Skipping zoom adjustment: current={zoom:.1f}x, desired={desired:.1f}x")
                     continue
