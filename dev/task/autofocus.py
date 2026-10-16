@@ -12,7 +12,7 @@ SIZE_TOLERANCE = 0.12
 STABLE_FRAMES = 1
 
 # Iteration limit
-MAX_STEPS = 50
+MAX_STEPS = 10
 
 # Gimbal control
 REFERENCE_WIDTH_PX = 640
