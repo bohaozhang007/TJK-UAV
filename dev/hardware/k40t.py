@@ -10,6 +10,8 @@ import urllib.request
 import warnings
 
 import cv2
+import rospy
+from std_msgs.msg import Float64MultiArray, Int16MultiArray, UInt8
 
 
 # Video stream and frame read timeouts.
@@ -41,6 +43,17 @@ GIMBAL_STABLE_READINGS = 2
 # Zoom tolerance.
 ZOOM_TOLERANCE_TENTHS = 1
 
+# ROS control uses integer zoom and a fixed settling delay.
+USE_ROS_CONTROL = True
+GIMBAL_CONTROL_TOPIC = "/load_ctrl"
+GIMBAL_ANGLE_TOPIC = "/current_load_angle"
+ZOOM_CONTROL_TOPIC = "/gimbal_zoom"
+ROS_SETTLE_TIME_S = 5.0
+ROS_CONNECT_TIMEOUT_S = 5.0
+ROS_ANGLE_TIMEOUT_S = 1.0
+ROS_MAX_ZOOM = 16
+ROS_RECORD_DEFAULT = 0
+
 
 _worker = None
 _frame = None
@@ -48,6 +61,78 @@ _error = None
 _lock = threading.Lock()
 _ready = threading.Event()
 _stop = threading.Event()
+_ros_lock = threading.Lock()
+_ros_handles = []
+_ros_angles = None
+_ros_zoom = None
+_ros_record = ROS_RECORD_DEFAULT
+_ros_angle_ready = threading.Event()
+
+
+def _update_gimbal_angles(message):
+    global _ros_angles
+    if len(message.data) != 3:
+        return
+    roll, pitch, yaw = message.data
+    if not all(math.isfinite(value) for value in message.data):
+        return
+    _ros_angles = {"roll_deg": roll, "pitch_deg": pitch, "yaw_deg": yaw}
+    _ros_angle_ready.set()
+
+
+def _update_record_command(message):
+    global _ros_record
+    if len(message.data) >= 5:
+        _ros_record = int(message.data[4] != 0)
+
+
+def _init_ros_control():
+    with _ros_lock:
+        if not _ros_handles:
+            if not rospy.core.is_initialized():
+                raise RuntimeError("Initialize the ROS node before controlling K40T")
+            _ros_handles.extend([
+                rospy.Publisher(
+                    GIMBAL_CONTROL_TOPIC,
+                    Int16MultiArray,
+                    queue_size=1,
+                ),
+                rospy.Publisher(
+                    ZOOM_CONTROL_TOPIC,
+                    UInt8,
+                    queue_size=1,
+                ),
+                rospy.Subscriber(
+                    GIMBAL_ANGLE_TOPIC,
+                    Float64MultiArray,
+                    _update_gimbal_angles,
+                    queue_size=1,
+                ),
+                rospy.Subscriber(
+                    GIMBAL_CONTROL_TOPIC,
+                    Int16MultiArray,
+                    _update_record_command,
+                    queue_size=1,
+                ),
+            ])
+
+
+def _publish_ros(
+    publisher,
+    message,
+    topic,
+):
+    deadline = time.monotonic() + ROS_CONNECT_TIMEOUT_S
+    # The load-control subscriber in this module also sees our own commands.
+    own_connections = 1 if topic == GIMBAL_CONTROL_TOPIC else 0
+    while publisher.get_num_connections() <= own_connections:
+        if rospy.is_shutdown():
+            raise rospy.ROSInterruptException("ROS is shutting down")
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"No K40T control subscriber on {topic}")
+        rospy.sleep(0.05)
+    publisher.publish(message)
+    rospy.sleep(ROS_SETTLE_TIME_S)
 
 
 def _read_stream():
@@ -107,7 +192,14 @@ def get_img():
 
 def close_camera():
     """Stop the reader and release the shared RTSP connection."""
-    global _worker, _frame
+    global _worker, _frame, _ros_angles, _ros_zoom, _ros_record
+    with _ros_lock:
+        for handle in _ros_handles:
+            handle.unregister()
+        _ros_handles.clear()
+        _ros_angles = _ros_zoom = None
+        _ros_record = ROS_RECORD_DEFAULT
+        _ros_angle_ready.clear()
     with _lock:
         if _worker is not None:
             _stop.set()
@@ -349,6 +441,12 @@ def disable_osd():
 
 
 def get_gimbal():
+    if USE_ROS_CONTROL:
+        _init_ros_control()
+        _ros_angle_ready.clear()
+        if not _ros_angle_ready.wait(timeout=ROS_ANGLE_TIMEOUT_S):
+            raise TimeoutError(f"K40T gimbal feedback timeout on {GIMBAL_ANGLE_TOPIC}")
+        return _ros_angles.copy()
     return camera_request(
         0x000200,
         b"\x01\x00",
@@ -377,6 +475,15 @@ def set_gimbal(
             stacklevel=2,
         )
         yaw_deg = max(-120, min(yaw_deg, 120))
+    if USE_ROS_CONTROL:
+        _init_ros_control()
+        pitch_deg, yaw_deg = round(pitch_deg), round(yaw_deg)
+        _publish_ros(
+            _ros_handles[0],
+            Int16MultiArray(data=[0, 999, pitch_deg, yaw_deg, _ros_record]),
+            GIMBAL_CONTROL_TOPIC,
+        )
+        return {"pitch_deg": pitch_deg, "yaw_deg": yaw_deg}
     payload = struct.pack(
         "<BHBHB",
         0 if pitch_deg >= 0 else 1,
@@ -395,6 +502,11 @@ def set_gimbal(
 
 
 def get_zoom():
+    """Return the last commanded zoom in ROS mode, measured zoom in UDP mode."""
+    if USE_ROS_CONTROL:
+        if _ros_zoom is None:
+            raise RuntimeError("ROS zoom is unknown; call set_zoom first")
+        return _ros_zoom
     return camera_request(
         0x000200,
         b"\x01\x00",
@@ -403,15 +515,27 @@ def get_zoom():
 
 
 def set_zoom(ratio):
-    """Set absolute zoom; wait for measured magnification and motor completion."""
+    """Set zoom; ROS waits a fixed delay, UDP waits for completion feedback."""
+    global _ros_zoom
     if not math.isfinite(ratio):
         raise ValueError("Zoom ratio must be finite")
-    if not 1 <= ratio <= 160:
+    max_zoom = ROS_MAX_ZOOM if USE_ROS_CONTROL else 160
+    if not 1 <= ratio <= max_zoom:
         warnings.warn(
-            f"K40T zoom target {ratio:g}x is outside [1x, 160x]; clamping",
+            f"K40T zoom target {ratio:g}x is outside [1x, {max_zoom}x]; clamping",
             stacklevel=2,
         )
-        ratio = max(1, min(ratio, 160))
+        ratio = max(1, min(ratio, max_zoom))
+    if USE_ROS_CONTROL:
+        _init_ros_control()
+        ratio = round(ratio)
+        _publish_ros(
+            _ros_handles[1],
+            UInt8(data=ratio),
+            ZOOM_CONTROL_TOPIC,
+        )
+        _ros_zoom = ratio
+        return ratio
     tenths = round(ratio * 10)
     result = camera_request(
         0x000304,

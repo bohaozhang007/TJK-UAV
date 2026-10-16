@@ -62,6 +62,10 @@ class DetectThread:
         finally:
             self.waypoint.close()
 
+    def mark_observed(self, target):
+        position = np.asarray(target["position_world_m"], dtype=float)
+        self.seen_positions.setdefault(target["world_frame"], []).append(position.copy())
+
     def find_targets(self):
         self.start()
         while not rospy.is_shutdown():

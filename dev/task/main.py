@@ -106,7 +106,7 @@ def main(skip_exposure_point=False, autofocus=False):
             if autofocus:
                 for target in targets:
                     rospy.loginfo(f"Target {target['target_id']} autofocus starting: box={target['box']}")
-                    run_autofocus(
+                    captured = run_autofocus(
                         target["exposure_img"],
                         target["box"],
                         capture=partial(
@@ -115,6 +115,8 @@ def main(skip_exposure_point=False, autofocus=False):
                         ),
                         target_id=target["target_id"],
                     )
+                    if captured:
+                        detect_thread.mark_observed(target)
             else:
                 # Plan observation poses and visit each one.
                 plans = prepare_observation_points(
@@ -126,6 +128,7 @@ def main(skip_exposure_point=False, autofocus=False):
                     flight.go_to_pose(plan["pose"])
                     target_id = plan["target"]["target_id"]
                     capture_images(target_id)
+                    detect_thread.mark_observed(plan["target"])
 
                 # Return to the recorded pose after all visits.
                 flight.go_to_pose(exposure_pose)

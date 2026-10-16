@@ -5,8 +5,9 @@ DEDUP_DISTANCE_M = 1.8
 
 
 def select_new_targets(detections, seen_positions):
-    """Keep new localized targets using v22's per-axis distance rule."""
+    """Filter observed targets and batch duplicates without recording observations."""
     selected = []
+    batch_positions = {frame: list(positions) for frame, positions in seen_positions.items()}
     for detection in detections:
         if detection["position_world_m"] is None:
             continue
@@ -16,7 +17,7 @@ def select_new_targets(detections, seen_positions):
             or not np.isfinite(position).all()
         ):
             continue
-        positions = seen_positions.setdefault(detection["world_frame"], [])
+        positions = batch_positions.setdefault(detection["world_frame"], [])
         if any(np.all(np.abs(position - old) < DEDUP_DISTANCE_M) for old in positions):
             continue
         positions.append(position.copy())
