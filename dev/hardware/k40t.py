@@ -31,6 +31,7 @@ JPEG_QUALITY = 95
 CAMERA_ADDRESS = ("192.168.144.64", 1030)
 CAMERA_RECV_TIMEOUT_S = 0.2
 CAMERA_EXECUTE_TIMEOUT_S = 5.0
+SETTLE_TIME_S = 0.1
 
 # Gimbal tolerance and timeout.
 GIMBAL_TOLERANCE_DEG = 1.0
@@ -355,11 +356,13 @@ def set_gimbal(
         round(abs(yaw_deg) * 100),
         0,
     )
-    return camera_request(
+    result = camera_request(
         0x12,
         payload,
         {"pitch_deg": pitch_deg, "yaw_deg": yaw_deg},
     )
+    time.sleep(SETTLE_TIME_S)
+    return result
 
 
 def get_zoom():
@@ -381,7 +384,7 @@ def set_zoom(ratio):
         )
         ratio = max(1, min(ratio, 160))
     tenths = round(ratio * 10)
-    return camera_request(
+    result = camera_request(
         0x000304,
         struct.pack(
             "<BH",
@@ -391,3 +394,5 @@ def set_zoom(ratio):
         target=tenths,
         kind="zoom",
     )
+    time.sleep(SETTLE_TIME_S)
+    return result
