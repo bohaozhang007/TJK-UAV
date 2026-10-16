@@ -22,7 +22,7 @@ from task.autofocus import run as run_autofocus
 POLL_INTERVAL_S = 0.1
 STATE_TOPIC = "/mavros/state"
 CONTROL_MODE = "OFFBOARD"
-CAPTURE_COUNT = 3
+CAPTURE_COUNT = 1
 RELEASE_COOLDOWN_S = 1.0
 
 
