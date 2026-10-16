@@ -142,7 +142,7 @@ def run(
         return skip_autofocus(f"Reached the step limit ({MAX_STEPS}) without satisfying framing conditions")
     except Exception as exc:
         if (
-            isinstance(exc, RuntimeError)
+            isinstance(exc, TimeoutError)
             and str(exc).startswith(("K40T gimbal confirmation timeout", "K40T zoom confirmation timeout"))
         ):
             return skip_autofocus(str(exc))

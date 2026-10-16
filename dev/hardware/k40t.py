@@ -31,6 +31,7 @@ JPEG_QUALITY = 95
 CAMERA_ADDRESS = ("192.168.144.64", 1030)
 CAMERA_RECV_TIMEOUT_S = 0.5
 CAMERA_EXECUTE_TIMEOUT_S = 3.0
+CAMERA_MAX_ATTEMPTS = 3
 SETTLE_TIME_S = 0.5
 
 # Gimbal tolerance and timeout.
@@ -209,6 +210,31 @@ def camera_request(
     mount=None,
     kind="gimbal",
 ):
+    for attempt in range(CAMERA_MAX_ATTEMPTS):
+        try:
+            return camera_request_once(
+                message_id,
+                payload,
+                target=target,
+                mount=mount,
+                kind=kind,
+            )
+        except TimeoutError:
+            if attempt == CAMERA_MAX_ATTEMPTS - 1:
+                raise
+            warnings.warn(
+                f"K40T {kind} confirmation timed out; retrying attempt {attempt + 2}/{CAMERA_MAX_ATTEMPTS}",
+                stacklevel=2,
+            )
+
+
+def camera_request_once(
+    message_id,
+    payload,
+    target=None,
+    mount=None,
+    kind="gimbal",
+):
     sequence = secrets.randbelow(256)
     body = bytes((len(payload), 4, 1, sequence, 1, 1))
     body += message_id.to_bytes(3, "little") + payload
@@ -221,8 +247,10 @@ def camera_request(
         acknowledged = False
         stable = 0
         while True:
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
+            sock.settimeout(min(CAMERA_RECV_TIMEOUT_S, remaining))
             try:
                 raw = sock.recv(4096)
             except socket.timeout:
@@ -307,8 +335,9 @@ def camera_request(
                 stable = stable + 1 if reached else 0
                 if stable >= GIMBAL_STABLE_READINGS:
                     return status
-        # Never resend a movement whose outcome is unknown.
-        raise RuntimeError(f"K40T {kind} confirmation timeout of {CAMERA_EXECUTE_TIMEOUT_S:g} s exceeded")
+        raise TimeoutError(
+            f"K40T {kind} confirmation timeout of {CAMERA_EXECUTE_TIMEOUT_S:g} s exceeded"
+        )
 
 
 def disable_osd():
