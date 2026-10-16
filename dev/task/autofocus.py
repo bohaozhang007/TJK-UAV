@@ -102,8 +102,15 @@ def run(
                 and sized
             )
             stable = stable + 1 if framed else 0
-            if stable >= STABLE_FRAMES:
-                rospy.loginfo("Autofocus complete: target centered and sized")
+            if (
+                stable >= STABLE_FRAMES
+                or step == MAX_STEPS
+            ):
+                rospy.loginfo(
+                    "Autofocus complete: target centered and sized"
+                    if stable >= STABLE_FRAMES
+                    else "Autofocus: step limit reached with valid tracking; capturing"
+                )
                 if capture is not None:
                     rospy.loginfo("Autofocus: starting burst capture")
                     capture()
