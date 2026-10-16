@@ -14,7 +14,7 @@ from interface.next_waypoint import NextWaypoint
 
 
 # Sampling and buffering.
-SAMPLE_INTERVAL_S = 0.1
+SAMPLE_INTERVAL_S = 0.2
 QUEUE_SIZE = 10
 
 # Sample freshness.
