@@ -332,7 +332,7 @@ def main():
         if args.autofocus:
             server.tracker = stack.enter_context(closing(ModelProcess("sam2")))
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        server.image_writer = stack.enter_context(closing(ImageWriter("all", timestamp)))
+        server.image_writer = stack.enter_context(closing(ImageWriter(timestamp=timestamp)))
         print(f"Ready: http://{SERVER_HOST}:{SERVER_PORT}", flush=True)
         try:
             server.serve_forever()

@@ -1,4 +1,3 @@
-import os
 import queue
 import threading
 from datetime import datetime, timedelta
@@ -15,15 +14,13 @@ SAVE_QUEUE_SIZE = 10
 class ImageWriter:
     def __init__(
         self,
-        kind="all",
         timestamp=None,
     ):
         if timestamp is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        self.save_dir = SAVE_DIR / timestamp / kind
+        self.save_dir = SAVE_DIR / timestamp
         self.original_dir = self.save_dir / "original"
         self.annotation_dir = self.save_dir / "annotation"
-        self.tracker_dir = self.save_dir.parent / "tracker"
         self.last_timestamp = datetime.min
         self.original_dir.mkdir(parents=True, exist_ok=True)
         self.annotation_dir.mkdir(parents=True, exist_ok=True)
@@ -51,15 +48,15 @@ class ImageWriter:
             # Generate strictly increasing names in queue order, even on coarse clocks.
             self.last_timestamp = max(datetime.now(), self.last_timestamp + timedelta(microseconds=1))
             timestamp = self.last_timestamp.strftime("%Y%m%d_%H%M%S_%f")
-            filename = f"img_{timestamp}.jpg"
-            link_name = None
+            filename = f"img_{timestamp}"
             if target_id is not None:
-                prefix = f"target_{target_id}" if frame_id is None else f"target_{target_id}_f_{frame_id}"
-                link_name = f"{prefix}_{timestamp}.jpg"
+                filename += f"_target_{target_id}"
+                if frame_id is not None:
+                    filename += f"_f_{frame_id}"
+            filename += ".jpg"
             self.save_image(
                 original_img,
                 self.original_dir / filename,
-                link_name=link_name,
             )
             try:
                 img = img.copy()
@@ -94,7 +91,6 @@ class ImageWriter:
                 self.save_image(
                     img,
                     self.annotation_dir / filename,
-                    link_name=link_name,
                 )
             except Exception as exc:
                 print(f"Image save failed: {self.annotation_dir / filename}: {exc}", flush=True)
@@ -103,7 +99,6 @@ class ImageWriter:
         self,
         img,
         path,
-        link_name=None,
     ):
         try:
             ok, encoded = cv2.imencode(
@@ -116,14 +111,6 @@ class ImageWriter:
             encoded.tofile(path)
         except Exception as exc:
             print(f"Image save failed: {path}: {exc}", flush=True)
-            return
-        if link_name is not None:
-            link = self.tracker_dir / path.parent.name / link_name
-            try:
-                link.parent.mkdir(parents=True, exist_ok=True)
-                link.symlink_to(os.path.relpath(path, link.parent))
-            except OSError as exc:
-                print(f"WARNING: Tracker symlink failed: {link}: {exc}", flush=True)
 
     def close(self):
         self.queue.put(None)
