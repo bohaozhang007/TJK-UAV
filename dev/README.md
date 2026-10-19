@@ -1,0 +1,139 @@
+# TJK-UAV VLN 开发说明 · v1
+
+## 1. 软件职能与执行流程
+
+本项目面向无人机巡检，构建由视觉目标驱动的 VLN 任务闭环：**航线飞行中实时检测 → 估计目标位置 → 目标去重 → 返回检测点或前往观测点 → 跟踪取景与拍摄 → 恢复航线巡检**。我方负责视觉感知、目标管理和观测任务编排，交控方负责航线执行、导航控制及到点反馈。
+
+### 系统框架
+
+| 层级 | 职能 |
+| --- | --- |
+| 无人机任务端：`task/`、`util/` | 编排检测、目标筛选、观测、拍摄与控制权交还 |
+| 硬件与导航适配：`hardware/`、`interface/` | 读取 K40T 图像、FAST-LIO 位姿和航点，控制云台与变焦，对接交控导航接口 |
+| Windows 推理端：`win/` | 通过 HTTP 提供目标检测、深度定位及跟踪；各模型在独立 Python 环境中运行，异步保存图像 |
+
+### VLN 任务闭环
+
+1. **航线巡检与实时检测**：交控执行既定航线；任务端持续采集图像，配对当时的机体位姿和航点，发送至 Windows 推理端。
+2. **目标位置估计**：检测模型输出目标框或掩码；深度模型估计深度及相机内参，在目标区域反投影得到三维点，剔除异常深度后取中位位置，再结合机体位姿转换至 SLAM 世界坐标系。
+3. **筛选与去重**：保留同坐标系、距采样位置不超过 10 m 的有效目标；按历史位置匹配目标 ID，各坐标轴差值小于 1.8 m 时视为同一目标。已完成拍摄或累计尝试达到 3 次的目标不再触发观测。
+4. **触发观测任务**：发现新目标后暂停巡检检测，保留检测图像、检测点位姿和航点快照，按所选模式执行回访与拍摄。
+5. **恢复巡检**：完成本批目标后，通过交控接口交还任务控制权，恢复原航线及实时检测，继续下一轮闭环。
+
+本文“检测点”指与检测图像配对保存的无人机位姿。
+
+### 两种执行模式
+
+以下命令均在 `dev/` 目录执行。先启动 Windows 推理服务并等待输出 `Ready`，再在无人机端启动交控任务及本项目任务端。
+
+**模式 A：返回检测点，自动跟踪取景拍摄**
+
+```powershell
+# Windows 端：加载检测、深度模型及 SAM2 跟踪器
+python win/server.py --det yolo --depth moge3 --autofocus
+```
+
+```bash
+# 无人机端
+python3 task/main.py --autofocus
+```
+
+发现新目标后，先返回检测点，再用原检测图像和目标框初始化 SAM2。通过连续跟踪调整云台角度、居中目标并控制变焦，完成取景后拍摄；随后恢复云台与倍率，交还控制权。此处 `autofocus` 指跟踪、居中和变焦的自动取景流程。
+
+**模式 B：直接前往目标观测点拍摄**
+
+```powershell
+# Windows 端
+python win/server.py --det yolo --depth moge3
+```
+
+```bash
+# 无人机端
+python3 task/main.py --skip-exposure-point
+```
+
+发现新目标后，依据目标估计位置和航线方向生成观测点，跳过初次返回检测点的步骤，直接前往各观测点并朝向目标拍摄。完成本批目标后，**仍返回检测点**，再交还控制权，使巡检从检测点继续，避免直接续飞跳过检测点至回返位置之间的航段，造成漏检。
+
+任务端不带参数时，会先返回检测点，再执行观测点访问；同时传入两个参数时，优先执行 `--autofocus` 流程。当前每个目标每次拍摄 1 张图像，并发送至推理端检测和存档，拍摄阶段不重复计算深度。
+
+### 启动与接口约定
+
+- 无人机端依赖 ROS 1、MAVROS、FAST-LIO 和 K40T，相机及 Windows 服务地址配置在 `hardware/k40t.py` 顶部。
+- Windows 端需准备 CUDA、模型源码与权重。`win/server.py` 默认从 `~/anaconda3/envs/` 选择 `yolo11`、`sam3`、`da3`、`sam2` 环境，MoGe 使用 `MoGe/.venv`；迁移部署时需核对各模型脚本的路径配置。
+- 交控任务启动命令见 `start.txt`。任务端依赖 `OFFBOARD` 状态运行，离开该模式时退出。
+- 推理服务默认端口为 `8790`，接口为 `/health`、`/detect`、`/track/init` 和 `/track`；跟踪接口需服务端启用 `--autofocus`。
+
+| ROS 话题 | 用途 |
+| --- | --- |
+| `/laserMapping/odometry` | 获取 SLAM 位姿 |
+| `/buaa_goal` | 获取航线航点 |
+| `/initialpose` | 下发观测/回访位姿，触发交控接管该任务 |
+| `/vln_point_reached` | 接收位置及航向到达反馈，单次发布 `True` |
+| `/recover_mission` | 发布 `True`，交还控制权并恢复航线任务 |
+
+`/initialpose` 使用交控自定义协议：`orientation.w` 承载航向角，单位为度。目标位姿与定位结果须使用同一 SLAM 坐标系。
+
+## 2. 模型与官方链接
+
+| 模型 | 本项目用途 | 官方项目 |
+| --- | --- | --- |
+| Ultralytics YOLO | 使用我方自行采样的 100 张图像训练，检测巡检目标并输出目标框及置信度；以框区域采样深度 | [Ultralytics](https://github.com/ultralytics/ultralytics) |
+| SAM 3 | 可选检测方案，以参考图像及框提示匹配目标并输出分割掩码 | [SAM 3](https://github.com/facebookresearch/sam3) |
+| SAM 2.1 | 自动取景时跟踪目标，为云台居中及变焦提供目标框 | [SAM 2](https://github.com/facebookresearch/sam2) |
+| MoGe-3 | 单目几何估计，提供深度和相机内参，用于目标三维定位 | [MoGe](https://github.com/microsoft/MoGe) |
+| Depth Anything 3 | 可选深度方案，当前加载 `DA3NESTED-GIANT-LARGE`，用于目标三维定位 | [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3) |
+
+服务端通过 `--det yolo|sam3`、`--depth moge3|da3` 选择组合。使用 SAM 3 时，还需传入 `--ref-img` 和 `--ref-box`；框文件包含像素坐标 `x1 y1 x2 y2`。
+
+**当前 YOLO 为我方自行采样 100 张图像训练所得。模型 checkpoint（`best.pt`）保存在我方 Windows 推理端，由该端加载并执行推理，不部署在无人机端。** 无人机端通过 HTTP 发送图像并获取检测结果；checkpoint 路径配置见 `win/detector_yolo.py`。
+
+## 3. 文件说明
+
+| 文件 | 作用 |
+| --- | --- |
+| `task/main.py` | 任务入口；选择模式，编排检测、回访、观测拍摄和控制权交还 |
+| `task/detect_thread.py` | 并行采集图像与位姿，配对航点，调用检测并筛选新目标 |
+| `task/autofocus.py` | 调用跟踪器，调整云台和变焦，触发拍摄并恢复相机状态 |
+| `task/approach_target.py` | 根据目标位置与航线方向生成观测位姿，安排访问顺序 |
+| `hardware/k40t.py` | K40T 视频读取、云台/变焦控制，以及推理服务客户端 |
+| `hardware/pose.py` | 订阅 FAST-LIO 里程计，获取有效位姿 |
+| `interface/to_target_pose.py` | 下发目标位置与航向，提供独立调试入口 |
+| `interface/check_goal_reached.py` | 接收并等待交控到点反馈，提供独立调试入口 |
+| `interface/next_waypoint.py` | 缓存上一航点与下一航点，供观测点规划使用 |
+| `interface/release_control.py` | 发送控制权释放指令，恢复交控航线任务 |
+| `util/flight.py` | 封装导航接口连接、目标下发、到点等待与控制权释放 |
+| `util/dedup.py` | 维护目标 ID、历史位置、观测状态和尝试次数，实现空间去重 |
+| `util/terminal_log.py` | 将任务端终端输出同步保存至 `TJK-UAV/logs/<运行时间>/log.txt` |
+| `win/server.py` | HTTP 推理服务入口；管理独立模型进程、请求路由及图像存档 |
+| `win/detector_base.py` | 检测模型公共预热与进程通信逻辑 |
+| `win/detector_yolo.py` | 在我方 Windows 推理端加载 YOLO checkpoint，执行目标检测 |
+| `win/detector_sam3.py` | 基于参考图像和框提示执行 SAM 3 检测与分割 |
+| `win/tracker_sam2.py` | SAM 2.1 跟踪器，支持目标框初始化与逐帧跟踪 |
+| `win/depth_base.py` | 深度采样、异常值过滤、三维反投影及世界坐标转换 |
+| `win/depth_moge3.py` | MoGe-3 深度与相机内参估计适配 |
+| `win/depth_da3.py` | Depth Anything 3 深度与相机内参估计适配 |
+| `win/image_writer.py` | 异步保存原图及标注图至 `TJK-UAV/logs/<运行时间>/original/`、`annotation/` |
+| `start.txt` | 当前部署启动命令及导航接口调试示例 |
+| `code-style.md` | 项目代码风格约定 |
+
+## 4. 最新进度与 TODO
+
+**v1：VLN 接口调试完毕，已打通目标位姿下发、到点反馈及控制权交还链路。交控方已改进回访控制和雷达配合相机定位方案，实际效果均待真机测试。**
+
+### 我方
+
+- **检测漏检**：部分场景仍有漏检；当前 YOLO 仅基于我方自行采样的 100 张图像训练，需交控方提供更多采集数据，扩充训练集并训练更强模型。
+- **跟踪失误**：当前跟踪存在失误，需调研并验证更优 tracker，提升云台调整和变焦过程中的稳定性。
+
+### 交控方
+
+- **返回检测点不稳定**：回访过程中存在大幅摇摆，当前暂通过锁机头缓和；交控方已改进，待真机验证回访稳定性。
+- **目标快速定位与重复复检缓解**：采用斜装雷达配合相机加快目标定位，提高定位一致性，减少重复检出触发的复检；交控方已改进，待真机验证。
+
+### TODO
+
+- [ ] 交控方补充不同场景的采集数据；我方完成标注、训练与漏检评估。
+- [ ] 我方对比更优 tracker，验证跟踪丢失及变焦场景表现。
+- [ ] 联合真机测试交控回访改进，重点检查大幅摇摆与到点稳定性。
+- [ ] 联合真机测试斜装雷达与相机定位方案，评估定位速度、精度及重复复检情况。
+- [ ] 在两种执行模式下完成“检测—观测拍摄—恢复巡检”全流程真机回归。
