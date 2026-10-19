@@ -1,5 +1,7 @@
 # TJK-UAV VLN 开发说明 · v1
 
+**当前最新版本为基于 `dev/` 目录代码搭建的 v1 VLN 框架，仅使用 `dev/` 作为本项目运行代码。无人机端项目部署于 `~/TJK-UAV`，任务端运行目录为 `~/TJK-UAV/dev`。** 本文文件路径均相对于 `dev/`。
+
 ## 1. 软件职能与执行流程
 
 本项目面向无人机巡检，构建由视觉目标驱动的 VLN 任务闭环：**航线飞行中实时检测 → 估计目标位置 → 目标去重 → 返回检测点或前往观测点 → 目标观测与拍摄 → 恢复航线巡检**。我方负责视觉感知、目标管理和观测任务编排，交控方负责航线执行、导航控制及到点反馈。
@@ -24,7 +26,7 @@
 
 ### 两种执行模式
 
-以下命令均在 `dev/` 目录执行。先启动 Windows 推理服务并等待输出 `Ready`，再在无人机端启动交控任务及本项目任务端。
+Windows 端命令在项目的 `dev/` 目录执行，无人机端命令在 `~/TJK-UAV/dev` 执行。先启动 Windows 推理服务并等待输出 `Ready`，再在无人机端启动交控任务及本项目任务端。
 
 **模式 A：返回检测点，自动跟踪取景拍摄**
 
@@ -35,6 +37,7 @@ python win/server.py --det yolo --depth moge3 --autofocus
 
 ```bash
 # 无人机端
+cd ~/TJK-UAV/dev
 python3 task/main.py --autofocus
 ```
 
@@ -49,6 +52,7 @@ python win/server.py --det yolo --depth moge3
 
 ```bash
 # 无人机端
+cd ~/TJK-UAV/dev
 python3 task/main.py --skip-exposure-point
 ```
 
