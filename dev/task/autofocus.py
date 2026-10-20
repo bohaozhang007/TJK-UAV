@@ -23,7 +23,7 @@ MAX_ROTATE_DEG = 20.0
 # Zoom control
 BASELINE_ZOOM = 1.0
 MAX_ZOOM = 16.0
-ZOOM_STEP = 2
+ZOOM_STEP = 1
 
 
 def skip_autofocus(reason):
