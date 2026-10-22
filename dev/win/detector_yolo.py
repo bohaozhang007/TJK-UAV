@@ -11,7 +11,7 @@ from ultralytics import YOLO
 from detector_base import Detector, run_detector
 
 
-CHECKPOINT = Path(__file__).resolve().parents[3] / "yolo/runs/bolt_yolo26l_like_yolo11l/weights/best.pt"
+CHECKPOINT = Path(__file__).resolve().parents[3] / "yolo/runs/bolt_yolo26l_10-22/weights/best.pt"
 IMAGE_SIZE = 1920
 
 

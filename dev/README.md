@@ -86,7 +86,7 @@ python3 task/main.py --skip-exposure-point
 
 | 模型 | 本项目用途 | 官方项目 |
 | --- | --- | --- |
-| Ultralytics YOLO | 使用我方自行采样的 100 张图像训练，检测巡检目标并输出目标框及置信度；以框区域采样深度 | [Ultralytics](https://github.com/ultralytics/ultralytics) |
+| Ultralytics YOLO26l | 使用合并后的 10-22 数据集训练，检测巡检目标并输出目标框及置信度；以框区域采样深度 | [Ultralytics](https://github.com/ultralytics/ultralytics) |
 | SAM 3 | 可选检测方案，以参考图像及框提示匹配目标并输出分割掩码 | [SAM 3](https://github.com/facebookresearch/sam3) |
 | SAM 2.1 | 自动取景时跟踪目标，为云台居中及变焦提供目标框 | [SAM 2](https://github.com/facebookresearch/sam2) |
 | MoGe-3 | 单目几何估计，提供深度和相机内参，用于目标三维定位 | [MoGe](https://github.com/microsoft/MoGe) |
@@ -94,7 +94,7 @@ python3 task/main.py --skip-exposure-point
 
 服务端通过 `--det yolo|sam3`、`--depth moge3|da3` 选择组合。使用 SAM 3 时，还需传入 `--ref-img` 和 `--ref-box`；框文件包含像素坐标 `x1 y1 x2 y2`。
 
-**当前 YOLO 为我方自行采样 100 张图像训练所得。模型 checkpoint（`best.pt`）保存在我方 Windows 推理端，由该端加载并执行推理，不部署在无人机端。** 无人机端通过 HTTP 发送图像并获取检测结果；checkpoint 路径配置见 `win/detector_yolo.py`。
+**当前 YOLO26l 使用 `detection-luoshuan/datasets/10-22` 合并数据集训练，加载 `yolo/runs/bolt_yolo26l_10-22/weights/best.pt`，输入长边 1920，默认置信度阈值 0.5。模型在 Windows 推理端加载，不部署在无人机端。** 无人机端通过 HTTP 发送图像并获取检测结果；checkpoint 路径配置见 `win/detector_yolo.py`。
 
 ## 3. 文件说明
 
@@ -131,7 +131,7 @@ python3 task/main.py --skip-exposure-point
 
 ### 我方
 
-- **检测漏检**：当前 YOLO 使用我方自行采样的 100 张图像训练，部分场景仍有漏检。我方负责扩充训练集、训练更强模型并评估漏检改善情况；需交控方补充不同场景的采集数据。
+- **检测漏检**：当前已切换到合并 10-22 数据集训练的 YOLO26l，漏检改善情况仍需现场验证；需交控方补充不同场景的采集数据。
 - **跟踪失误**：当前跟踪存在失误。我方负责调研更优跟踪器，并验证云台调整和变焦过程中的跟踪稳定性。
 
 ### 交控方
