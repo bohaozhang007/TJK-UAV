@@ -4,7 +4,7 @@
 
 本项目面向无人机巡检，构建由视觉目标驱动的 VLN 任务闭环：**航线飞行中实时检测 → 估计目标位置 → 目标去重 → 返回检测点或前往观测点 → 目标观测与拍摄 → 恢复航线巡检**。我方负责视觉感知、目标管理和观测任务编排，交控方负责航线执行、导航控制及到点反馈。
 
-当前最新版 v1 VLN 框架仅使用 `dev/` 目录代码。无人机端部署于 `~/TJK-UAV`，运行目录为 `~/TJK-UAV/dev`；本文文件路径均相对于 `dev/`。
+当前最新版 v1 VLN 框架仅使用 `src/` 目录代码。无人机端部署于 `~/TJK-UAV`，运行目录为 `~/TJK-UAV/src`；本文文件路径均相对于 `src/`。
 
 ### 系统框架
 
@@ -26,7 +26,7 @@
 
 ### 两种执行模式
 
-Windows 端命令在项目的 `dev/` 目录执行，无人机端命令在 `~/TJK-UAV/dev` 执行。先启动 Windows 推理服务并等待输出 `Ready`，再在无人机端启动交控任务及本项目任务端。
+Windows 端命令在项目的 `src/` 目录执行，无人机端命令在 `~/TJK-UAV/src` 执行。先启动 Windows 推理服务并等待输出 `Ready`，再在无人机端启动交控任务及本项目任务端。
 
 **模式 A：返回检测点，自动跟踪取景拍摄**
 
@@ -37,7 +37,7 @@ python win/server.py --det yolo --depth moge3 --autofocus
 
 ```bash
 # 无人机端
-cd ~/TJK-UAV/dev
+cd ~/TJK-UAV/src
 python3 task/main.py --autofocus
 ```
 
@@ -57,7 +57,7 @@ python win/server.py --det yolo --depth moge3
 
 ```bash
 # 无人机端
-cd ~/TJK-UAV/dev
+cd ~/TJK-UAV/src
 python3 task/main.py --skip-exposure-point
 ```
 

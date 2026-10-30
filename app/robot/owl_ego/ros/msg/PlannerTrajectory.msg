@@ -1,2 +1,0 @@
-string generation
-traj_utils/PolyTraj trajectory
