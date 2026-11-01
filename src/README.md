@@ -26,13 +26,13 @@
 
 ### 两种执行模式
 
-Windows 端命令在本机 `D:\TJK\TJK-UAV\src` 目录执行，使用 `D:\TJK\envs\yolo11\python.exe` 启动服务；无人机端命令在 `~/TJK-UAV/src` 执行。先启动 Windows 推理服务并等待输出 `Ready`，再在无人机端启动交控任务及本项目任务端。
+Windows 端命令在本机 `D:\TJK\TJK-UAV\src` 目录执行；服务入口会在导入依赖前自动切换到 `D:\TJK\envs\yolo11\python.exe`，可直接使用系统的 `python` 命令。无人机端命令在 `~/TJK-UAV/src` 执行。先启动 Windows 推理服务并等待输出 `Ready`，再在无人机端启动交控任务及本项目任务端。
 
 **模式 A：返回检测点，自动跟踪取景拍摄**
 
 ```powershell
 # Windows 端：加载检测、深度模型及 SAM2 跟踪器
-& D:\TJK\envs\yolo11\python.exe win/server.py --det yolo --depth moge3 --autofocus
+python win/server.py --det yolo --depth moge3 --autofocus
 ```
 
 ```bash
@@ -52,7 +52,7 @@ python3 task/main.py --autofocus
 
 ```powershell
 # Windows 端
-& D:\TJK\envs\yolo11\python.exe win/server.py --det yolo --depth moge3
+python win/server.py --det yolo --depth moge3
 ```
 
 ```bash
@@ -90,18 +90,31 @@ python3 task/main.py --skip-exposure-point
 | --- | --- | --- | --- |
 | YOLO26l | `D:\TJK\envs\yolo11` | `2.7.1+cu118` / `0.22.1+cu118` | `D:\TJK\yolo\runs\bolt_yolo26l_10-22\weights\best.pt` |
 | SAM2.1 | `D:\TJK\envs\sam2` | `2.7.1+cu118` / `0.22.1+cu118` | `D:\TJK\sam2`，以 editable 方式安装 |
-| MoGe-3 | `D:\TJK\envs\moge3` | `2.7.1+cu128` / `0.22.1+cu128` | `D:\TJK\MoGe`，以 editable 方式安装 |
+| MoGe-3 | `D:\TJK\envs\moge3` | `2.10.0+cu128` / `0.25.0+cu128` | `D:\TJK\MoGe`，以 editable 方式安装 |
 
-YOLO 使用 `ultralytics==8.4.163`。SAM2 安装时设置 `SAM2_BUILD_CUDA=0`，不编译可选的连通区域 CUDA 扩展；模型主体仍使用 GPU。MoGe 使用 `triton-windows==3.3.1.post21`，FlexGEMM、utils3d-moge 和 pipeline 使用 `MoGe/pyproject.toml` 指定的 Git 提交。MoGe 的 Triton 内核需要支持 CUDA 12 的 NVIDIA 驱动，原驱动 497.17 不满足要求。
+YOLO 使用 `ultralytics==8.4.163`。SAM2 安装时设置 `SAM2_BUILD_CUDA=0`，不编译可选的连通区域 CUDA 扩展；模型主体仍使用 GPU。MoGe 使用 `triton-windows==3.6.0.post26`，FlexGEMM、utils3d-moge 和 pipeline 使用 `MoGe/pyproject.toml` 指定的 Git 提交。MoGe 的 Triton 内核需要支持 CUDA 12 的 NVIDIA 驱动；本机已从 497.17 更新至 NVIDIA Studio 616.92，安装退出码为 0，未执行重启。
 
 无需修改系统 Python 或执行 Conda 激活即可启动：
 
 ```powershell
 cd D:\TJK\TJK-UAV\src
-& D:\TJK\envs\yolo11\python.exe win/server.py --det yolo --depth moge3 --autofocus
+python win/server.py --det yolo --depth moge3 --autofocus
 ```
 
 `D:\TJK\envs` 已加入 Conda 的环境搜索目录，可通过 `D:\anaconda\Scripts\conda.exe env list` 查看 `yolo11`、`sam2`、`moge3`。SAM3 和 DA3 是可选方案，本次未创建对应环境或下载权重。
+
+完整依赖快照保存在 `win/requirements-yolo11.txt`、`win/requirements-sam2.txt` 和 `win/requirements-moge3.txt`。在本机重建某个环境时，先用 Conda 创建 Python 3.10 环境，再用该环境的 Python 安装对应文件。例如：
+
+```powershell
+& D:\anaconda\Scripts\conda.exe create --prefix D:\TJK\envs\sam2 python=3.10 pip -y
+& D:\TJK\envs\sam2\python.exe -m pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu118
+$env:SAM2_BUILD_CUDA = "0"
+& D:\TJK\envs\sam2\python.exe -m pip install --no-build-isolation -r D:\TJK\TJK-UAV\src\win\requirements-sam2.txt
+```
+
+SAM2 的 `--no-build-isolation` 使安装流程复用预先安装的 PyTorch，避免额外下载不同版本。快照中的 editable 路径指向本机源码，迁移目录时需同步修改。
+
+2026-11-01 本机验证：三个环境的 `pip check` 均通过；三个模型均完成 1920×1080 预热。使用 `yolo/videos/source/1010.mp4` 的真实视频帧，通过 HTTP 完成目标检测、三维定位、跟踪初始化、连续跟踪和不计算深度的拍摄存档。直接执行上述 `python win/server.py ...` 命令已输出 `Ready`，`/health` 的检测、深度和跟踪状态均为 `true`。这些检查未连接无人机或控制真实硬件。
 
 ## 2. 模型与官方链接
 

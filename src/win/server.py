@@ -3,11 +3,33 @@ import json
 import os
 import pickle
 import subprocess
+import sys
 import threading
 from contextlib import ExitStack, closing
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+
+CONDA_ENVS = Path(__file__).resolve().parents[3] / "envs"
+SERVER_PYTHON = CONDA_ENVS / "yolo11/python.exe"
+
+# The system Python may lack server dependencies; enter the configured environment first.
+if (
+    __name__ == "__main__"
+    and Path(sys.executable).resolve() != SERVER_PYTHON.resolve()
+):
+    if not SERVER_PYTHON.is_file():
+        raise FileNotFoundError(f"Server Python environment not found: {SERVER_PYTHON}")
+    server_process = subprocess.Popen(
+        [str(SERVER_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]],
+    )
+    try:
+        exit_code = server_process.wait()
+    except KeyboardInterrupt:
+        # Both console processes receive Ctrl+C; let the server close its model workers.
+        exit_code = server_process.wait()
+    raise SystemExit(exit_code)
 
 import cv2
 import numpy as np
@@ -19,7 +41,6 @@ SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 8790
 CLAHE_CLIP_LIMIT = 1.5
 CLAHE_TILE_GRID_SIZE = (8, 8)
-CONDA_ENVS = Path(__file__).resolve().parents[3] / "envs"
 MODEL_ENVS = {"yolo": "yolo11", "moge3": "moge3"}
 MODEL_SCRIPTS = {
     "sam3": "detector_sam3.py",
