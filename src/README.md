@@ -26,13 +26,13 @@
 
 ### 两种执行模式
 
-Windows 端命令在项目的 `src/` 目录执行，无人机端命令在 `~/TJK-UAV/src` 执行。先启动 Windows 推理服务并等待输出 `Ready`，再在无人机端启动交控任务及本项目任务端。
+Windows 端命令在本机 `D:\TJK\TJK-UAV\src` 目录执行，使用 `D:\TJK\envs\yolo11\python.exe` 启动服务；无人机端命令在 `~/TJK-UAV/src` 执行。先启动 Windows 推理服务并等待输出 `Ready`，再在无人机端启动交控任务及本项目任务端。
 
 **模式 A：返回检测点，自动跟踪取景拍摄**
 
 ```powershell
 # Windows 端：加载检测、深度模型及 SAM2 跟踪器
-python win/server.py --det yolo --depth moge3 --autofocus
+& D:\TJK\envs\yolo11\python.exe win/server.py --det yolo --depth moge3 --autofocus
 ```
 
 ```bash
@@ -52,7 +52,7 @@ python3 task/main.py --autofocus
 
 ```powershell
 # Windows 端
-python win/server.py --det yolo --depth moge3
+& D:\TJK\envs\yolo11\python.exe win/server.py --det yolo --depth moge3
 ```
 
 ```bash
@@ -68,7 +68,7 @@ python3 task/main.py --skip-exposure-point
 ### 启动与接口约定
 
 - 无人机端依赖 ROS 1、MAVROS、FAST-LIO 和 K40T，相机及 Windows 服务地址配置在 `hardware/k40t.py` 顶部。
-- Windows 端需准备 CUDA、模型源码与权重。`win/server.py` 默认从 `~/anaconda3/envs/` 选择 `yolo11`、`sam3`、`da3`、`sam2` 环境，MoGe 使用 `MoGe/.venv`；迁移部署时需核对各模型脚本的路径配置。
+- Windows 端 Conda 安装在 `D:\anaconda`，运行环境统一放在 `D:\TJK\envs`。`win/server.py` 自动从项目的同级 `envs/` 目录选择独立环境，MoGe 也使用 Conda，不再使用从其他机器复制的 `.venv`。
 - 交控任务启动命令见 `start.txt`。任务端依赖 `OFFBOARD` 状态运行，离开该模式时退出。
 - 推理服务默认端口为 `8790`，接口为 `/health`、`/detect`、`/track/init` 和 `/track`；跟踪接口需服务端启用 `--autofocus`。
 
@@ -81,6 +81,27 @@ python3 task/main.py --skip-exposure-point
 | `/recover_mission` | 发布 `True`，交还控制权并恢复航线任务 |
 
 `/initialpose` 使用交控自定义协议：`orientation.w` 承载航向角，单位为度。目标位姿与定位结果须使用同一 SLAM 坐标系。
+
+### 本机 Windows 环境
+
+三个环境均为 Python 3.10，模型源码及权重保持在原目录：
+
+| 模型 | Conda 环境 | PyTorch / torchvision | 源码或权重目录 |
+| --- | --- | --- | --- |
+| YOLO26l | `D:\TJK\envs\yolo11` | `2.7.1+cu118` / `0.22.1+cu118` | `D:\TJK\yolo\runs\bolt_yolo26l_10-22\weights\best.pt` |
+| SAM2.1 | `D:\TJK\envs\sam2` | `2.7.1+cu118` / `0.22.1+cu118` | `D:\TJK\sam2`，以 editable 方式安装 |
+| MoGe-3 | `D:\TJK\envs\moge3` | `2.7.1+cu128` / `0.22.1+cu128` | `D:\TJK\MoGe`，以 editable 方式安装 |
+
+YOLO 使用 `ultralytics==8.4.163`。SAM2 安装时设置 `SAM2_BUILD_CUDA=0`，不编译可选的连通区域 CUDA 扩展；模型主体仍使用 GPU。MoGe 使用 `triton-windows==3.3.1.post21`，FlexGEMM、utils3d-moge 和 pipeline 使用 `MoGe/pyproject.toml` 指定的 Git 提交。MoGe 的 Triton 内核需要支持 CUDA 12 的 NVIDIA 驱动，原驱动 497.17 不满足要求。
+
+无需修改系统 Python 或执行 Conda 激活即可启动：
+
+```powershell
+cd D:\TJK\TJK-UAV\src
+& D:\TJK\envs\yolo11\python.exe win/server.py --det yolo --depth moge3 --autofocus
+```
+
+`D:\TJK\envs` 已加入 Conda 的环境搜索目录，可通过 `D:\anaconda\Scripts\conda.exe env list` 查看 `yolo11`、`sam2`、`moge3`。SAM3 和 DA3 是可选方案，本次未创建对应环境或下载权重。
 
 ## 2. 模型与官方链接
 

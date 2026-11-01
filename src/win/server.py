@@ -19,8 +19,8 @@ SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 8790
 CLAHE_CLIP_LIMIT = 1.5
 CLAHE_TILE_GRID_SIZE = (8, 8)
-CONDA_ENVS = Path.home() / "anaconda3/envs"
-MOGE_ENV = Path(__file__).resolve().parents[3] / "MoGe/.venv"
+CONDA_ENVS = Path(__file__).resolve().parents[3] / "envs"
+MODEL_ENVS = {"yolo": "yolo11", "moge3": "moge3"}
 MODEL_SCRIPTS = {
     "sam3": "detector_sam3.py",
     "yolo": "detector_yolo.py",
@@ -40,20 +40,14 @@ class ModelProcess:
     ):
         script = MODEL_SCRIPTS[name]
         env = os.environ.copy()
-        if name == "moge3":
-            # uv has already created this environment; do not sync it on server startup.
-            python = MOGE_ENV / "Scripts/python.exe"
-            for key in ("CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL", "PYTHONHOME"):
-                env.pop(key, None)
-            env["VIRTUAL_ENV"] = str(MOGE_ENV)
-            paths = [str(python.parent)]
-        else:
-            env_name = "yolo11" if name == "yolo" else name
-            python = CONDA_ENVS / env_name / "python.exe"
-            env.pop("VIRTUAL_ENV", None)
-            env["CONDA_PREFIX"] = str(python.parent)
-            paths = [str(python.parent), str(python.parent / "Library/bin"),
-                     str(python.parent / "Scripts")]
+        env_name = MODEL_ENVS.get(name, name)
+        python = CONDA_ENVS / env_name / "python.exe"
+        for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
+            env.pop(key, None)
+        env["CONDA_PREFIX"] = str(python.parent)
+        env["CONDA_DEFAULT_ENV"] = str(python.parent)
+        paths = [str(python.parent), str(python.parent / "Library/bin"),
+                 str(python.parent / "Scripts")]
         if not python.is_file():
             raise FileNotFoundError(f"Python environment for {name} not found: {python}")
         env["PYTHONIOENCODING"] = "utf-8"
@@ -270,7 +264,7 @@ def parse_args(argv=None):
         "--depth",
         choices=("moge3", "da3"),
         required=True,
-        help="Depth model (moge3 uses its uv environment; da3 uses conda)",
+        help="Depth model (each model uses its own conda environment)",
     )
     parser.add_argument(
         "--ref-img",
