@@ -4,6 +4,8 @@ import threading
 import time
 
 import rospy
+
+from util.timing import timed
 from nav_msgs.msg import Odometry
 
 
@@ -35,6 +37,7 @@ def _update_pose(message):
     _ready.set()
 
 
+@timed("uav.pose_get")
 def get_pose():
     """Wait for a fresh pose; return it with its monotonic receipt time."""
     global _subscriber

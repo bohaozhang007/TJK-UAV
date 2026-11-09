@@ -6,7 +6,7 @@ python win/server.py --det yolo --depth moge3 --autofocus
 uav:
 roslaunch /home/jkhk/jkhk_robot/release/mission/share/uav_nav/launch/mission.launch
 
-cd ~/TJK-UAV/src
+cd ~/TJK-UAV2/src
 python3 task/main.py --autofocus
 # python3 task/main.py --skip-exposure-point
 

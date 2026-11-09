@@ -39,11 +39,13 @@ class TeeStream:
 
 
 @contextmanager
-def save_terminal_output():
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime(TIMESTAMP_FORMAT)
-    run_dir = LOG_DIR / timestamp
-    run_dir.mkdir()
+def save_terminal_output(run_dir=None):
+    """Tee Python stdout/stderr to a run's log.txt, including background threads."""
+    if run_dir is None:
+        timestamp = datetime.now().strftime(TIMESTAMP_FORMAT)
+        run_dir = LOG_DIR / timestamp
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / "log.txt"
     stdout, stderr = sys.stdout, sys.stderr
     lock = threading.RLock()

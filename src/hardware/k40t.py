@@ -11,21 +11,26 @@ import warnings
 
 import cv2
 import rospy
+
+from util.timing import timed, timed_step
+from util.http_timing import request_json
 from std_msgs.msg import Float64MultiArray, Int16MultiArray, UInt8
 
+from hardware.video_stream import (
+    RTSP_URL,
+    STREAM_OPEN_TIMEOUT_S,
+    STREAM_READ_TIMEOUT_S,
+    open_stream,
+)
 
-# Video stream and frame read timeouts.
-RTSP_URL = "rtsp://192.168.144.64:558/live/single"
 
 # Image read timeout.
-STREAM_OPEN_TIMEOUT_S = 3.0
-STREAM_READ_TIMEOUT_S = 1.0
 FIRST_FRAME_TIMEOUT_S = 5.0
 FRAME_WAIT_TIMEOUT_S = 0.5
 STREAM_CLOSE_TIMEOUT_S = 5.0
 
 # Windows inference server and JPEG quality.
-WINDOWS_IP = "192.168.31.66"
+WINDOWS_IP = "192.168.31.12"
 DETECTOR_PORT = 8790
 JPEG_QUALITY = 95
 
@@ -117,6 +122,7 @@ def _init_ros_control():
             ])
 
 
+@timed("uav.ros_publish_and_settle")
 def _publish_ros(
     publisher,
     message,
@@ -132,37 +138,37 @@ def _publish_ros(
             raise RuntimeError(f"No K40T control subscriber on {topic}")
         rospy.sleep(0.05)
     publisher.publish(message)
-    rospy.sleep(ROS_SETTLE_TIME_S)
+    with timed_step("uav.camera_settle", topic=topic, configured_s=ROS_SETTLE_TIME_S):
+        rospy.sleep(ROS_SETTLE_TIME_S)
 
 
 def _read_stream():
     """Own the RTSP connection and replace the cached frame continuously."""
     global _frame, _error
-    cap = cv2.VideoCapture()
+    cap = None
     try:
-        if not cap.open(
-            RTSP_URL,
-            cv2.CAP_FFMPEG,
-            [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(STREAM_OPEN_TIMEOUT_S * 1000),
-             cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(STREAM_READ_TIMEOUT_S * 1000)],
-        ):
-            raise RuntimeError("Failed to open K40T stream")
+        cap = open_stream()
         while not _stop.is_set():
             ok, img = cap.read()
             if (
                 not ok
                 or img is None
             ):
-                raise RuntimeError("Failed to read K40T stream")
+                raise RuntimeError(
+                    f"Failed to decode K40T frame: {RTSP_URL}; "
+                    f"OpenCV={cv2.__version__}, read timeout={STREAM_READ_TIMEOUT_S:g}s"
+                )
             _frame = img, time.monotonic()
             _ready.set()
     except Exception as exc:
         _error = exc
         _ready.set()
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
 
 
+@timed("uav.camera_get_img")
 def get_img():
     """Wait for a new frame; return its image and monotonic receipt time."""
     global _worker, _frame, _error
@@ -181,9 +187,12 @@ def get_img():
             _error is None
             and not _ready.wait(timeout=timeout)
         ):
-            raise RuntimeError(f"K40T image timeout of {timeout:g} s exceeded")
+            raise RuntimeError(
+                f"K40T image timeout of {timeout:g}s exceeded: {RTSP_URL}; "
+                f"reader_alive={_worker.is_alive()}, first_frame={_frame is None}"
+            )
         if _error is not None:
-            raise RuntimeError("K40T stream failed") from _error
+            raise RuntimeError(f"K40T stream failed: {type(_error).__name__}: {_error}") from _error
         if _stop.is_set():
             raise RuntimeError("K40T stream is closing")
         img, received = _frame
@@ -241,16 +250,21 @@ def detect_img(
         headers["X-Target-ID"] = str(target_id)
     if frame_id is not None:
         headers["X-Frame-ID"] = str(frame_id)
-    request = urllib.request.Request(
-        f"http://{WINDOWS_IP}:{DETECTOR_PORT}/detect",
-        encode_img(img),
-        headers,
-    )
-    http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with http.open(request, timeout=120) as response:
-        return json.load(response)
+    try:
+        return request_json(
+            f"http://{WINDOWS_IP}:{DETECTOR_PORT}/detect",
+            headers, lambda: encode_img(img),
+            target_id=target_id, frame_id=frame_id,
+            width=int(img.shape[1]), height=int(img.shape[0]),
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Detection request failed: http://{WINDOWS_IP}:{DETECTOR_PORT}/detect; target={target_id}, "
+            f"frame={frame_id}; {type(exc).__name__}: {exc}"
+        ) from exc
 
 
+@timed("uav.tracker_health")
 def check_tracker():
     """Require a running tracker that has completed model warmup."""
     http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -258,7 +272,10 @@ def check_tracker():
         with http.open(f"http://{WINDOWS_IP}:{DETECTOR_PORT}/health", timeout=120) as response:
             status = json.load(response)
     except Exception as exc:
-        raise RuntimeError(f"Failed to confirm tracker readiness: {exc}") from exc
+        raise RuntimeError(
+            f"Failed to confirm tracker readiness: http://{WINDOWS_IP}:{DETECTOR_PORT}/health; "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     if status.get("tracker_ready") is not True:
         raise RuntimeError("Tracker is unavailable; start the Windows server with --autofocus and wait for Ready")
 
@@ -276,14 +293,18 @@ def track_img(
     if box is not None:
         headers["X-Box"] = json.dumps(box, allow_nan=False)
         path = "/track/init"
-    request = urllib.request.Request(
-        f"http://{WINDOWS_IP}:{DETECTOR_PORT}{path}",
-        encode_img(img),
-        headers,
-    )
-    http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with http.open(request, timeout=120) as response:
-        return json.load(response)
+    try:
+        return request_json(
+            f"http://{WINDOWS_IP}:{DETECTOR_PORT}" + path,
+            headers, lambda: encode_img(img),
+            target_id=target_id, frame_id=None,
+            width=int(img.shape[1]), height=int(img.shape[0]),
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Tracking request failed: http://{WINDOWS_IP}:{DETECTOR_PORT}{path}; target={target_id}; "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def crc16(data):
@@ -432,6 +453,7 @@ def camera_request_once(
         )
 
 
+@timed("uav.disable_osd")
 def disable_osd():
     return camera_request(
         0x000314,
@@ -440,6 +462,7 @@ def disable_osd():
     )
 
 
+@timed("uav.gimbal_read")
 def get_gimbal():
     if USE_ROS_CONTROL:
         _init_ros_control()
@@ -453,6 +476,7 @@ def get_gimbal():
     )
 
 
+@timed("uav.gimbal_set")
 def set_gimbal(
     pitch_deg,
     yaw_deg,
@@ -501,6 +525,7 @@ def set_gimbal(
     return result
 
 
+@timed("uav.zoom_read")
 def get_zoom():
     """Return the last commanded zoom in ROS mode, measured zoom in UDP mode."""
     if USE_ROS_CONTROL:
@@ -514,6 +539,7 @@ def get_zoom():
     )
 
 
+@timed("uav.zoom_set")
 def set_zoom(ratio):
     """Set zoom; ROS waits a fixed delay, UDP waits for completion feedback."""
     global _ros_zoom
